@@ -70,6 +70,11 @@ class GraspPhaseManager:
         ]
         self._current = 0
         self._final_result = None  # type: Optional[Dict[str, Any]]
+        # Every completed phase result (passed or failed), in order. The
+        # simulation loop only sees the FINAL result from check_frame; a
+        # caller that needs per-phase transitions (the free-space variant
+        # restores gravity once Grasping is done) reads this list.
+        self.completed = []  # type: List[Dict[str, Any]]
 
     _STABILITY_INDEX = 0
     _GRASPING_INDEX = 2
@@ -122,6 +127,7 @@ class GraspPhaseManager:
             return None
 
         # Phase completed
+        self.completed.append(result)
         if result.get("failed", False):
             self._final_result = result
             return result

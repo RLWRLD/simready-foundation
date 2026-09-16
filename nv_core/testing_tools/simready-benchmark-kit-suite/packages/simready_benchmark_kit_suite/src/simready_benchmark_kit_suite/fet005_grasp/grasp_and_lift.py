@@ -108,6 +108,18 @@ from simready_benchmark.core.decorator import test
         "asset_load_timeout": 30,
         "settle_frames": 5,
         "show_gripper": True,
+        # DexBench free-space variant (2026-09-15). False = the standard
+        # floor-standing test, unchanged. True = no settle drop: the asset is
+        # floated with its bbox bottom `free_space_height` metres above the
+        # floor at its authored orientation, physics starts at zero gravity,
+        # the pads are built at the line endpoints and closed as usual
+        # (ramp + close_settle), then gravity is restored to 9.81 m/s^2 and
+        # the lift / hold / shake / hold / open / drop phases run unchanged.
+        # The Grasping-phase floor gate (both endpoints above floor_level)
+        # is skipped so vertical closing lines are allowed. Every result of
+        # this mode carries `variant: free-space` in its metrics and messages.
+        "free_space": False,
+        "free_space_height": 0.5,
     },
     max_duration=600,
 )
@@ -136,6 +148,19 @@ async def test_grasp_and_lift(ctx):
     from simready_benchmark_kit_suite.fet005_grasp.grasp_checks import run_pre_checks
 
     cfg = ctx.config
+
+    # Free-space variant: stamp the result so it can never be read as the
+    # standard floor-standing test (metric + step now, message prefix below).
+    free_space = bool(cfg.get("free_space", False))
+    variant_tag = "[variant: free-space] " if free_space else ""
+    if free_space:
+        ctx.add_metric("variant", "free-space")
+        ctx.add_metric("free_space_height_m", float(cfg.get("free_space_height", 0.5)))
+        ctx.step(
+            "variant: free-space -- NOT the standard FET005 floor-standing test: asset floated "
+            "%.2f m above the floor, jaws closed at zero gravity, gravity restored before lift"
+            % float(cfg.get("free_space_height", 0.5))
+        )
 
     # --- Load asset + room (before pre-checks, same as FET003/FET004) ---
     ctx.set_settle_frames(cfg["settle_frames"])
@@ -186,9 +211,9 @@ async def test_grasp_and_lift(ctx):
         if not passed:
             num_failed += 1
             failures.append((id_path, scene_result.get("message", "unknown")))
-            ctx.log("FAILED: %s -- %s" % (id_path, scene_result["message"]))
+            ctx.log("%sFAILED: %s -- %s" % (variant_tag, id_path, scene_result["message"]))
         else:
-            ctx.log("PASSED: %s" % id_path)
+            ctx.log("%sPASSED: %s" % (variant_tag, id_path))
 
     # --- Overall result ---
     total = len(identifiers)
@@ -201,7 +226,7 @@ async def test_grasp_and_lift(ctx):
     # identifier failed. Per-identifier failures are still logged above
     # and captured in metrics.
     if num_passed == 0:
-        lines = ["All %d grasp identifier(s) failed." % total]
+        lines = ["%sAll %d grasp identifier(s) failed." % (variant_tag, total)]
         for path, reason in failures:
             lines.append("  %s: %s" % (path, reason))
         lines.append("")
@@ -237,10 +262,12 @@ async def test_grasp_and_lift(ctx):
         )
         ctx.fail("\n".join(lines))
     elif num_failed > 0:
-        summary = "Grasp passed on %d of %d identifier(s); %d failed." % (num_passed, total, num_failed)
+        summary = "%sGrasp passed on %d of %d identifier(s); %d failed." % (variant_tag, num_passed, total, num_failed)
         ctx.log(summary)
         for path, reason in failures:
-            ctx.warn("%s: %s" % (path, reason))
+            ctx.warn("%s%s: %s" % (variant_tag, path, reason))
+    elif free_space:
+        ctx.step("%sAll %d grasp identifier(s) passed." % (variant_tag, total))
 
 
 async def _test_one_identifier(ctx, cfg, identifier_path, safe_name, asset_prim_path):
@@ -258,18 +285,43 @@ async def _test_one_identifier(ctx, cfg, identifier_path, safe_name, asset_prim_
 
     stage = omni.usd.get_context().get_stage()
 
+    free_space = bool(cfg.get("free_space", False))
+    float_height = float(cfg.get("free_space_height", 0.5))
+
     # Setup room -- place asset so bbox bottom sits just above ground.
     # This compensates for pivots below the mesh (V1 approach: let gravity
     # settle the object during the stability phase).
+    # Free-space variant: same placement code, but the bbox bottom goes
+    # `free_space_height` above the floor and nothing settles (zero g).
     room = ctx.scene.add_room()
     room.auto_size(ctx.scene.asset)
     room.set_color(0.3, 0.3, 0.3)
     room.show_ground()
-    _place_asset_on_ground(stage, asset_prim_path, margin=0.01)
+    if free_space:
+        # The previous identifier's gripper is only removed at the next
+        # "rebuild", i.e. AFTER the asset has been re-placed and its Stability
+        # phase run: pads left closed on the old line overlap the re-placed
+        # asset and PhysX's depenetration launches it (at zero g it never
+        # stops). Remove the stale gripper before placing the asset.
+        await _remove_stale_gripper(ctx, stage)
+        await _float_asset(ctx, stage, asset_prim_path, float_height)
+    else:
+        _place_asset_on_ground(stage, asset_prim_path, margin=0.01)
 
     ctx.scene.lighting.add_dome(intensity=1000.0)
 
-    physics = ctx.scene.add_physics(gravity=9.81, fps=float(cfg["physics_fps"]))
+    # Free-space variant: zero gravity until the jaws have closed (restored
+    # by the phase hook below); the floating body is kept from sleeping so
+    # the gravity change is never ignored by a dormant actor.
+    physics = ctx.scene.add_physics(gravity=0.0 if free_space else 9.81, fps=float(cfg["physics_fps"]))
+    if free_space:
+        n_bodies = _keep_rigid_bodies_awake(stage, asset_prim_path)
+        note = (
+            "variant: free-space -- asset floated with bbox bottom %.2f m above the floor at its "
+            "authored orientation, gravity 0 until the jaws close (%d rigid body(ies) kept awake)"
+            % (float_height, n_bodies)
+        )
+        ctx.log(note)
 
     configure_physx_determinism(stage, float(cfg["physics_fps"]))
     # No fix_mesh_approximations here: run the asset's collision AS AUTHORED,
@@ -302,9 +354,26 @@ async def _test_one_identifier(ctx, cfg, identifier_path, safe_name, asset_prim_
     physics.play()
 
     ctx.step("Running 9-phase grasp simulation")
-    result = await grasp_scene.run_simulation(cfg, safe_name, physics)
+    if free_space:
+        result = await grasp_scene.run_simulation(
+            cfg,
+            safe_name,
+            physics,
+            on_phase_complete=_make_free_space_hook(ctx, physics, stage, asset_prim_path, safe_name),
+            floor_check=False,
+        )
+    else:
+        result = await grasp_scene.run_simulation(cfg, safe_name, physics)
 
     physics.stop()
+    if free_space:
+        # Let PhysX's reset-on-stop land before the next identifier is placed:
+        # the pose write-back is deferred by a frame, and the placement of the
+        # next identifier would otherwise read this identifier's final pose.
+        from isaacsim.core.utils.stage import update_stage_async
+
+        for _ in range(3):
+            await update_stage_async()
 
     return result
 
@@ -338,3 +407,190 @@ def _place_asset_on_ground(stage, asset_prim_path, margin=0.01):
     xformable = UsdGeom.Xformable(root_prim)
     xformable.ClearXformOpOrder()
     xformable.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, z_offset))
+
+
+# ----------------------------------------------------------------------
+# Free-space variant helpers (only reached when cfg["free_space"] is True)
+# ----------------------------------------------------------------------
+
+
+async def _remove_stale_gripper(ctx, stage):
+    # type: (Any, Any) -> None
+    """Delete the gripper articulation left by the previous identifier, if any."""
+    from isaacsim.core.utils.stage import update_stage_async
+    from simready_benchmark_kit_suite.fet005_grasp.grasp_robot import GraspRobot
+
+    old = stage.GetPrimAtPath(GraspRobot.ROBOT_PATH)
+    if old and old.IsValid():
+        stage.RemovePrim(GraspRobot.ROBOT_PATH)
+        await update_stage_async()
+        ctx.log("variant: free-space -- removed the previous identifier's gripper before placing the asset")
+
+
+def _bbox_bottom(stage, asset_prim_path):
+    # type: (Any, str) -> float
+    from pxr import Usd, UsdGeom
+
+    prim = stage.GetPrimAtPath(asset_prim_path)
+    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render", "proxy"])
+    return float(bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox().GetMin()[2])
+
+
+async def _float_asset(ctx, stage, asset_prim_path, float_height, tolerance=0.005):
+    # type: (Any, Any, str, float, float) -> float
+    """Place the asset with its bbox bottom `float_height` above the floor and verify it.
+
+    `_place_asset_on_ground` derives the root offset from the CURRENT world
+    bbox. Between two identifiers that bbox can still hold the previous run's
+    simulated pose (PhysX restores the authored pose one frame after stop), so
+    the offset would be computed against a stale pose. Place, pump a frame,
+    measure, and repeat until the bottom really sits at float_height.
+    """
+    from isaacsim.core.utils.stage import update_stage_async
+
+    bottom = float("nan")
+    for attempt in range(1, 6):
+        _place_asset_on_ground(stage, asset_prim_path, margin=float_height)
+        await update_stage_async()
+        bottom = _bbox_bottom(stage, asset_prim_path)
+        if abs(bottom - float_height) <= tolerance:
+            break
+    ctx.log(
+        "variant: free-space -- asset bbox bottom at z=%.3f m (target %.2f m) after %d placement pass(es)"
+        % (bottom, float_height, attempt)
+    )
+    if abs(bottom - float_height) > tolerance:
+        ctx.warn("variant: free-space -- asset could not be floated: bbox bottom z=%.3f m, target %.2f m" % (bottom, float_height))
+    return bottom
+
+
+def _keep_rigid_bodies_awake(stage, asset_prim_path):
+    # type: (Any, str) -> int
+    """Set physxRigidBody:sleepThreshold = 0 on every rigid body under the asset.
+
+    A body floating at zero gravity is perfectly still, so PhysX would put it
+    to sleep before the pads arrive; a sleeping actor does not feel a later
+    gravity change. Returns the number of bodies touched.
+    """
+    from pxr import PhysxSchema, Usd, UsdPhysics
+
+    root = stage.GetPrimAtPath(asset_prim_path)
+    if not root or not root.IsValid():
+        return 0
+    count = 0
+    for prim in Usd.PrimRange(root):
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            api = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+            api.CreateSleepThresholdAttr().Set(0.0)
+            count += 1
+    return count
+
+
+def _wake_rigid_bodies(stage, asset_prim_path):
+    # type: (Any, str) -> str
+    """Ask PhysX to wake every rigid body under the asset; returns a short status."""
+    try:
+        import omni.physx
+        import omni.usd
+        from pxr import Usd, UsdPhysics
+
+        physx = omni.physx.get_physx_interface()
+        if not hasattr(physx, "wake_up"):  # not in every PhysX binding (absent in Kit 110 / Isaac 6.0.1)
+            return "kept awake by sleepThreshold=0"
+        stage_id = omni.usd.get_context().get_stage_id()
+        root = stage.GetPrimAtPath(asset_prim_path)
+        woken = 0
+        for prim in Usd.PrimRange(root):
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                physx.wake_up(stage_id, str(prim.GetPath()))
+                woken += 1
+        return "woke %d body(ies)" % woken
+    except Exception as exc:  # the sleepThreshold=0 authored before play() is the real guarantee
+        return "wake_up failed (%s); kept awake by sleepThreshold=0" % exc
+
+
+def _asset_pose(stage, asset_prim_path):
+    # type: (Any, str) -> Optional[Tuple[Any, Any]]
+    """(world translation Gf.Vec3d, world rotation Gf.Quatd) of the asset body."""
+    from pxr import Usd, UsdGeom
+
+    prim = stage.GetPrimAtPath(asset_prim_path)
+    if not prim or not prim.IsValid():
+        return None
+    xf = UsdGeom.XformCache(Usd.TimeCode.Default()).GetLocalToWorldTransform(prim).RemoveScaleShear()
+    return (xf.ExtractTranslation(), xf.ExtractRotationQuat())
+
+
+def _pose_delta(before, after):
+    # type: (Any, Any) -> Tuple[float, float]
+    """(translation shift in metres, rotation angle in degrees) between two poses."""
+    import math
+
+    if before is None or after is None:
+        return (0.0, 0.0)
+    shift = float((after[0] - before[0]).GetLength())
+    q = after[1] * before[1].GetInverse()
+    w = max(-1.0, min(1.0, abs(float(q.GetReal()))))
+    return (shift, math.degrees(2.0 * math.acos(w)))
+
+
+def _make_free_space_hook(ctx, physics, stage, asset_prim_path, safe_name):
+    # type: (...) -> Any
+    """Phase-completion hook for the free-space variant.
+
+    GripperPositioning done  -> remember the asset pose before the jaws move.
+    Grasping done (closed)   -> restore gravity to 9.81 m/s^2, wake the asset,
+                                report how far the zero-g closure pushed / spun it.
+    Opening done (released)  -> switch the pad cubes' collision off, so the
+                                Dropping check measures the release itself: on a
+                                vertical closing line the lower pad sits under
+                                the object and would otherwise catch it (the
+                                object rests on the retracted pad and "falls"
+                                only by the joint travel).
+    """
+    state = {"pose_before_close": None}
+
+    def pad_gap_mm(scene, tracker):
+        # distance left between the two pad faces = what the jaws are pinching
+        try:
+            props = scene.scene_properties
+            grasp_dist = float(props["gripper_position_info"]["grasp_distance"])
+            pad = float(props["gripper_pad_properties"]["scale"])
+            most_closed = float(tracker.get_most_closed_joint_position())
+            return (grasp_dist - pad - 2.0 * abs(most_closed)) * 1000.0
+        except Exception:
+            return float("nan")
+
+    def hook(phase_result, scene, tracker):
+        name = phase_result.get("phase_name")
+        if phase_result.get("failed", False):
+            ctx.log(
+                "[variant: free-space] %s failed at frame %d; pad faces %.1f mm apart at the most-closed point"
+                % (name, int(phase_result.get("frame", -1)), pad_gap_mm(scene, tracker))
+            )
+            return
+        if name == "GripperPositioning":
+            state["pose_before_close"] = _asset_pose(stage, asset_prim_path)
+        elif name == "Grasping":
+            physics.set_gravity(9.81)
+            wake = _wake_rigid_bodies(stage, asset_prim_path)
+            shift, rot = _pose_delta(state["pose_before_close"], _asset_pose(stage, asset_prim_path))
+            gap = pad_gap_mm(scene, tracker)
+            ctx.add_metric("grasp_%s_free_space_closure_shift_m" % safe_name, round(shift, 4))
+            ctx.add_metric("grasp_%s_free_space_closure_rotation_deg" % safe_name, round(rot, 2))
+            ctx.add_metric("grasp_%s_free_space_pad_gap_after_close_mm" % safe_name, round(gap, 1))
+            note = (
+                "variant: free-space -- jaws closed at zero g: the asset shifted %.1f mm and rotated "
+                "%.1f deg during closure, pad faces %.1f mm apart (estimated from joint travel); gravity "
+                "restored to 9.81 m/s^2 at frame %d (%s)" % (shift * 1000.0, rot, gap, int(phase_result.get("frame", -1)), wake)
+            )
+            ctx.log(note)  # ctx.log is what result.json keeps (and it reaches the event stream too)
+        elif name == "Opening":
+            try:
+                scene._set_pad_collision_enabled(False)
+                ctx.log("variant: free-space -- gripper opened at frame %d; pad collision switched off so the drop "
+                        "check measures the release, not the lower pad acting as a shelf" % int(phase_result.get("frame", -1)))
+            except Exception as exc:
+                ctx.log("[variant: free-space] could not disable pad collision after opening: %s" % exc)
+
+    return hook
