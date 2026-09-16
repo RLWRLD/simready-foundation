@@ -412,9 +412,16 @@ class GraspScene:
     # Simulation loop
     # ------------------------------------------------------------------
 
-    async def run_simulation(self, cfg, identifier_name, physics=None):
-        # type: (Dict[str, Any], str, Any) -> Dict[str, Any]
-        """Run the 9-phase simulation loop. Returns the final result dict."""
+    async def run_simulation(self, cfg, identifier_name, physics=None, on_phase_complete=None, floor_check=True):
+        # type: (Dict[str, Any], str, Any, Any, bool) -> Dict[str, Any]
+        """Run the 9-phase simulation loop. Returns the final result dict.
+
+        ``on_phase_complete(phase_result, scene, tracker)`` (optional) is called
+        with every phase result (passed or failed) the frame it is produced;
+        ``floor_check=False`` skips the Grasping-phase gate that fails a grasp
+        line with an endpoint at or below floor_level. Both defaults reproduce
+        the standard test.
+        """
         ctx = self._ctx
         fps = int(cfg["physics_fps"])
         capture_fps = int(cfg.get("capture_fps", 20))
@@ -427,6 +434,7 @@ class GraspScene:
         floor_level = float(cfg.get("floor_level", 0.0))
         log_interval = fps  # log diagnostics once per second
         snapped = False  # True after gripper is snapped to position
+        phases_seen = 0  # completed-phase results already handed to on_phase_complete
 
         asset_prim = self.stage.GetPrimAtPath(self._asset_mount_path)
         label = "grasp_and_lift_%s" % identifier_name
@@ -490,7 +498,7 @@ class GraspScene:
                 # Check ground reachability only during Grasping phase
                 # (not during Stability -- object may tumble temporarily).
                 # V1 does not have this check at all.
-                if phases.current_phase_name == "Grasping" and not self.is_grasp_line_reachable(floor_level):
+                if floor_check and phases.current_phase_name == "Grasping" and not self.is_grasp_line_reachable(floor_level):
                     result = {
                         "phase_name": "Tracking",
                         "frame": frame,
@@ -542,6 +550,16 @@ class GraspScene:
 
             # Run phase check
             phase_result = phases.check_frame(frame, time, self, tracker)
+            # Per-phase transitions: the manager only returns the FINAL result,
+            # so completed phases are read from its list (each exactly once).
+            if on_phase_complete is not None:
+                while phases_seen < len(phases.completed):
+                    done = phases.completed[phases_seen]
+                    phases_seen += 1
+                    try:
+                        on_phase_complete(done, self, tracker)
+                    except Exception as exc:
+                        ctx.log("[phase-hook] %s: %s" % (done.get("phase_name", "?"), exc))
             if phase_result is not None:
                 ctx.step(
                     "[%s] %s"
