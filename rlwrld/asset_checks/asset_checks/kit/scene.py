@@ -64,9 +64,16 @@ def select_runtime_variant(stage, asset_path, engine):
     variant_set.SetVariantSelection(option)
     report["selected"] = {"variantSet": entry["variantSetName"], "option": option}
 
-    variant_spec = layer.GetPrimAtPath(asset_root).variantSets[entry["variantSetName"]].variants[option].primSpec
-    for payload in variant_spec.payloadList.GetAddedOrExplicitItems():
-        payload_layer = Sdf.Layer.FindOrOpen(layer.ComputeAbsolutePath(payload.assetPath))
+    # The selected variant's specs, wherever the asset authors them (its root layer, a sublayer, a
+    # reference): the composed prim's stack holds every spec that contributes, variant specs included.
+    selection = (entry["variantSetName"], option)
+    variant_specs = [spec for spec in stage.GetPrimAtPath(ASSET_PRIM).GetPrimStack()
+                     if spec.path.ContainsPrimVariantSelection() and spec.path.GetVariantSelection() == selection]
+    if not variant_specs:
+        raise RuntimeError(f"selected {selection} but no spec of it contributes to {ASSET_PRIM}")
+    payloads = [(spec.layer, payload) for spec in variant_specs for payload in spec.payloadList.GetAddedOrExplicitItems()]
+    for spec_layer, payload in payloads:
+        payload_layer = Sdf.Layer.FindOrOpen(spec_layer.ComputeAbsolutePath(payload.assetPath))
         specs = [payload_layer.pseudoRoot]
         while specs:
             spec = specs.pop()
