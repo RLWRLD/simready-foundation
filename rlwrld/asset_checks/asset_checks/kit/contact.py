@@ -53,6 +53,18 @@ def apply(stage, profile):
             prim.CreateAttribute("mjc:option:impratio", Sdf.ValueTypeNames.Float).Set(profile["impratio"])
             prim.CreateAttribute("mjc:option:cone", Sdf.ValueTypeNames.Token).Set(profile["cone"])
             report["scenes"].append(str(prim.GetPath()))
+    # Isaac Sim hands its own MuJoCo solver config to SolverMuJoCo. Where that config carries these
+    # options (Isaac Sim 6.0.1: cone and impratio; 6.1.0 has neither) it overrides the USD values:
+    # measured on 6.0.1, impratio stayed 1.0 with mjc:option:impratio = 10 alone. So they are set on
+    # Isaac's config as well; measure() shows what the compiled model got.
+    import isaacsim.physics.newton as isaac_newton
+
+    solver_cfg = isaac_newton.acquire_stage().cfg.solver_cfg
+    report["isaac_solver_cfg"] = {}
+    for key in ("impratio", "cone"):
+        if hasattr(solver_cfg, key):
+            setattr(solver_cfg, key, profile[key])
+            report["isaac_solver_cfg"][key] = profile[key]
     for pad_root in (GraspRobot.LEFT_PAD, GraspRobot.RIGHT_PAD):
         for prim in Usd.PrimRange(stage.GetPrimAtPath(pad_root)) if stage.GetPrimAtPath(pad_root) else []:
             if not prim.HasAPI(UsdPhysics.CollisionAPI):
