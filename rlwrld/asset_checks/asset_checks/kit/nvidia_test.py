@@ -71,7 +71,7 @@ class Recorder:
         self.prev = mats
 
 
-def _classes(engine, asset_path, recorder, contact_profile):
+def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None):
     from simready_benchmark_engine_kit.kit_engine_proxy import BoundsResult, KitEngineProxy
     from simready_benchmark_engine_kit.scene_handle import KitSceneHandle
 
@@ -143,6 +143,7 @@ def _classes(engine, asset_path, recorder, contact_profile):
             return BoundsResult(tuple(mn), tuple(mx))
 
         solver_seen = []  # what MuJoCo compiled, read on the first step after each play (Newton)
+        physics_dumps = []  # contact.dump() of the same moment, when the run asks for it
         measured_plays = 0
 
         async def physics_step(self):
@@ -153,6 +154,8 @@ def _classes(engine, asset_path, recorder, contact_profile):
 
                 Proxy.measured_plays = Scene.plays
                 Proxy.solver_seen.append(contact.measure())
+                if dump_dir is not None:
+                    Proxy.physics_dumps.append(contact.dump(f"{dump_dir}/physics_play{Scene.plays}.npz"))
 
     return Scene, Proxy
 
@@ -181,7 +184,7 @@ async def run(req):
         raise ValueError(f"unknown contact profile {profile_name!r}; known: {sorted(contact.PROFILES)}")
     profile = contact.PROFILES[profile_name] if engine == "newton" else None  # PR #2's settings are MuJoCo's
     recorder = Recorder(engine, 1.0 / float(config.get("physics_fps", 240)))
-    Scene, Proxy = _classes(engine, asset, recorder, profile)
+    Scene, Proxy = _classes(engine, asset, recorder, profile, out if req.get("dump_physics") else None)
 
     stage = await scene_mod.new_stage()
     handle = Scene(stage)
@@ -210,6 +213,7 @@ async def run(req):
         "test_exception": error, "nvidia_api_supplied": supplied, "variant": Scene.variant,
         "contact_profile": profile_name if profile is not None else "stock", "contact_applied": Scene.contact_applied,
         "solver_seen": Proxy.solver_seen,
+        "physics_dumps": Proxy.physics_dumps,
         "engine_observed": recorder.engine_observed, "pose_source": sorted(set(recorder.traj["source"])),
         "rigid_bodies": recorder.bodies, "trajectory": recorder.traj,
     }

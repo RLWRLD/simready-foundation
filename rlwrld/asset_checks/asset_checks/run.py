@@ -61,12 +61,13 @@ def code_version():
     return {"commit": head, "dirty": dirty}
 
 
-def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, validated, contact_profile):
+def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, validated, contact_profile, dump_physics=False):
     out_dir.mkdir(parents=True)
     expected = envs.gpu_settings(gpu)
     request = {"asset": str(asset), "experiment": experiment, "engine": env.engine, "env": env.name,
                "out_dir": str(out_dir), "expected_settings": expected, "capture_px": capture_px,
-               "validated_features": validated, "contact_profile": contact_profile, "code": code_version()}
+               "validated_features": validated, "contact_profile": contact_profile, "dump_physics": dump_physics,
+               "code": code_version()}
     (out_dir / "request.json").write_text(json.dumps(request, indent=1))
     cmd = [str(bench / "isaac-run"), env.venv, str(bench / f".venv-{env.venv}" / "bin" / "isaacsim"), env.experience,
            "--exec", f"{ENTRY} {out_dir / 'request.json'}", *envs.kit_flags(gpu)]
@@ -97,6 +98,11 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, va
             problems.append(f"Newton {newton!r}, {env.newton}x expected")
         if result.get("verdict") != "skipped" and not result.get("media"):
             problems.append("no media recorded")
+        if dump_physics and env.engine == "newton" and stepped:
+            dumps = result.get("physics_dumps") or []
+            plays = len(result.get("solver_seen") or [])
+            if len(dumps) != plays or not all(pathlib.Path(d["path"]).is_file() for d in dumps):
+                problems.append(f"{len(dumps)} physics dumps for {plays} plays")
         expected_source = ["usd"] if env.engine == "physx" else ["fabric"]
         if stepped and result.get("pose_source") != expected_source:
             problems.append(f"poses read from {result.get('pose_source')}, {expected_source} expected under {env.engine}")
@@ -151,6 +157,8 @@ def main():
     ap.add_argument("--experiments", default="drop")
     ap.add_argument("--newton-contact", default="stock", choices=("stock", "pr2"),
                     help="Newton contact settings: stock, or PR #2's (newton15_cert.py) solref/condim/cone/impratio")
+    ap.add_argument("--dump-physics", action="store_true",
+                    help="Newton runs also write physics_play<n>.npz: the compiled MuJoCo model, its GPU copy, the Newton model and Isaac's config")
     ap.add_argument("--no-validation", action="store_true", help="run without NVIDIA's static validation (tests see no validated features)")
     ap.add_argument("--timeout", type=int, default=180, help="seconds per Kit run")
     ap.add_argument("--capture-px", type=int, default=512)
@@ -180,7 +188,7 @@ def main():
         for env in selected:
             for experiment in args.experiments.split(","):
                 print(f"[asset_checks] {asset.name} / {env.name} / {experiment} ...", flush=True)
-                result = run_one(bench, gpu, env, experiment, asset, out / asset.stem / env.name / experiment, args.timeout, args.capture_px, validated, args.newton_contact)
+                result = run_one(bench, gpu, env, experiment, asset, out / asset.stem / env.name / experiment, args.timeout, args.capture_px, validated, args.newton_contact, args.dump_physics)
                 rows.append((asset.stem, env.name, result))
                 first = ((result.get("message") or "").strip().splitlines() or [""])[0][:120]
                 print(f"[asset_checks]   {'INVALID: ' + '; '.join(result['invalid']) if result['invalid'] else (result['verdict'] + ' ' + first).strip()}", flush=True)

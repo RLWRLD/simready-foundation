@@ -113,3 +113,61 @@ def measure():
     except Exception as exc:  # noqa: BLE001 - recorded, not fatal: the compiled model above is the main reading
         out["mjw_read_error"] = repr(exc)[:200]
     return out
+
+
+def dump(path):
+    """Write what this run's Newton physics was built from to `path` (.npz), to diff two environments
+    offline. Arrays: the compiled MuJoCo model on the CPU (`mj.*`) and the copy the GPU steps run on
+    (`mjw.*`), with their option structs; the Newton model (`newton.*`), whose shapes feed Newton's own
+    collision pipeline (Isaac runs MuJoCo with use_mujoco_contacts=False, so contacts come from
+    there); the solver's and the collision pipeline's own arrays. `__meta__` (JSON): every scalar
+    setting of the same objects, object names (MuJoCo ids and Newton shapes), Isaac's Newton config,
+    and each attribute that could not be read, with the reason."""
+    import dataclasses
+    import json
+
+    import mujoco
+    import numpy as np
+
+    import isaacsim.physics.newton as isaac_newton
+
+    stage = isaac_newton.acquire_stage()
+    solver = stage.solver
+    arrays, scalars, unread = {}, {}, {}
+
+    def put(prefix, obj):
+        for name in dir(obj):
+            if name.startswith("__"):
+                continue
+            key = f"{prefix}.{name}"
+            try:
+                value = getattr(obj, name)
+                if callable(value) and not hasattr(value, "shape"):
+                    continue
+                if isinstance(value, np.ndarray):
+                    arrays[key] = value
+                elif hasattr(value, "numpy") and hasattr(value, "shape") and hasattr(value, "dtype"):  # warp array
+                    arrays[key] = np.asarray(value.numpy())
+                elif isinstance(value, (bool, int, float, str)) or value is None:
+                    scalars[key] = value
+            except Exception as exc:  # noqa: BLE001 - recorded in __meta__.unread, the dump is diagnostic
+                unread[key] = repr(exc)[:160]
+
+    mj, mjw = solver.mj_model, solver.mjw_model
+    for prefix, obj in (("mj", mj), ("mj.opt", mj.opt), ("mjw", mjw), ("mjw.opt", mjw.opt),
+                        ("newton", stage.model), ("solver", solver),
+                        ("pipeline", getattr(stage, "collision_pipeline", None))):
+        if obj is not None:
+            put(prefix, obj)
+    names = {}
+    for kind, count in (("BODY", mj.nbody), ("JOINT", mj.njnt), ("GEOM", mj.ngeom), ("SITE", mj.nsite),
+                        ("MESH", mj.nmesh), ("ACTUATOR", mj.nu), ("EQUALITY", mj.neq), ("TENDON", mj.ntendon)):
+        obj = getattr(mujoco.mjtObj, f"mjOBJ_{kind}")
+        names[kind.lower()] = [mujoco.mj_id2name(mj, obj, i) or f"#{i}" for i in range(count)]
+    labels = getattr(stage.model, "shape_label", None) or getattr(stage.model, "shape_key", None) or []
+    names["newton_shape"] = [str(v) for v in labels]
+    cfg = stage.cfg
+    meta = {"scalars": scalars, "names": names, "unread": unread,
+            "isaac_cfg": dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) else vars(cfg)}
+    np.savez_compressed(path, __meta__=np.array(json.dumps(meta, default=repr)), **arrays)
+    return {"path": str(path), "arrays": len(arrays), "scalars": len(scalars), "unread": len(unread)}
