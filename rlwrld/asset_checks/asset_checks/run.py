@@ -58,7 +58,8 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px):
     if not result:
         problems.append(f"no result.json (Kit exit {proc.returncode}, timeout {timeout}s)")
     elif result.get("status") != "done":
-        problems.append("error: " + (result.get("error") or "").strip().splitlines()[-1] if result.get("error") else "status not done")
+        error = (result.get("error") or "").strip()
+        problems.append(("error: " + error.splitlines()[-1]) if error else "status not done")
     else:
         if result.get("engine_observed") != env.engine:
             problems.append(f"engine {result.get('engine_observed')!r} simulated, {env.engine!r} expected")
@@ -69,6 +70,9 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px):
             problems.append(f"Newton {newton!r}, {env.newton}x expected")
         if not result.get("frames"):
             problems.append("no frames captured")
+        expected_source = ["usd"] if env.engine == "physx" else ["fabric"]
+        if result.get("pose_source") != expected_source:
+            problems.append(f"poses read from {result.get('pose_source')}, {expected_source} expected under {env.engine}")
     if "[BENCHMARK_COMPAT]" in (out_dir / "kit.log").read_text(errors="replace"):
         problems.append("the benchmark compat bridge is active in this Kit")
     result["invalid"] = problems
@@ -76,11 +80,11 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px):
 
 
 def summarize(rows, out):
-    head = ["asset", "env", "NVIDIA ground_drop", "PR #2 criteria", "touch s", "rest s", "max dip mm", "tilt deg", "runtime variant", "payload schemas lost"]
+    head = ["asset", "env", "NVIDIA ground_drop", "PR #2 criteria on this trajectory", "touch s", "rest s", "max dip mm", "tilt deg", "runtime variant", "payload schemas lost"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for asset, env, r in rows:
         if r.get("invalid"):
-            lines.append(f"| {asset} | {env} | INVALID: {'; '.join(r['invalid'])[:160]} |" + " |" * (len(head) - 3))
+            lines.append("| " + " | ".join([asset, env, "INVALID: " + "; ".join(r["invalid"])[:160]] + [""] * (len(head) - 3)) + " |")
             continue
         n, p, v = r["nvidia"], r["pr2_criteria"], r["variant"]
         sel = f"{v['selected']['variantSet']}={v['selected']['option']}" if v.get("selected") else ("none declared" if not v.get("declared") else "not declared for this engine")
@@ -90,7 +94,13 @@ def summarize(rows, out):
             ("pass" if p["passed"] else "FAIL: " + p["message"][:50]) + (f" ({p['message'][:60]})" if p["passed"] and p["message"] else ""),
             str(n["touch_time_s"]), str(n["rest_time_s"]), f"{p['max_penetration_m'] * 1000:.1f}", str(p["tilt_deg"]), sel, str(lost),
         ]) + " |")
-    (out / "summary.md").write_text("\n".join(lines) + "\n")
+    notes = [
+        "",
+        "NVIDIA ground_drop drops from twice the bounding-box height; PR #2 (newton15_cert.py) drops from 1 cm.",
+        "The PR #2 column applies PR #2's settle / tunnel / tilt criteria to this (NVIDIA) trajectory; it is not a PR #2 run.",
+        "`max dip` is the deepest collider vertex below the floor over the run; `tilt` is the final rotation from the drop pose.",
+    ]
+    (out / "summary.md").write_text("\n".join(lines + notes) + "\n")
     print("\n".join(lines))
 
 
