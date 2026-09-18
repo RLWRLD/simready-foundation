@@ -88,7 +88,7 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, va
         newton = (result.get("versions") or {}).get("newton") or ""
         if env.newton and not newton.startswith(env.newton):
             problems.append(f"Newton {newton!r}, {env.newton}x expected")
-        if result.get("status") != "skipped" and not result.get("media"):
+        if result.get("verdict") != "skipped" and not result.get("media"):
             problems.append("no media recorded")
         expected_source = ["usd"] if env.engine == "physx" else ["fabric"]
         if stepped and result.get("pose_source") != expected_source:
@@ -119,7 +119,8 @@ def summarize(rows, out):
         lost = sum(len(x) for x in (v.get("payload_schemas_not_composed") or {}).values())
         metrics = r.get("metrics") or {}
         shown = ", ".join(f"{k.split('_', 2)[-1]}={metrics[k]['value']}" for k in KEY_METRICS.get(r["test"], ()) if k in metrics)
-        verdict = r["status"] + ("" if r["status"] == "pass" else ": " + (r.get("message") or "").splitlines()[0][:90])
+        message = (r.get("message") or "").strip().splitlines()
+        verdict = r["verdict"] + ("" if r["verdict"] == "pass" or not message else ": " + message[0][:90])
         pr2 = "" if p is None else (("pass" if p["passed"] else "FAIL: " + p["message"][:50]) + (f" ({p['message'][:60]})" if p["passed"] and p["message"] else ""))
         dip = "" if p is None else f"{p['max_penetration_m'] * 1000:.1f}"
         tilt = str((r.get("trajectory") or {}).get("tilt_deg", [""])[-1]) if (r.get("trajectory") or {}).get("tilt_deg") else ""
@@ -171,7 +172,8 @@ def main():
                 print(f"[asset_checks] {asset.name} / {env.name} / {experiment} ...", flush=True)
                 result = run_one(bench, gpu, env, experiment, asset, out / asset.stem / env.name / experiment, args.timeout, args.capture_px, validated)
                 rows.append((asset.stem, env.name, result))
-                print(f"[asset_checks]   {'INVALID: ' + '; '.join(result['invalid']) if result['invalid'] else result['status'] + ' ' + (result.get('message') or '').splitlines()[0][:120] if result.get('message') else result['status']}", flush=True)
+                first = ((result.get("message") or "").strip().splitlines() or [""])[0][:120]
+                print(f"[asset_checks]   {'INVALID: ' + '; '.join(result['invalid']) if result['invalid'] else (result['verdict'] + ' ' + first).strip()}", flush=True)
     summarize(rows, out)
     sys.exit(1 if any(r["invalid"] for _, _, r in rows) else 0)
 

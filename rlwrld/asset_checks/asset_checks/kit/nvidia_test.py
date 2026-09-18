@@ -152,7 +152,7 @@ async def run(req):
             ctx.fail("Test raised exception: %s" % exc)
     status = "fail" if ctx.failed else ("skipped" if ctx.skipped else "pass")
     result = {
-        "test": defn.name, "test_version": getattr(defn, "version", ""), "status": status,
+        "test": defn.name, "test_version": getattr(defn, "version", ""), "verdict": status,
         "message": ctx.failure_message or ctx.skip_reason or "", "metrics": ctx.metrics,
         "warnings": ctx.warnings, "logs": ctx.log_messages, "media": _build_media_list(ctx, out),
         "test_exception": error, "nvidia_api_supplied": supplied, "variant": Scene.variant,
