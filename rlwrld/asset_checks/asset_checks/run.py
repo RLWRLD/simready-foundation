@@ -61,6 +61,28 @@ def code_version():
     return {"commit": head, "dirty": dirty}
 
 
+def frames_per_step(traj):
+    """How many frames each recorded step advanced the timeline, per play (the timeline restarts at
+    each play). A play's first step is reported apart: it also carries the time between play() and
+    that step. Measured from the timeline, independent of what the stepping code intends."""
+    t, tl = traj.get("t") or [], traj.get("timeline_t") or []
+    if len(t) < 2 or len(tl) != len(t):
+        return None
+    frame = t[1] - t[0]
+    plays, start = [], 0
+    for i in range(1, len(tl) + 1):
+        if i == len(tl) or tl[i] < tl[i - 1] - 1e-6:
+            seg = tl[start:i]
+            steps = {}
+            for a, b in zip(seg[1:-1], seg[2:]):
+                k = round((b - a) / frame)
+                steps[k] = steps.get(k, 0) + 1
+            first = round((seg[1] - seg[0]) / frame) if len(seg) > 1 else None
+            plays.append({"first_step_frames": first, "steps": steps})
+            start = i
+    return {"frame_s": frame, "plays": plays}
+
+
 def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, validated, contact_profile, dump_physics=False, trace_contacts=0):
     out_dir.mkdir(parents=True)
     expected = envs.gpu_settings(gpu)
@@ -105,6 +127,14 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, va
                 problems.append(f"{len(dumps)} physics dumps for {plays} plays")
         if trace_contacts and env.engine == "newton" and stepped and not result.get("contact_trace"):
             problems.append("contact trace requested, none recorded")
+        if stepped:
+            stepping = result["frames_per_step"] = frames_per_step(result["trajectory"])
+            if stepping is None:
+                problems.append("no timeline time recorded: frames per step unknown")
+            else:
+                off = {k: n for play in stepping["plays"] for k, n in play["steps"].items() if k != 1}
+                if off:
+                    problems.append("steps advanced " + ", ".join(f"{k} frames x{n}" for k, n in sorted(off.items())) + " (expected 1)")
         expected_source = ["usd"] if env.engine == "physx" else ["fabric"]
         if stepped and result.get("pose_source") != expected_source:
             problems.append(f"poses read from {result.get('pose_source')}, {expected_source} expected under {env.engine}")

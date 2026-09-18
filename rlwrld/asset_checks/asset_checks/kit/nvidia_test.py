@@ -154,10 +154,19 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
             return BoundsResult(tuple(mn), tuple(mx))
 
         solver_seen = []  # what MuJoCo compiled, read on the first step after each play (Newton)
+        stepped_plays = 0  # plays whose first step re-armed engine-kit's pause
         physics_dumps = []  # contact.dump() of the same moment, when the run asks for it
         measured_plays = 0
 
         async def physics_step(self):
+            # engine-kit pauses the timeline after the first update of a play so that each step is one
+            # frame (its docstring), but sets _physics_paused once and never clears it: after a second
+            # play (the grasp test plays twice) the timeline kept playing and every step advanced two
+            # frames, more on capture steps. Clearing it on the first step of each play restores the
+            # documented behavior; run.py's frames-per-step gate checks the result.
+            if Proxy.stepped_plays < Scene.plays:
+                Proxy.stepped_plays = Scene.plays
+                self._physics_paused = False
             await super().physics_step()
             recorder.sample(self._scene_handle._stage)
             if trace is not None and Scene.plays:
