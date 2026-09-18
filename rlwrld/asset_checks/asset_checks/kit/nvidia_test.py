@@ -36,13 +36,17 @@ def registered(experiment):
 
 
 class Recorder:
-    """The asset's rigid bodies once per physics step: bound, lowest collider vertex, speeds, tilt."""
+    """The asset's rigid bodies once per physics step: bound, lowest collider vertex, speeds, tilt.
+    `t` counts steps at the test's fps; `timeline_t` is the timeline's own time and, under Newton,
+    `sim_t` the time Isaac's Newton stage has simulated -- where they drift from `t`, a step did not
+    advance physics by one frame."""
 
     def __init__(self, engine, dt):
         self.engine, self.dt = engine, dt
         self.engine_observed = None
         self.bodies = None
-        self.traj = {"t": [], "z_min": [], "lowest_vertex_z": [], "lin": [], "ang": [], "tilt_deg": [], "source": []}
+        self.traj = {"t": [], "timeline_t": [], "sim_t": [], "z_min": [], "lowest_vertex_z": [], "lin": [], "ang": [],
+                     "tilt_deg": [], "source": []}
 
     def sample(self, stage):
         from asset_checks.kit import reading
@@ -62,6 +66,13 @@ class Recorder:
         bound = reading.world_bound(stage, ASSET_PRIM, mats)
         t = self.traj
         t["t"].append(round(len(t["t"]) * self.dt + self.dt, 5))
+        import omni.timeline
+
+        t["timeline_t"].append(round(omni.timeline.get_timeline_interface().get_current_time(), 5))
+        if self.engine == "newton":
+            import isaacsim.physics.newton as isaac_newton
+
+            t["sim_t"].append(round(float(isaac_newton.acquire_stage().sim_time), 5))
         t["z_min"].append(round(bound[0][2], 5))
         t["lowest_vertex_z"].append(round(reading.lowest_point(self.points, mats), 5))
         t["lin"].append(round(max(math.dist(mats[b][3][:3], self.prev[b][3][:3]) for b in self.bodies) / self.dt, 5))
