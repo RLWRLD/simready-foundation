@@ -8,6 +8,7 @@ subclasses:
     (scene.select_runtime_variant); under Newton, prepare_physics leaves collider cooking to the
     engine ("Any runtime-specific cooking or fallback behavior is owned by the selected engine",
     7.1 docs/fet005/grasp-and-lift.md) instead of waiting on PhysX property queries nothing answers.
+    Under Newton, update_camera_follow gives engine-kit's camera follow the live bound.
   Proxy(KitEngineProxy): under Newton, get_asset_bounds places the asset's rigid bodies with their
     Fabric poses (reading.py); every physics_step records the asset's trajectory, and the first
     one records which simulation actually runs.
@@ -101,6 +102,26 @@ def _classes(engine, asset_path, recorder, contact_profile):
             handle = super().load_asset(*args, **kwargs)
             Scene.variant = scene_mod.select_runtime_variant(self._stage, asset_path, engine)
             return handle
+
+        def update_camera_follow(self, config=None, update_history=True):
+            """engine-kit's camera follow bounds the asset from USD, which Newton does not update, so the
+            camera stayed where the asset started. Under Newton that one read gets the live bound for this
+            call; the rest of engine-kit's follow logic (history, smoothing, zoom-out) is unchanged."""
+            import omni.timeline
+
+            if engine == "physx" or omni.timeline.get_timeline_interface().is_stopped():
+                return super().update_camera_follow(config, update_history)
+            from unittest import mock
+
+            from simready_benchmark_engine_kit import camera_follow
+
+            bodies = [str(p.GetPath()) for p in reading.rigid_bodies(self._stage, scene_mod.ASSET_PRIM)]
+            if not bodies:  # nothing simulated: USD is current
+                return super().update_camera_follow(config, update_history)
+            lo, hi = reading.world_bound(self._stage, scene_mod.ASSET_PRIM, reading.body_matrices(self._stage, bodies, engine)[0])
+            live = ([float(v) for v in lo], [float(v) for v in hi])
+            with mock.patch.object(camera_follow, "_compute_asset_bbox", lambda stage, path: live):
+                return super().update_camera_follow(config, update_history)
 
         async def prepare_physics(self, timeout_ms=None):
             if engine == "physx":
