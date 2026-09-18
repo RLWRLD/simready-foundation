@@ -12,16 +12,27 @@ ASSET_PRIM = "/World/AssetRoot/Asset"  # where engine-kit's load_asset reference
 
 
 async def new_stage():
+    """A fresh stage prepared the way engine-kit's execute_single_test prepares one for each test."""
     import omni.kit.app
     import omni.usd
     from pxr import UsdGeom
 
+    try:  # reset the viewport camera before the stage goes, as execute_single_test does
+        import omni.kit.viewport.utility as viewport_utility
+
+        viewport = viewport_utility.get_active_viewport()
+        if viewport:
+            viewport.camera_path = "/OmniverseKit_Persp"
+    except ImportError:
+        pass
     ok, err = await omni.usd.get_context().new_stage_async()
     if not ok:
         raise RuntimeError(f"could not create a new stage: {err}")
     stage = omni.usd.get_context().get_stage()
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    if stage.GetPrimAtPath("/OmniKit_Viewport_LightRig"):
+        stage.RemovePrim("/OmniKit_Viewport_LightRig")
     for _ in range(3):
         await omni.kit.app.get_app().next_update_async()
     return stage

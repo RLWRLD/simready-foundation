@@ -24,6 +24,11 @@ ENVIRONMENTS = {
 }
 
 
+# SIMREADY_PHYSICS_RUNTIME per engine: NVIDIA's grasp_and_lift reads it (default "PhysX") to pick the
+# FET_003 feature the asset must have validated; the official runner is expected to set it.
+PHYSICS_RUNTIME = {"physx": "PhysX", "newton": "Newton"}
+
+
 def gpu_settings(gpu: int) -> dict:
     """Kit settings that keep Kit on the workspace GPU.
 

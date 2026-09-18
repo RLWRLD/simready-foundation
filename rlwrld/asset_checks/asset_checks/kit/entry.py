@@ -2,16 +2,13 @@
 """Kit-side entry: `isaacsim <experience> --exec "entry.py <request.json>" ...` (built by run.py).
 
 Writes <out_dir>/result.json with status "done" or "error", the Kit settings and package versions
-the run actually had, and the experiment's result. The process then exits hard, as engine-kit's
+the run actually had, and the NVIDIA test's result. The process then exits hard, as engine-kit's
 kit_runner does: an --exec script cannot end Kit's own loop with post_quit().
 """
 import json
 import os
 import sys
 import traceback
-
-EXPERIMENTS = ("drop",)
-
 
 def _versions():
     from importlib import metadata
@@ -40,11 +37,11 @@ def main():
         settings = carb.settings.get_settings()
         result["kit_settings"] = {key: settings.get(key) for key in req["expected_settings"]}
         result["versions"] = _versions()
-        if req["experiment"] not in EXPERIMENTS:
-            raise ValueError(f"unknown experiment {req['experiment']!r}; known: {EXPERIMENTS}")
-        from asset_checks.kit import drop
+        from asset_checks.kit import nvidia_test
 
-        result.update(await drop.run(req))
+        if req["experiment"] not in nvidia_test.TESTS:
+            raise ValueError(f"unknown experiment {req['experiment']!r}; known: {sorted(nvidia_test.TESTS)}")
+        result.update(await nvidia_test.run(req))
         result["status"] = "done"
 
     try:
