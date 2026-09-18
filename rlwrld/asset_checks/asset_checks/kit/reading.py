@@ -87,14 +87,25 @@ def _usd_matrices(stage, paths):
 
 
 def body_matrices(stage, paths, engine):
-    """({path: world matrix rows}, source) for the given rigid bodies under the given engine."""
+    """({path: world matrix rows}, source) for the given rigid bodies under the given engine.
+
+    A pose that is not finite means the solver diverged. That raises here, the one place every
+    reading goes through; left alone, NaN drops out of a Gf.Range3d union silently and reappears
+    later as a misleading "no bounded geometry" or a zero speed."""
+    import math
+
     import omni.timeline
 
     if engine == "physx" or omni.timeline.get_timeline_interface().is_stopped():
-        return _usd_matrices(stage, paths), "usd"
-    if engine == "newton":
-        return _fabric_matrices(stage, paths), "fabric"
-    raise ValueError(f"unknown physics engine {engine!r}")
+        mats, source = _usd_matrices(stage, paths), "usd"
+    elif engine == "newton":
+        mats, source = _fabric_matrices(stage, paths), "fabric"
+    else:
+        raise ValueError(f"unknown physics engine {engine!r}")
+    for path, rows in mats.items():
+        if not all(math.isfinite(v) for row in rows for v in row):
+            raise RuntimeError(f"non-finite pose for {path} (read from {source}): physics diverged")
+    return mats, source
 
 
 def world_bound(stage, root_path, matrices, purposes=("default", "render", "proxy")):

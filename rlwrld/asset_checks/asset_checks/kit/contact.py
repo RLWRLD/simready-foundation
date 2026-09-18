@@ -100,6 +100,12 @@ def measure():
     out["geom_condim"] = {int(v): int(c) for v, c in zip(values, counts)}
     values, counts = np.unique(np.asarray(mj.geom_solref).round(5), axis=0, return_counts=True)
     out["geom_solref"] = {f"{v[0]:g},{v[1]:g}": int(c) for v, c in zip(values, counts)}
+    # Joint dynamics: Isaac's Newton stage gives every joint that authors no armature its own
+    # default (cfg.armature), which on a light articulated prop outweighs the links' inertia.
+    out["isaac_default_joint_armature"] = getattr(getattr(isaac_newton.acquire_stage(), "cfg", None), "armature", None)
+    for field in ("dof_armature", "dof_damping", "dof_frictionloss"):
+        values, counts = np.unique(np.asarray(getattr(mj, field)).round(6), return_counts=True)
+        out[field] = {f"{v:g}": int(c) for v, c in zip(values, counts)}
     mjw = getattr(solver, "mjw_model", None)
     try:  # the GPU copy the steps run on
         out["mjw_impratio"] = [round(float(x), 4) for x in np.asarray(mjw.opt.impratio.numpy()).ravel()[:4]]
