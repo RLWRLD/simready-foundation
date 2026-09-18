@@ -89,6 +89,11 @@ def measure():
     mj = getattr(solver, "mj_model", None)
     if mj is None:
         return out
+    out["timestep_s"] = float(mj.opt.timestep)
+    import mujoco
+
+    # with refsafe on (MuJoCo's default) a solref time constant below 2 x timestep is raised to it
+    out["refsafe"] = not bool(int(mj.opt.disableflags) & int(mujoco.mjtDisableBit.mjDSBL_REFSAFE))
     out["impratio"] = float(mj.opt.impratio)
     out["cone"] = {0: "pyramidal", 1: "elliptic"}.get(int(mj.opt.cone), int(mj.opt.cone))
     values, counts = np.unique(np.asarray(mj.geom_condim), return_counts=True)
