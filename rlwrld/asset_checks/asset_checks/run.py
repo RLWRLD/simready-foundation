@@ -54,12 +54,19 @@ def validated_features(bench, asset, out_dir):
     return sorted(fid for fid, v in summary.items() if v.get("passed"))
 
 
-def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, validated):
+def code_version():
+    """Commit of the fork checkout this package runs from, and whether the tree has uncommitted changes."""
+    head = subprocess.run(["git", "-C", str(PACKAGE_ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    dirty = bool(subprocess.run(["git", "-C", str(PACKAGE_ROOT), "status", "--porcelain", "--", "."], capture_output=True, text=True).stdout.strip())
+    return {"commit": head, "dirty": dirty}
+
+
+def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, validated, contact_profile):
     out_dir.mkdir(parents=True)
     expected = envs.gpu_settings(gpu)
     request = {"asset": str(asset), "experiment": experiment, "engine": env.engine, "env": env.name,
                "out_dir": str(out_dir), "expected_settings": expected, "capture_px": capture_px,
-               "validated_features": validated}
+               "validated_features": validated, "contact_profile": contact_profile, "code": code_version()}
     (out_dir / "request.json").write_text(json.dumps(request, indent=1))
     cmd = [str(bench / "isaac-run"), env.venv, str(bench / f".venv-{env.venv}" / "bin" / "isaacsim"), env.experience,
            "--exec", f"{ENTRY} {out_dir / 'request.json'}", *envs.kit_flags(gpu)]
@@ -107,12 +114,12 @@ KEY_METRICS = {
 
 
 def summarize(rows, out):
-    head = ["asset", "env", "NVIDIA test", "NVIDIA verdict", "NVIDIA metrics", "PR #2 criteria on this trajectory",
+    head = ["asset", "env", "contact", "NVIDIA test", "NVIDIA verdict", "NVIDIA metrics", "PR #2 criteria on this trajectory",
             "max dip mm", "tilt deg", "runtime variant", "payload schemas lost"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for asset, env, r in rows:
         if r.get("invalid"):
-            lines.append("| " + " | ".join([asset, env, (r.get("request") or {}).get("experiment", ""), "INVALID: " + "; ".join(r["invalid"])[:160]] + [""] * (len(head) - 4)) + " |")
+            lines.append("| " + " | ".join([asset, env, "", (r.get("request") or {}).get("experiment", ""), "INVALID: " + "; ".join(r["invalid"])[:160]] + [""] * (len(head) - 5)) + " |")
             continue
         v, p = r.get("variant") or {}, r.get("pr2_criteria")
         sel = f"{v['selected']['variantSet']}={v['selected']['option']}" if v.get("selected") else ("none declared" if not v.get("declared") else "not declared for this engine")
@@ -124,7 +131,7 @@ def summarize(rows, out):
         pr2 = "" if p is None else (("pass" if p["passed"] else "FAIL: " + p["message"][:50]) + (f" ({p['message'][:60]})" if p["passed"] and p["message"] else ""))
         dip = "" if p is None else f"{p['max_penetration_m'] * 1000:.1f}"
         tilt = str((r.get("trajectory") or {}).get("tilt_deg", [""])[-1]) if (r.get("trajectory") or {}).get("tilt_deg") else ""
-        lines.append("| " + " | ".join([asset, env, r["test"], verdict, shown, pr2, dip, tilt, sel, str(lost)]) + " |")
+        lines.append("| " + " | ".join([asset, env, r.get("contact_profile", ""), r["test"], verdict, shown, pr2, dip, tilt, sel, str(lost)]) + " |")
     notes = [
         "",
         "NVIDIA's tests run unmodified; their verdicts and metrics are the tests' own. PR #2 (newton15_cert.py) runs its",
@@ -141,6 +148,8 @@ def main():
     ap.add_argument("--out", required=True, help="new directory for results")
     ap.add_argument("--envs", default=",".join(envs.ENVIRONMENTS))
     ap.add_argument("--experiments", default="drop")
+    ap.add_argument("--newton-contact", default="stock", choices=("stock", "pr2"),
+                    help="Newton contact settings: stock, or PR #2's (newton15_cert.py) solref/condim/cone/impratio")
     ap.add_argument("--no-validation", action="store_true", help="run without NVIDIA's static validation (tests see no validated features)")
     ap.add_argument("--timeout", type=int, default=180, help="seconds per Kit run")
     ap.add_argument("--capture-px", type=int, default=512)
@@ -170,7 +179,7 @@ def main():
         for env in selected:
             for experiment in args.experiments.split(","):
                 print(f"[asset_checks] {asset.name} / {env.name} / {experiment} ...", flush=True)
-                result = run_one(bench, gpu, env, experiment, asset, out / asset.stem / env.name / experiment, args.timeout, args.capture_px, validated)
+                result = run_one(bench, gpu, env, experiment, asset, out / asset.stem / env.name / experiment, args.timeout, args.capture_px, validated, args.newton_contact)
                 rows.append((asset.stem, env.name, result))
                 first = ((result.get("message") or "").strip().splitlines() or [""])[0][:120]
                 print(f"[asset_checks]   {'INVALID: ' + '; '.join(result['invalid']) if result['invalid'] else (result['verdict'] + ' ' + first).strip()}", flush=True)

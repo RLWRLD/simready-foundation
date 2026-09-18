@@ -70,7 +70,7 @@ class Recorder:
         self.prev = mats
 
 
-def _classes(engine, asset_path, recorder):
+def _classes(engine, asset_path, recorder, contact_profile):
     from simready_benchmark_engine_kit.kit_engine_proxy import BoundsResult, KitEngineProxy
     from simready_benchmark_engine_kit.scene_handle import KitSceneHandle
 
@@ -79,6 +79,21 @@ def _classes(engine, asset_path, recorder):
 
     class Scene(KitSceneHandle):
         variant = None
+        contact_applied = []  # one report per play() while a contact profile is set
+
+        def add_physics(self, gravity=9.81, fps=240.0):
+            physics = super().add_physics(gravity=gravity, fps=fps)
+            if contact_profile is not None:
+                from asset_checks.kit import contact
+
+                play = physics.play
+
+                def play_with_contact_profile():  # authored before every play, so a rebuilt gripper gets it too
+                    Scene.contact_applied.append(contact.apply(self._stage, contact_profile))
+                    return play()
+
+                physics.play = play_with_contact_profile
+            return physics
 
         def load_asset(self, *args, **kwargs):
             handle = super().load_asset(*args, **kwargs)
@@ -128,8 +143,14 @@ async def run(req):
     if unknown:
         raise ValueError(f"unknown {defn.name} config keys {sorted(unknown)}; known: {sorted(config)}")
     config.update(req.get("config", {}))
+    from asset_checks.kit import contact
+
+    profile_name = req.get("contact_profile", "stock")
+    if profile_name not in contact.PROFILES:
+        raise ValueError(f"unknown contact profile {profile_name!r}; known: {sorted(contact.PROFILES)}")
+    profile = contact.PROFILES[profile_name] if engine == "newton" else None  # PR #2's settings are MuJoCo's
     recorder = Recorder(engine, 1.0 / float(config.get("physics_fps", 240)))
-    Scene, Proxy = _classes(engine, asset, recorder)
+    Scene, Proxy = _classes(engine, asset, recorder, profile)
 
     stage = await scene_mod.new_stage()
     handle = Scene(stage)
@@ -156,6 +177,7 @@ async def run(req):
         "message": ctx.failure_message or ctx.skip_reason or "", "metrics": ctx.metrics,
         "warnings": ctx.warnings, "logs": ctx.log_messages, "media": _build_media_list(ctx, out),
         "test_exception": error, "nvidia_api_supplied": supplied, "variant": Scene.variant,
+        "contact_profile": profile_name if profile is not None else "stock", "contact_applied": Scene.contact_applied,
         "engine_observed": recorder.engine_observed, "pose_source": sorted(set(recorder.traj["source"])),
         "rigid_bodies": recorder.bodies, "trajectory": recorder.traj,
     }
