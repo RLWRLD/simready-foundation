@@ -80,19 +80,21 @@ def _classes(engine, asset_path, recorder, contact_profile):
     class Scene(KitSceneHandle):
         variant = None
         contact_applied = []  # one report per play() while a contact profile is set
+        plays = 0
 
         def add_physics(self, gravity=9.81, fps=240.0):
             physics = super().add_physics(gravity=gravity, fps=fps)
-            if contact_profile is not None:
-                from asset_checks.kit import contact
+            from asset_checks.kit import contact
 
-                play = physics.play
+            play = physics.play
 
-                def play_with_contact_profile():  # authored before every play, so a rebuilt gripper gets it too
+            def play_counted():  # the profile is authored before every play, so a rebuilt gripper gets it too
+                if contact_profile is not None:
                     Scene.contact_applied.append(contact.apply(self._stage, contact_profile))
-                    return play()
+                Scene.plays += 1
+                return play()
 
-                physics.play = play_with_contact_profile
+            physics.play = play_counted
             return physics
 
         def load_asset(self, *args, **kwargs):
@@ -119,9 +121,17 @@ def _classes(engine, asset_path, recorder, contact_profile):
             mn, mx = reading.world_bound(stage, path, reading.body_matrices(stage, bodies, engine)[0])
             return BoundsResult(tuple(mn), tuple(mx))
 
+        solver_seen = []  # what MuJoCo compiled, read on the first step after each play (Newton)
+        measured_plays = 0
+
         async def physics_step(self):
             await super().physics_step()
             recorder.sample(self._scene_handle._stage)
+            if engine == "newton" and Proxy.measured_plays < Scene.plays:
+                from asset_checks.kit import contact
+
+                Proxy.measured_plays = Scene.plays
+                Proxy.solver_seen.append(contact.measure())
 
     return Scene, Proxy
 
@@ -178,9 +188,12 @@ async def run(req):
         "warnings": ctx.warnings, "logs": ctx.log_messages, "media": _build_media_list(ctx, out),
         "test_exception": error, "nvidia_api_supplied": supplied, "variant": Scene.variant,
         "contact_profile": profile_name if profile is not None else "stock", "contact_applied": Scene.contact_applied,
+        "solver_seen": Proxy.solver_seen,
         "engine_observed": recorder.engine_observed, "pose_source": sorted(set(recorder.traj["source"])),
         "rigid_bodies": recorder.bodies, "trajectory": recorder.traj,
     }
     if req["experiment"] in ("drop", "slope") and recorder.traj["t"]:
-        result["pr2_criteria"] = pr2.evaluate(recorder.traj, float(config.get("floor_level", 0.0)))
+        # NVIDIA's slope (45 deg) expects the asset to keep sliding: PR #2's rest criterion belongs to its
+        # own walled 15 deg slope, so on this slope only its tunnel / explode checks apply
+        result["pr2_criteria"] = pr2.evaluate(recorder.traj, float(config.get("floor_level", 0.0)), expect_rest=req["experiment"] == "drop")
     return result

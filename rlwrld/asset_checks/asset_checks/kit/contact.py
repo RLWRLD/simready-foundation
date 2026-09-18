@@ -64,3 +64,29 @@ def apply(stage, profile):
                 material.GetPrim().CreateAttribute("newton:torsionalFriction", Sdf.ValueTypeNames.Float).Set(profile["pad_torsional_friction"])
                 report["pad_materials"].append(str(material.GetPath()))
     return report
+
+
+def measure():
+    """What MuJoCo actually got: the live solver's compiled model (not what was authored in USD)."""
+    import numpy as np
+
+    import isaacsim.physics.newton as isaac_newton
+
+    solver = getattr(isaac_newton.acquire_stage(), "solver", None)
+    out = {"solver": type(solver).__name__ if solver is not None else None}
+    mj = getattr(solver, "mj_model", None)
+    if mj is None:
+        return out
+    out["impratio"] = float(mj.opt.impratio)
+    out["cone"] = {0: "pyramidal", 1: "elliptic"}.get(int(mj.opt.cone), int(mj.opt.cone))
+    values, counts = np.unique(np.asarray(mj.geom_condim), return_counts=True)
+    out["geom_condim"] = {int(v): int(c) for v, c in zip(values, counts)}
+    values, counts = np.unique(np.asarray(mj.geom_solref).round(5), axis=0, return_counts=True)
+    out["geom_solref"] = {f"{v[0]:g},{v[1]:g}": int(c) for v, c in zip(values, counts)}
+    mjw = getattr(solver, "mjw_model", None)
+    try:  # the GPU copy the steps run on
+        out["mjw_impratio"] = [round(float(x), 4) for x in np.asarray(mjw.opt.impratio.numpy()).ravel()[:4]]
+        out["mjw_cone"] = int(np.asarray(mjw.opt.cone.numpy()).ravel()[0]) if hasattr(mjw.opt.cone, "numpy") else int(mjw.opt.cone)
+    except Exception as exc:  # noqa: BLE001 - recorded, not fatal: the compiled model above is the main reading
+        out["mjw_read_error"] = repr(exc)[:200]
+    return out

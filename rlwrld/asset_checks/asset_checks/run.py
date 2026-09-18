@@ -130,7 +130,8 @@ def summarize(rows, out):
         verdict = r["verdict"] + ("" if r["verdict"] == "pass" or not message else ": " + message[0][:90])
         pr2 = "" if p is None else (("pass" if p["passed"] else "FAIL: " + p["message"][:50]) + (f" ({p['message'][:60]})" if p["passed"] and p["message"] else ""))
         dip = "" if p is None else f"{p['max_penetration_m'] * 1000:.1f}"
-        tilt = str((r.get("trajectory") or {}).get("tilt_deg", [""])[-1]) if (r.get("trajectory") or {}).get("tilt_deg") else ""
+        traj = r.get("trajectory") or {}
+        tilt = str(traj["tilt_deg"][-1]) if traj.get("tilt_deg") and r["test"] != "grasp_and_lift" else ""  # a grasp lifts and shakes the asset
         lines.append("| " + " | ".join([asset, env, r.get("contact_profile", ""), r["test"], verdict, shown, pr2, dip, tilt, sel, str(lost)]) + " |")
     notes = [
         "",

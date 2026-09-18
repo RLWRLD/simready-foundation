@@ -17,8 +17,9 @@ CRITERIA = {
 }
 
 
-def evaluate(traj, floor=0.0):
-    """traj: {"t", "lowest_vertex_z", "lin", "ang", "tilt_deg"} lists sampled once per physics step."""
+def evaluate(traj, floor=0.0, expect_rest=True):
+    """traj: {"t", "lowest_vertex_z", "lin", "ang", "tilt_deg"} lists sampled once per physics step.
+    expect_rest=False drops the settle requirement (a scene where the asset should keep moving)."""
     c = CRITERIA
     if not traj["t"]:
         return {"passed": False, "message": "no physics steps recorded", "criteria": c}
@@ -41,13 +42,13 @@ def evaluate(traj, floor=0.0):
     final_depth = depth[-1]
     failure = ("flew away / exploded" if exploded else
                "tunnelled into the support" if tunnel or final_depth > c["tunnel_depth_m"] else
-               "did not come to rest" if settle_time is None else None)
+               "did not come to rest" if expect_rest and settle_time is None else None)
     notes = []
     max_pen = max(depth)
     if max_pen > c["soft_penetration_m"]:
         notes.append(f"soft contact: dips {max_pen * 1000:.1f} mm below the floor")
     if traj["tilt_deg"][-1] > c["tilt_deg"]:
         notes.append(f"tipped over ({traj['tilt_deg'][-1]:.0f} deg from the start pose)")
-    return {"passed": failure is None, "message": failure or "; ".join(notes), "settle_time_s": settle_time,
+    return {"passed": failure is None, "rest_required": expect_rest, "message": failure or "; ".join(notes), "settle_time_s": settle_time,
             "max_penetration_m": round(max_pen, 4), "final_depth_m": round(final_depth, 4),
             "tilt_deg": round(traj["tilt_deg"][-1], 1), "max_speed_m_s": round(max(traj["lin"]), 3), "criteria": c}
