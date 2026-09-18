@@ -171,3 +171,65 @@ def dump(path):
             "isaac_cfg": dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) else vars(cfg)}
     np.savez_compressed(path, __meta__=np.array(json.dumps(meta, default=repr)), **arrays)
     return {"path": str(path), "arrays": len(arrays), "scalars": len(scalars), "unread": len(unread)}
+
+
+class Trace:
+    """The contacts the MuJoCo solver actually used, every `every` physics steps: how many join each
+    gripper pad to the asset, their summed normal force, the deepest penetration, and how many hold
+    the asset on the floor. Read from the GPU data the steps run on (Newton writes its own contacts
+    there: use_mujoco_contacts=False)."""
+
+    def __init__(self, every):
+        self.every, self.steps, self.rows, self.groups, self.solver_id = int(every), 0, [], None, None
+
+    def _group_geoms(self, mj):
+        import mujoco
+
+        from simready_benchmark_kit_suite.fet005_grasp.grasp_robot import GraspRobot
+
+        from asset_checks.kit.scene import ASSET_PRIM
+
+        prefixes = {"left": GraspRobot.LEFT_PAD + "/", "right": GraspRobot.RIGHT_PAD + "/", "asset": ASSET_PRIM + "/"}
+        groups = {k: set() for k in prefixes}
+        for i in range(mj.ngeom):
+            name = mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_GEOM, i) or ""
+            for k, prefix in prefixes.items():
+                if name.startswith(prefix):
+                    groups[k].add(i)
+        empty = [k for k, v in groups.items() if not v]
+        if empty:  # a trace of zeros would read as "no contact"; it must not pass
+            raise RuntimeError(f"contact trace found no geoms for {empty} under {[prefixes[k] for k in empty]}")
+        return groups
+
+    def sample(self, t):
+        import numpy as np
+
+        import isaacsim.physics.newton as isaac_newton
+
+        self.steps += 1
+        if self.steps % self.every:
+            return
+        solver = isaac_newton.acquire_stage().solver
+        mj, d = solver.mj_model, solver.mjw_data
+        if self.solver_id != id(solver):  # a play after a rebuild compiles a new model: regroup its geoms
+            self.groups, self.solver_id = self._group_geoms(mj), id(solver)
+        n = int(d.nacon.numpy()[0])
+        geom = d.contact.geom.numpy()[:n]
+        dist = d.contact.dist.numpy()[:n]
+        adr = d.contact.efc_address.numpy()[:n]
+        force = d.efc.force.numpy()[0]
+        elliptic = int(mj.opt.cone) == 1
+        normal = np.array([force[a[0]] if elliptic else force[a[a >= 0]].sum() for a in adr]) if n else np.zeros(0)
+        normal[adr[:, 0] < 0] = 0.0  # detected but not in the constraint set
+        g = self.groups
+        in_a = np.isin(geom, list(g["asset"]))
+        row = {"t": round(t, 4), "nacon": n}
+        for pad in ("left", "right"):
+            m = np.isin(geom, list(g[pad])).any(axis=1) & in_a.any(axis=1)
+            row[f"{pad}_n"] = int(m.sum())
+            row[f"{pad}_fn"] = round(float(normal[m].sum()), 4)
+            row[f"{pad}_depth_mm"] = round(float(-dist[m].min() * 1000.0), 3) if m.any() else None
+        others = ~(np.isin(geom, list(g["left"] | g["right"])).any(axis=1)) & in_a.any(axis=1) & ~in_a.all(axis=1)
+        row["asset_other_n"] = int(others.sum())
+        row["asset_other_fn"] = round(float(normal[others].sum()), 4)
+        self.rows.append(row)

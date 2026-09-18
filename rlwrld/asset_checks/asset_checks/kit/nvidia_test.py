@@ -71,7 +71,7 @@ class Recorder:
         self.prev = mats
 
 
-def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None):
+def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace=None):
     from simready_benchmark_engine_kit.kit_engine_proxy import BoundsResult, KitEngineProxy
     from simready_benchmark_engine_kit.scene_handle import KitSceneHandle
 
@@ -149,6 +149,8 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None):
         async def physics_step(self):
             await super().physics_step()
             recorder.sample(self._scene_handle._stage)
+            if trace is not None and Scene.plays:
+                trace.sample(recorder.traj["t"][-1] if recorder.traj["t"] else 0.0)
             if engine == "newton" and Proxy.measured_plays < Scene.plays:
                 from asset_checks.kit import contact
 
@@ -184,7 +186,8 @@ async def run(req):
         raise ValueError(f"unknown contact profile {profile_name!r}; known: {sorted(contact.PROFILES)}")
     profile = contact.PROFILES[profile_name] if engine == "newton" else None  # PR #2's settings are MuJoCo's
     recorder = Recorder(engine, 1.0 / float(config.get("physics_fps", 240)))
-    Scene, Proxy = _classes(engine, asset, recorder, profile, out if req.get("dump_physics") else None)
+    trace = contact.Trace(req["trace_contacts"]) if engine == "newton" and req.get("trace_contacts") else None
+    Scene, Proxy = _classes(engine, asset, recorder, profile, out if req.get("dump_physics") else None, trace)
 
     stage = await scene_mod.new_stage()
     handle = Scene(stage)
@@ -214,6 +217,7 @@ async def run(req):
         "contact_profile": profile_name if profile is not None else "stock", "contact_applied": Scene.contact_applied,
         "solver_seen": Proxy.solver_seen,
         "physics_dumps": Proxy.physics_dumps,
+        "contact_trace": trace.rows if trace is not None else None,
         "engine_observed": recorder.engine_observed, "pose_source": sorted(set(recorder.traj["source"])),
         "rigid_bodies": recorder.bodies, "trajectory": recorder.traj,
     }
