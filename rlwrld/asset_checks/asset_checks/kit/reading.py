@@ -143,3 +143,48 @@ def rotation_angle(rows_a, rows_b) -> float:
     import math
 
     return 2.0 * math.acos(min(1.0, dot))
+
+
+def collider_points(stage, bodies):
+    """{body: Nx3 points in the body's frame} of the collision geometry each rigid body owns: mesh
+    vertices of mesh colliders, bounding-box corners of other collider shapes."""
+    import numpy as np
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    owners = set(bodies)
+    cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    out = {}
+    for body in bodies:
+        body_prim = stage.GetPrimAtPath(body)
+        chunks = []
+        for prim in Usd.PrimRange(body_prim, Usd.TraverseInstanceProxies()):
+            if prim != body_prim and str(prim.GetPath()) in owners:
+                continue  # a nested body owns its own geometry
+            if not prim.HasAPI(UsdPhysics.CollisionAPI) or not prim.IsA(UsdGeom.Gprim):
+                continue
+            if prim.IsA(UsdGeom.Mesh):
+                pts = np.asarray(UsdGeom.Mesh(prim).GetPointsAttr().Get() or [], dtype=float).reshape(-1, 3)
+            else:
+                ext = UsdGeom.Boundable(prim).ComputeExtent(Usd.TimeCode.Default())
+                pts = np.array([[x, y, z] for x in (ext[0][0], ext[1][0]) for y in (ext[0][1], ext[1][1]) for z in (ext[0][2], ext[1][2])], dtype=float)
+            if not len(pts):
+                continue
+            rel, _ = cache.ComputeRelativeTransform(prim, body_prim)
+            m = np.array([[rel[r][c] for c in range(4)] for r in range(4)])
+            chunks.append(pts @ m[:3, :3] + m[3, :3])
+        if chunks:
+            out[body] = np.vstack(chunks)
+    if not out:
+        raise LookupError(f"no collision geometry under the rigid bodies {bodies}")
+    return out
+
+
+def lowest_point(points, matrices):
+    """Lowest world z of the collider points placed with the bodies' current matrices."""
+    import numpy as np
+
+    lows = []
+    for body, pts in points.items():
+        m = np.asarray(matrices[body])
+        lows.append(float((pts @ m[:3, :3] + m[3, :3])[:, 2].min()))
+    return min(lows)

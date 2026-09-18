@@ -5,8 +5,9 @@ The scene, stepping, capture, parameters (the registered test's config defaults)
 checks are NVIDIA's (engine-kit, simready_benchmark_kit_suite); only the pose reads are this
 package's (reading.py), because NVIDIA's reads USD, which Newton does not update. The settle /
 tunnel criteria of RLWRLD's standalone Newton runner (PR #2, newton15_cert.py) are computed on the
-same trajectory for comparison; PR #2 drops from 1 cm and uses mesh vertices, this drop is NVIDIA's
-(twice the bounding-box height) and its heights come from the bounding box.
+same trajectory for comparison, with heights from collider vertices as PR #2 measures them (NVIDIA's
+verdict keeps NVIDIA's bounding-box heights); PR #2 drops from 1 cm, this drop is NVIDIA's (twice the
+bounding-box height).
 """
 
 import time
@@ -92,11 +93,12 @@ async def run(req):
     if not bodies:
         raise RuntimeError(f"no rigid body under {scene_mod.ASSET_PRIM}: nothing to drop")
 
+    points = reading.collider_points(stage, bodies)
     physics.play()
     mats, source = reading.body_matrices(stage, bodies, engine)
     init = reading.world_bound(stage, scene_mod.ASSET_PRIM, mats)
     init_mats = mats
-    traj = {"t": [], "z_min": [], "center_z": [], "lin": [], "ang": [], "source": []}
+    traj = {"t": [], "z_min": [], "lowest_vertex_z": [], "center_z": [], "lin": [], "ang": [], "source": []}
     frames, history = [], []
     touched, touch_frame, penetrated = False, -1, False
     rest_detected, rest_frame, result_frame = False, -1, -1
@@ -120,6 +122,7 @@ async def run(req):
         prev_mats = mats
         traj["t"].append(round((frame + 1) * dt, 5))
         traj["z_min"].append(round(z_min, 5))
+        traj["lowest_vertex_z"].append(round(reading.lowest_point(points, mats), 5))
         traj["center_z"].append(round((bound[0][2] + bound[1][2]) / 2.0, 5))
         traj["lin"].append(round(lin, 5))
         traj["ang"].append(round(ang, 5))
@@ -168,7 +171,7 @@ async def run(req):
 
     # --- PR #2's criteria on the same trajectory ---
     c, floor = PR2_CRITERIA, float(cfg["floor_level"])
-    depth = [floor - z for z in traj["z_min"]]
+    depth = [floor - z for z in traj["lowest_vertex_z"]]
     hold = max(1, int(round(c["tunnel_hold_s"] * fps)))
     run_below, tunnel = 0, False
     for d in depth:
