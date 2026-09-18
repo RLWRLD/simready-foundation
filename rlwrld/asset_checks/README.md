@@ -63,7 +63,6 @@ Added here, because those pieces assume PhysX:
 - Newton 1.2.1 reads a collider's authored mass only when its rigid body also has MassAPI; NVIDIA's
   sample props author mass on the collider alone, so Newton 1.2 recomputes it from density 1000
   (the apple 0.57x, the coffee cup 0.14x its authored mass). Newton 1.5 and PhysX read it.
-
 - Isaac's Newton stage gives every joint that authors no armature `cfg.armature` = 0.1 kg m^2
   (PhysX: 0). On a light articulated prop this outweighs the links' own inertia and the joints
   barely move; `solver_seen.dof_armature` shows it.
