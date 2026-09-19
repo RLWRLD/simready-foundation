@@ -40,6 +40,10 @@ Added here, because those pieces assume PhysX:
   test does not bound how far the asset slides and keeps engine-kit's `follow`. `result.json`
   records which. Captures are engine-kit's size (1024 px) unless `--capture-px` is given. The frames
   are Isaac Sim RTX renders of NVIDIA's test scene (grey room, one dome light, no viewport light rig).
+- **Floor cues** (`scene.add_visual_cues`): in that room floor, far walls and horizon blend and
+  nothing casts a shadow, so a 10 cm matte checkerboard (visual only: no collider) and a near-overhead
+  key light are added under `/World/AssetChecksLook` when a test sets up its camera; each tile is a
+  10 cm size reference. `--plain-scene` renders the room as NVIDIA builds it.
 - **Runtime physics variant** (`kit/scene.py`): the asset's variant for the engine is selected, and
   the result says whether the variant's payload schemas actually composed.
 - **Launch** (`envs.py`, `run.py`): one GPU (`/physics/cudaDevice`, `/renderer/multiGpu/enabled`,
