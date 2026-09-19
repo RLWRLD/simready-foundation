@@ -6,7 +6,11 @@ verdict, plus the reason when the test failed or was skipped.
 
 Reads each run's result.json (verdict, message, media) and writes <run dir>/compare/<asset>__<test>.mp4.
 The panels start together (every environment captures on the same test frames); a shorter video
-holds its last frame, and an environment without a video is a grey panel with its label.
+holds its last frame, and an environment without any footage is a grey panel with its label.
+
+A run whose test aborted mid-loop keeps its captured frames but never reached NVIDIA's video step;
+for those this encodes the frames into the run's own <test>_frames.mp4 first, so every cell that
+simulated at all has a video. A skipped run never simulated and has no frames.
 """
 import argparse
 import json
@@ -43,6 +47,24 @@ def label(path, width, env, result):
     return img.size[1]
 
 
+def video_of(ffmpeg, run_dir, result):
+    """The run's video, or one encoded here from its captured frames when the test never wrote one."""
+    videos = [m["filename"] for m in (result or {}).get("media") or [] if m.get("kind") == "video"]
+    if videos:
+        return run_dir / videos[0]
+    frames = sorted(run_dir / m["filename"] for m in (result or {}).get("media") or [] if m.get("kind") == "image")
+    if not frames:
+        return None
+    target = run_dir / f"{frames[0].stem.rsplit('_', 1)[0]}_frames.mp4"
+    if not target.exists():
+        listing = run_dir / "_frames.txt"
+        listing.write_text("".join(f"file '{f}'\nduration {1 / FPS:.4f}\n" for f in frames) + f"file '{frames[-1]}'\n")
+        subprocess.run([ffmpeg, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
+                        "-vsync", "vfr", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", str(target)], check=True)
+        listing.unlink()
+    return target
+
+
 def duration(ffmpeg, video):
     out = subprocess.run([ffmpeg, "-i", str(video)], capture_output=True, text=True).stderr
     h, m, s = re.search(r"Duration: (\d+):(\d+):([\d.]+)", out).groups()
@@ -68,8 +90,7 @@ def main():
         panels = []
         for env in envs.ENVIRONMENTS:
             result = json.loads(by_env[env].read_text()) if env in by_env else None
-            videos = [m["filename"] for m in (result or {}).get("media") or [] if m.get("kind") == "video"]
-            panels.append((env, result, by_env[env].parent / videos[0] if videos else None))
+            panels.append((env, result, video_of(ffmpeg, by_env[env].parent, result) if env in by_env else None))
         length = max([duration(ffmpeg, v) for _, _, v in panels if v] or [2.0])
         with tempfile.TemporaryDirectory() as tmp:
             inputs, chains = [], []
