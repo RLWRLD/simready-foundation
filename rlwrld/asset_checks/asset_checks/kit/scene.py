@@ -94,13 +94,14 @@ LOOK_PRIM = "/World/AssetChecksLook"  # visual-only additions; nothing under it 
 FLOOR_PRIM = "/World/Room/Floor"  # the visible floor of NVIDIA's test room (all three tests)
 
 
-def add_visual_cues(stage, center_xy, tile_m=0.1, half_extent_m=5.0, key_intensity=1500.0):
+def add_visual_cues(stage, center_xy, tile_m=0.1, half_extent_m=5.0, key_intensity=1000.0):
     """Make the floor readable in the videos. NVIDIA's room is one grey under one uniform dome light,
     so floor, far walls and the horizon blend and nothing casts a shadow. Adds a checkerboard of
-    tile_m squares just above the visible floor (a mesh with per-face displayColor: no collider, no
-    material binding, so no physics material resolves from it) and a distant key light that casts
-    shadows. Returns what it added, or why it added nothing."""
-    from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, Vt
+    tile_m squares just above the visible floor -- two meshes, light and dark squares, each with a
+    matte (roughness 1) preview material, so the key light leaves no glare -- and a distant key
+    light 20 degrees off vertical, so a lifted object's shadow falls under it. The grid has no
+    collider, so no physics reads it or its materials. Returns what it added, or why nothing."""
+    from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade, Vt
 
     floor = stage.GetPrimAtPath(FLOOR_PRIM)
     if not floor.IsValid():
@@ -108,24 +109,33 @@ def add_visual_cues(stage, center_xy, tile_m=0.1, half_extent_m=5.0, key_intensi
     top = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render", "proxy", "guide"]).ComputeWorldBound(floor).ComputeAlignedRange().GetMax()[2]
     n = int(round(2 * half_extent_m / tile_m))
     z, x0, y0 = top + 0.0002, center_xy[0] - half_extent_m, center_xy[1] - half_extent_m
-    points = [Gf.Vec3f(x0 + i * tile_m, y0 + j * tile_m, z) for j in range(n + 1) for i in range(n + 1)]
-    indices, colors = [], []
-    light, dark = Gf.Vec3f(0.42, 0.42, 0.42), Gf.Vec3f(0.27, 0.27, 0.27)
-    for j in range(n):
-        for i in range(n):
-            a = j * (n + 1) + i
-            indices += [a, a + 1, a + n + 2, a + n + 1]
-            colors.append(light if (i + j) % 2 == 0 else dark)
     UsdGeom.Xform.Define(stage, LOOK_PRIM)
-    grid = UsdGeom.Mesh.Define(stage, LOOK_PRIM + "/FloorGrid")
-    grid.CreatePointsAttr(Vt.Vec3fArray(points))
-    grid.CreateFaceVertexCountsAttr(Vt.IntArray([4] * (n * n)))
-    grid.CreateFaceVertexIndicesAttr(Vt.IntArray(indices))
-    grid.CreateExtentAttr(Vt.Vec3fArray([Gf.Vec3f(x0, y0, z), Gf.Vec3f(x0 + n * tile_m, y0 + n * tile_m, z)]))
-    UsdGeom.PrimvarsAPI(grid).CreatePrimvar("displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.uniform).Set(Vt.Vec3fArray(colors))
+    for name, parity, grey in (("Light", 0, 0.32), ("Dark", 1, 0.18)):
+        points, indices = [], []
+        for j in range(n):
+            for i in range(n):
+                if (i + j) % 2 != parity:
+                    continue
+                base = len(points)
+                points += [Gf.Vec3f(x0 + i * tile_m, y0 + j * tile_m, z), Gf.Vec3f(x0 + (i + 1) * tile_m, y0 + j * tile_m, z),
+                           Gf.Vec3f(x0 + (i + 1) * tile_m, y0 + (j + 1) * tile_m, z), Gf.Vec3f(x0 + i * tile_m, y0 + (j + 1) * tile_m, z)]
+                indices += [base, base + 1, base + 2, base + 3]
+        mesh = UsdGeom.Mesh.Define(stage, f"{LOOK_PRIM}/FloorGrid{name}")
+        mesh.CreatePointsAttr(Vt.Vec3fArray(points))
+        mesh.CreateFaceVertexCountsAttr(Vt.IntArray([4] * (len(indices) // 4)))
+        mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(indices))
+        mesh.CreateExtentAttr(Vt.Vec3fArray([Gf.Vec3f(x0, y0, z), Gf.Vec3f(x0 + n * tile_m, y0 + n * tile_m, z)]))
+        material = UsdShade.Material.Define(stage, f"{LOOK_PRIM}/Looks/Floor{name}")
+        shader = UsdShade.Shader.Define(stage, f"{LOOK_PRIM}/Looks/Floor{name}/Shader")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(grey, grey, grey))
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(1.0)
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+        material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+        UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(material)
     key = UsdLux.DistantLight.Define(stage, LOOK_PRIM + "/KeyLight")
     key.CreateIntensityAttr(key_intensity)
-    key.CreateAngleAttr(1.0)
-    UsdGeom.XformCommonAPI(key).SetRotate(Gf.Vec3f(40.0, 0.0, -35.0))
-    return {"added": True, "floor_grid": str(grid.GetPath()), "tile_m": tile_m, "extent_m": 2 * half_extent_m,
+    key.CreateAngleAttr(2.0)
+    UsdGeom.XformCommonAPI(key).SetRotate(Gf.Vec3f(20.0, 0.0, 30.0))
+    return {"added": True, "floor_grid": f"{LOOK_PRIM}/FloorGrid{{Light,Dark}}", "tile_m": tile_m, "extent_m": 2 * half_extent_m,
             "floor_top_z": round(top, 5), "key_light": str(key.GetPath()), "key_intensity": key_intensity}
