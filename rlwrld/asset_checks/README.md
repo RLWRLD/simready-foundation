@@ -34,6 +34,12 @@ Added here, because those pieces assume PhysX:
   `physics_utils.active_physics_engine` and `fabric_utils`; they are supplied only when missing, and
   `result.json` lists what was supplied. Under Newton, asset bounds and the camera follow read the
   live Fabric poses, and PhysX-only scene preparation is skipped.
+- **Camera** (`--camera`, `nvidia_test.Scene`): `fixed` (default) places one camera at the first
+  camera update and keeps it: it frames the asset and the gripper at that moment, down to the floor
+  and up by the test's `lift_max_height`, with engine-kit's `compute_target_from_bbox`. The slope
+  test does not bound how far the asset slides and keeps engine-kit's `follow`. `result.json`
+  records which. Captures are engine-kit's size (1024 px) unless `--capture-px` is given. The frames
+  are Isaac Sim RTX renders of NVIDIA's test scene (grey room, one dome light, no viewport light rig).
 - **Runtime physics variant** (`kit/scene.py`): the asset's variant for the engine is selected, and
   the result says whether the variant's payload schemas actually composed.
 - **Launch** (`envs.py`, `run.py`): one GPU (`/physics/cudaDevice`, `/renderer/multiGpu/enabled`,

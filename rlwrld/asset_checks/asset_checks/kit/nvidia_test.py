@@ -82,7 +82,7 @@ class Recorder:
         self.prev = mats
 
 
-def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace=None):
+def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace=None, test_config=None, camera_mode="fixed"):
     from simready_benchmark_engine_kit.kit_engine_proxy import BoundsResult, KitEngineProxy
     from simready_benchmark_engine_kit.scene_handle import KitSceneHandle
 
@@ -114,11 +114,52 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
             Scene.variant = scene_mod.select_runtime_variant(self._stage, asset_path, engine)
             return handle
 
+        camera = None  # how the video camera was placed, recorded in result.json
+
+        def _place_fixed_camera(self, config):
+            """One camera pose for the whole test, framing where its objects can be: the asset and the
+            gripper as they are at the first camera update (the gripper exists by then), down to the floor,
+            and up by the test's largest lift (lift_max_height). engine-kit's own framing math places it;
+            only keys the test config sets are passed, the rest are that function's defaults. A slope test
+            does not bound how far the asset travels, so it keeps engine-kit's follow."""
+            import math
+
+            from simready_benchmark_engine_kit import camera_follow
+            from simready_benchmark_kit_suite.fet005_grasp.grasp_robot import GraspRobot
+
+            cfg = dict(test_config or {})
+            if "slope_angle_deg" in cfg:
+                return {"mode": "follow", "reason": "slope_drop does not bound how far the asset travels"}
+            state = getattr(self, "_camera_follow_state", None)
+            if state is None:
+                return {"mode": "none", "reason": "the test set up no camera"}
+            lo, hi = [math.inf] * 3, [-math.inf] * 3
+            for root in (scene_mod.ASSET_PRIM, GraspRobot.ROBOT_PATH):
+                if not self._stage.GetPrimAtPath(root).IsValid():
+                    continue
+                bodies = [str(p.GetPath()) for p in reading.rigid_bodies(self._stage, root)]
+                box = reading.world_bound(self._stage, root, reading.body_matrices(self._stage, bodies, engine)[0] if bodies else {})
+                lo, hi = [min(a, b) for a, b in zip(lo, box[0])], [max(a, b) for a, b in zip(hi, box[1])]
+            lo[2] = min(lo[2], float(cfg.get("floor_level", 0.0)))
+            hi[2] += float(cfg.get("lift_max_height", 0.0))
+            keys = {"camera_fit_mode": "fit_mode", "camera_margin_factor": "margin_factor", "camera_direction": "direction"}
+            kwargs = {arg: (config or {})[key] for key, arg in keys.items() if key in (config or {})}
+            params = camera_follow.compute_target_from_bbox(center=tuple((a + b) / 2 for a, b in zip(lo, hi)),
+                                                            size=tuple(b - a for a, b in zip(lo, hi)), **kwargs)
+            camera_follow.apply_camera_params(self._stage, state.camera_prim_path, params)
+            return {"mode": "fixed", "box": [[round(v, 4) for v in lo], [round(v, 4) for v in hi]]}
+
         def update_camera_follow(self, config=None, update_history=True):
-            """engine-kit's camera follow bounds the asset from USD, which Newton does not update, so the
-            camera stayed where the asset started. Under Newton that one read gets the live bound for this
-            call; the rest of engine-kit's follow logic (history, smoothing, zoom-out) is unchanged."""
+            """camera_mode "fixed": the first call places one camera for the whole test, later calls do
+            nothing. Otherwise engine-kit's follow, where one fix applies: its follow bounds the asset from
+            USD, which Newton does not update, so under Newton that one read gets the live bound; the rest
+            of engine-kit's follow logic (history, smoothing, zoom-out) is unchanged."""
             import omni.timeline
+
+            if Scene.camera is None:
+                Scene.camera = self._place_fixed_camera(config) if camera_mode == "fixed" else {"mode": "follow", "reason": "requested"}
+            if Scene.camera["mode"] != "follow":
+                return None
 
             if engine == "physx" or omni.timeline.get_timeline_interface().is_stopped():
                 return super().update_camera_follow(config, update_history)
@@ -207,11 +248,13 @@ async def run(req):
     profile = contact.PROFILES[profile_name] if engine == "newton" else None  # PR #2's settings are MuJoCo's
     recorder = Recorder(engine, 1.0 / float(config.get("physics_fps", 240)))
     trace = contact.Trace(req["trace_contacts"]) if engine == "newton" and req.get("trace_contacts") else None
-    Scene, Proxy = _classes(engine, asset, recorder, profile, out if req.get("dump_physics") else None, trace)
+    Scene, Proxy = _classes(engine, asset, recorder, profile, out if req.get("dump_physics") else None, trace,
+                            config, req.get("camera", "fixed"))
 
     stage = await scene_mod.new_stage()
     handle = Scene(stage)
-    proxy = Proxy(out, width=int(req.get("capture_px", 512)), height=int(req.get("capture_px", 512)))
+    px = req.get("capture_px")  # None: engine-kit's own capture size
+    proxy = Proxy(out) if px is None else Proxy(out, width=int(px), height=int(px))
     proxy._scene_handle = handle
     ctx = RunContext(
         asset_path=asset, asset_rel_path=asset, output_dir=out, test_name=defn.name,
@@ -237,6 +280,7 @@ async def run(req):
         "contact_profile": profile_name if profile is not None else "stock", "contact_applied": Scene.contact_applied,
         "solver_seen": Proxy.solver_seen,
         "physics_dumps": Proxy.physics_dumps,
+        "camera": Scene.camera,
         "contact_trace": trace.rows if trace is not None else None,
         "engine_observed": recorder.engine_observed, "pose_source": sorted(set(recorder.traj["source"])),
         "rigid_bodies": recorder.bodies, "trajectory": recorder.traj,
