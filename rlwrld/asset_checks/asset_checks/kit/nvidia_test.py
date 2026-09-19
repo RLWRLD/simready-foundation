@@ -82,7 +82,8 @@ class Recorder:
         self.prev = mats
 
 
-def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace=None, test_config=None, camera_mode="fixed"):
+def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace=None, test_config=None, camera_mode="fixed",
+             visual_cues=True):
     from simready_benchmark_engine_kit.kit_engine_proxy import BoundsResult, KitEngineProxy
     from simready_benchmark_engine_kit.scene_handle import KitSceneHandle
 
@@ -115,6 +116,18 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
             return handle
 
         camera = None  # how the video camera was placed, recorded in result.json
+        look = None  # the floor grid and key light added for the videos, recorded in result.json
+
+        def setup_camera_follow(self, config=None):
+            # every test sets its camera up once, after building the room and placing the asset
+            if Scene.look is None:
+                if visual_cues:
+                    bodies = [str(p.GetPath()) for p in reading.rigid_bodies(self._stage, scene_mod.ASSET_PRIM)]
+                    lo, hi = reading.world_bound(self._stage, scene_mod.ASSET_PRIM, reading.body_matrices(self._stage, bodies, engine)[0] if bodies else {})
+                    Scene.look = scene_mod.add_visual_cues(self._stage, ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2))
+                else:
+                    Scene.look = {"added": False, "reason": "requested plain scene"}
+            return super().setup_camera_follow(config)
 
         def _place_fixed_camera(self, config):
             """One camera pose for the whole test, framing where its objects can be: the asset and the
@@ -249,7 +262,7 @@ async def run(req):
     recorder = Recorder(engine, 1.0 / float(config.get("physics_fps", 240)))
     trace = contact.Trace(req["trace_contacts"]) if engine == "newton" and req.get("trace_contacts") else None
     Scene, Proxy = _classes(engine, asset, recorder, profile, out if req.get("dump_physics") else None, trace,
-                            config, req.get("camera", "fixed"))
+                            config, req.get("camera", "fixed"), req.get("visual_cues", True))
 
     stage = await scene_mod.new_stage()
     handle = Scene(stage)
@@ -281,6 +294,7 @@ async def run(req):
         "solver_seen": Proxy.solver_seen,
         "physics_dumps": Proxy.physics_dumps,
         "camera": Scene.camera,
+        "look": Scene.look,
         "contact_trace": trace.rows if trace is not None else None,
         "engine_observed": recorder.engine_observed, "pose_source": sorted(set(recorder.traj["source"])),
         "rigid_bodies": recorder.bodies, "trajectory": recorder.traj,
