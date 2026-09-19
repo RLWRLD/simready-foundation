@@ -14,6 +14,13 @@ PYTHONPATH=rlwrld/asset_checks python3 -m asset_checks.run \
     --experiments drop,slope,grasp [--newton-contact pr2] <asset.usd> [...]
 ```
 
+Side-by-side videos (PhysX | Newton 1.2 | Newton 1.5 per asset and test, labelled with NVIDIA's
+verdict) from a finished run directory, with the bench venv's ffmpeg and PIL:
+
+```bash
+PYTHONPATH=rlwrld/asset_checks <bench>/.venv-isaac610/bin/python -m asset_checks.compare <out dir>
+```
+
 `--bench` is the directory with the two Isaac Sim venvs, `isaac-run` and the `GPU` file. Every
 asset x environment x experiment runs in its own Kit process; `<out>/summary.md` is the table and
 each run keeps `request.json`, `result.json` (verdict, NVIDIA's metrics and logs, trajectory, what
