@@ -46,16 +46,48 @@ def mesh_points(stage, root_path):
     from asset_checks.kit.reading import raw_api_schemas
     from asset_checks.kit.scene import DEFORMABLE_SIM_API
 
-    deformable = [prim for prim in Usd.PrimRange(stage.GetPrimAtPath(root_path), Usd.TraverseInstanceProxies())
-                  if any(name.endswith(api) for name in raw_api_schemas(prim) for api in DEFORMABLE_SIM_API)]
+    # The prims that declare themselves simulated, or, when none of those moved, whatever geometry
+    # the asset has: PhysX updates a surface deformable's own mesh, but for a volume deformable it is
+    # the render mesh that follows the simulation tetmesh, and that is what anyone watching sees.
+    prims = list(Usd.PrimRange(stage.GetPrimAtPath(root_path), Usd.TraverseInstanceProxies()))
+    declared = [prim for prim in prims
+                if any(name.endswith(api) for name in raw_api_schemas(prim) for api in DEFORMABLE_SIM_API)]
+    geometry = [prim for prim in prims if prim.IsA(UsdGeom.Mesh) or prim.IsA(UsdGeom.TetMesh)]
     out = []
-    for prim in deformable:
-        points = UsdGeom.Mesh(prim).GetPointsAttr().Get()
+    for prim in (declared or geometry):
+        points = UsdGeom.PointBased(prim).GetPointsAttr().Get()
         if not points:
             continue
         to_world = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         out.extend([to_world.Transform(p) for p in points])
     return np.asarray([[p[0], p[1], p[2]] for p in out]) if out else None
+
+
+def write_points_back(stage, root_path, positions):
+    """Put the solver's particles into the asset's geometry, so a capture shows the simulation.
+
+    Isaac's Newton stage syncs rigid body transforms to Fabric and nothing else: a cloth or a soft
+    body simulates, but the mesh a renderer draws stays where it was authored, and every video of a
+    deformable comes out still. The particles are that geometry's points, in import order, so
+    writing them back is what makes the picture true. Returns the prim written, or None.
+    """
+    from pxr import Gf, Usd, UsdGeom, Vt
+
+    from asset_checks.kit.reading import raw_api_schemas
+    from asset_checks.kit.scene import DEFORMABLE_SIM_API
+
+    for prim in Usd.PrimRange(stage.GetPrimAtPath(root_path), Usd.TraverseInstanceProxies()):
+        points_attr = UsdGeom.PointBased(prim).GetPointsAttr() if prim.IsA(UsdGeom.PointBased) else None
+        if points_attr is None or not points_attr.HasAuthoredValue():
+            continue
+        declared = any(name.endswith(api) for name in raw_api_schemas(prim) for api in DEFORMABLE_SIM_API)
+        if not declared or len(points_attr.Get() or []) != len(positions):
+            continue
+        to_local = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()).GetInverse()
+        local = [to_local.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2]))) for p in positions]
+        points_attr.Set(Vt.Vec3fArray([Gf.Vec3f(float(v[0]), float(v[1]), float(v[2])) for v in local]))
+        return str(prim.GetPath())
+    return None
 
 
 def deformable_state(ctx, previous, dt):
@@ -99,7 +131,8 @@ def lift_to(ctx, target_z):
     api = UsdGeom.XformCommonAPI(prim)
     translate = api.GetXformVectors(Usd.TimeCode.Default())[0]  # the move is relative to where it is
     api.SetTranslate(Gf.Vec3d(translate[0], translate[1], float(translate[2] + target_z - low)))
-    return target_z - low
+    span = box.ComputeAlignedRange()
+    return target_z - low, float(span.GetMax()[2] - span.GetMin()[2])
 
 
 @test(
@@ -128,6 +161,7 @@ def lift_to(ctx, target_z):
         "tunnel_depth": 0.01,      # how far below the floor a particle may sit
         "min_fall": 0.01,          # how far the lowest particle must drop to count as falling
         "drop_height": 0.05,       # where the asset's lowest point starts above the floor
+        "floor_margin_of_height": 0.5,  # or this much of the asset's own height, whichever is larger
         "rest_speed": 0.05,        # m/s, under which the asset counts as still
         "rest_hold_seconds": 0.5,
     },
@@ -146,7 +180,10 @@ async def deformable_drop(ctx):
     room = ctx.scene.add_room()
     room.auto_size(ctx.scene.asset)
     room.show_ground()
-    lifted = lift_to(ctx, floor + float(config["drop_height"]))
+    lifted, height = lift_to(ctx, floor + float(config["drop_height"]))
+    # "Reached the floor" has to scale with the asset: a deformable rests on its own thickness, and
+    # a 2 cm allowance that fits a sheet of cloth fails a banana lying on its side.
+    margin = max(margin, float(config["floor_margin_of_height"]) * height)
     ctx.scene.setup_camera_follow()  # where the runner places its camera and floor cues
 
     physics = ctx.scene.add_physics(fps=physics_fps)
@@ -203,6 +240,10 @@ async def deformable_drop(ctx):
         if settled_at is None and rest_run >= rest_frames:
             settled_at = (frame - rest_frames + 1) / physics_fps
         if frame % capture_interval == 0:
+            if source == "newton particles":
+                written = write_points_back(ctx.scene._stage, ASSET_PRIM, positions)
+                if frame == 0:
+                    ctx.log(f"[deformable] writing the solver's points into {written} for the capture")
             ctx.scene.update_camera_follow()
             await ctx.capture_frame(label="deformable_drop")
         await ctx.physics_advance()
