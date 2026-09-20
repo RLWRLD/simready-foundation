@@ -201,6 +201,15 @@ def lowest_point(points, matrices):
     return min(lows)
 
 
+def raw_api_schemas(prim):
+    """The prim's applied API schemas as authored. Usd.Prim.GetAppliedSchemas() drops names this USD
+    build does not register, and the deformable proposal's public names are registered in neither
+    Isaac venv, so the authored list is the only place they appear -- which is what Newton's own
+    importer falls back to reading."""
+    listop = prim.GetMetadata("apiSchemas")
+    return list(listop.GetAddedOrExplicitItems()) if listop else []
+
+
 LEGACY_MASS_ATTR = "pxr:usd:physics_mass"  # an older encoding UsdPhysics.MassAPI does not resolve
 
 

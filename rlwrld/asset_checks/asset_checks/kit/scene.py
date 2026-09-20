@@ -143,6 +143,46 @@ def add_visual_cues(stage, center_xy, tile_m=0.1, half_extent_m=5.0, key_intensi
 
 DEFAULT_NEWTON_SOLVER = "mujoco"  # what Isaac's Newton stage builds when no scene schema selects one
 
+# What an asset declares itself to be, by the API schemas on its geometry. A deformable is not a
+# rigid body with soft settings: it is particles, and only a solver that integrates particles can
+# run it. The sim schemas are the AOUSD proposal's public names, which Newton's importer reads.
+DEFORMABLE_SIM_API = ("PhysicsSurfaceDeformableSimAPI", "PhysicsVolumeDeformableSimAPI",
+                      "PhysicsCurvesDeformableSimAPI")
+SOLVER_SIMULATES = {  # measured, not assumed: MuJoCo refuses a stage whose bodies are particles
+    "physx": {"rigid", "deformable"},   # one engine, both kinds, no solver to choose
+    "mujoco": {"rigid"},                # MuJoCo-Warp is a rigid-body engine
+    "xpbd": {"rigid", "deformable"},    # XPBD: rigid and soft bodies
+    "vbd": {"rigid", "deformable"},     # VBD for particles, AVBD for rigid bodies, and the two coupled
+}
+
+
+def asset_kinds(stage, root_path):
+    """{"rigid"} / {"deformable"} / both / empty -- what the asset's own schemas declare it to be."""
+    from pxr import Usd, UsdPhysics
+
+    from asset_checks.kit.reading import raw_api_schemas
+
+    kinds = set()
+    for prim in Usd.PrimRange(stage.GetPrimAtPath(root_path), Usd.TraverseInstanceProxies()):
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            kinds.add("rigid")
+        applied = set(raw_api_schemas(prim))
+        if applied.intersection(DEFORMABLE_SIM_API):
+            kinds.add("deformable")
+    return kinds
+
+
+def check_asset_fits_solver(stage, root_path, solver):
+    """Refuse a combination the solver cannot simulate, before the test spends a run on it."""
+    kinds = asset_kinds(stage, root_path)
+    unsupported = kinds - SOLVER_SIMULATES.get(solver, set())
+    if unsupported:
+        raise RuntimeError(
+            f"the asset declares {sorted(kinds)} geometry and the {solver!r} solver simulates "
+            f"{sorted(SOLVER_SIMULATES.get(solver, set()))}: {sorted(unsupported)} has no solver here. "
+            f"Run it in an environment whose solver takes it.")
+    return {"asset_kinds": sorted(kinds), "solver_simulates": sorted(SOLVER_SIMULATES.get(solver, set()))}
+
 
 def _schema_registered(identifier) -> bool:
     """Whether this Kit registers that schema identifier. A schema's USD identifier is not its Tf
@@ -167,15 +207,16 @@ def select_solver(stage, engine, solver):
 
     from asset_checks.envs import NEWTON_SOLVER_SCENE_API
 
+    fit = check_asset_fits_solver(stage, ASSET_PRIM, solver)
     if engine != "newton":
-        return {"requested": solver, "applied": None, "reason": f"{engine} has one solver"}
+        return {"requested": solver, "applied": None, "reason": f"{engine} has one solver", **fit}
     try:
         from isaacsim.physics.newton.impl.utils import newton_solver_to_api_schema as mapping
     except ImportError:  # Isaac 6.0.1: the solver comes from the Python config, not from USD
         mapping = None
     schema = NEWTON_SOLVER_SCENE_API[solver]
     if solver == DEFAULT_NEWTON_SOLVER and (mapping is None or not _schema_registered(schema)):
-        return {"requested": solver, "applied": None,
+        return {"requested": solver, "applied": None, **fit,
                 "reason": f"this Isaac builds {solver} by default and cannot select from USD"}
     if mapping is None or mapping.get(solver) != schema:
         raise RuntimeError(f"this Isaac cannot select the {solver!r} solver from USD "
@@ -190,4 +231,4 @@ def select_solver(stage, engine, solver):
             if prim.HasAPI(other):
                 raise RuntimeError(f"{prim.GetPath()} already carries {other}; two solver schemas are refused")
         prim.ApplyAPI(schema)
-    return {"requested": solver, "applied": schema, "scenes": [str(p.GetPath()) for p in scenes]}
+    return {"requested": solver, "applied": schema, "scenes": [str(p.GetPath()) for p in scenes], **fit}
