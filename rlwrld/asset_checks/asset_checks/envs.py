@@ -40,6 +40,7 @@ ENVIRONMENTS = {
         Environment("newton15", "isaac610", "isaacsim.exp.full.newton", "newton", "1.5.", "mujoco", "Isaac Sim 6.1.0, Newton 1.5.0, MuJoCo"),
         Environment("newton12_xpbd", "isaac601", "isaacsim.exp.full.newton", "newton", "1.2.", "xpbd", "Isaac Sim 6.0.1, Newton 1.2.1, XPBD"),
         Environment("newton15_xpbd", "isaac610", "isaacsim.exp.full.newton", "newton", "1.5.", "xpbd", "Isaac Sim 6.1.0, Newton 1.5.0, XPBD"),
+        Environment("newton12_vbd", "isaac601", "isaacsim.exp.full.newton", "newton", "1.2.", "vbd", "Isaac Sim 6.0.1, Newton 1.2.1, VBD"),
         Environment("newton15_vbd", "isaac610", "isaacsim.exp.full.newton", "newton", "1.5.", "vbd", "Isaac Sim 6.1.0, Newton 1.5.0, VBD"),
     )
 }

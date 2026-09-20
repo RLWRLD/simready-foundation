@@ -164,6 +164,7 @@ def lift_to(ctx, target_z):
         "floor_margin_of_height": 0.5,  # or this much of the asset's own height, whichever is larger
         "rest_speed": 0.05,        # m/s, under which the asset counts as still
         "rest_hold_seconds": 0.5,
+        "import_grace_seconds": 1.0,   # how long an engine may take to build its model before this gives up
     },
     max_duration=300,
 )
@@ -174,6 +175,7 @@ async def deformable_drop(ctx):
     capture_interval = max(1, physics_fps // int(config["capture_fps"]))
     total_frames = int(float(config["simulation_seconds"]) * physics_fps)
     rest_frames = max(1, int(float(config["rest_hold_seconds"]) * physics_fps))
+    grace_frames = int(float(config["import_grace_seconds"]) * physics_fps)
 
     ctx.set_settle_frames(config["settle_frames"])
     ctx.scene.load_asset(ctx.asset_path, timeout=config["asset_load_timeout"])
@@ -208,6 +210,8 @@ async def deformable_drop(ctx):
     for frame in range(total_frames):
         await ctx.physics_step()
         positions, speed, source = deformable_state(ctx, previous, 1.0 / physics_fps)
+        if positions is None and frame < grace_frames:
+            continue  # the engine may not have built its model yet; see import_grace_seconds
         if positions is None:
             ctx.fail("nothing deformable to measure: " + (
                 "this Newton built no particles from the asset, so its importer did not read it as a "

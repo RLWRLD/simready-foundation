@@ -195,20 +195,81 @@ def _schema_registered(identifier) -> bool:
                for t in Plug.Registry().GetAllDerivedTypes("UsdAPISchemaBase"))
 
 
+def _register_mujoco_attributes_too():
+    """Isaac 6.0.1 hands Newton's USD importer a MuJoCo schema resolver whatever the solver, but
+    registers MuJoCo's custom attributes on the builder only when the solver is MuJoCo, so asking
+    for any other solver there fails with "MuJoCo custom attributes not registered" and no model is
+    built at all. Registering them alongside whatever else is registered costs nothing -- they are
+    attribute declarations. Idempotent: registering twice is ignored.
+
+    Isaac 6.0.1 also abandons initialisation when the builder has no rigid body, which drops a
+    deformable-only scene outright (6.1.0 counts particles in the same test). That one is not
+    patched here: adding a body to get past it made XPBD 1.2.1 fail with an illegal CUDA access, so
+    on that Isaac a deformable-only scene is reported as not running rather than forced."""
+    import newton
+
+    if getattr(newton.ModelBuilder, "_asset_checks_mjc_attributes", False):
+        return
+    original = newton.ModelBuilder.add_usd
+
+    def add_usd(self, *args, **kwargs):
+        try:
+            newton.solvers.SolverMuJoCo.register_custom_attributes(self)
+        except Exception:  # noqa: BLE001 - already registered, which is what we want
+            pass
+        return original(self, *args, **kwargs)
+
+    newton.ModelBuilder.add_usd = add_usd
+    newton.ModelBuilder._asset_checks_mjc_attributes = True
+
+
 def _select_solver_by_config(solver):
     """Isaac 6.0.1's Newton stage has no schema mapping: `_get_solver` reads `cfg.solver_cfg`, whose
-    `solver_type` it switches on, and raises for anything but mujoco and xpbd. Setting the config
-    before the first play is how a solver is asked for there. Returns what was set."""
-    from isaacsim.physics.newton.impl import solver_config
+    `solver_type` it switches on. Setting that config before the first play is how a solver is asked
+    for there.
+
+    It knows two -- mujoco and xpbd -- and raises for anything else, but the Newton it is pinned to
+    ships every solver, so a missing branch is a gap in Isaac's switch rather than a missing
+    capability. For such a solver this supplies a config carrying its name and a `_get_solver` that
+    builds it from newton.solvers, leaving Isaac's own branches untouched. Returns what was set."""
+    import dataclasses
+
+    import newton
     import isaacsim.physics.newton as isaac_newton
+    from isaacsim.physics.newton.impl import solver_config
+    from isaacsim.physics.newton.impl.newton_stage import NewtonStage
 
     by_type = {getattr(cls, "__dataclass_fields__", {}).get("solver_type").default: cls
                for cls in vars(solver_config).values()
                if isinstance(cls, type) and "solver_type" in getattr(cls, "__dataclass_fields__", {})}
-    if solver not in by_type:
-        raise RuntimeError(f"this Isaac has no solver config for {solver!r}; it has {sorted(by_type)}")
-    isaac_newton.acquire_stage().cfg.solver_cfg = by_type[solver]()
-    return f"cfg.solver_cfg = {by_type[solver].__name__}"
+    stage_handle = isaac_newton.acquire_stage()
+    _register_mujoco_attributes_too()
+    if solver in by_type:
+        stage_handle.cfg.solver_cfg = by_type[solver]()
+        return f"cfg.solver_cfg = {by_type[solver].__name__}"
+
+    solver_class = getattr(newton.solvers, f"Solver{solver.upper()}", None) or \
+        getattr(newton.solvers, f"Solver{solver.capitalize()}", None)
+    if solver_class is None:
+        raise RuntimeError(f"this Isaac has no config for {solver!r} and Newton has no solver by that name")
+    if not getattr(NewtonStage, "_asset_checks_solver_patched", False):
+        original = NewtonStage._get_solver.__func__
+
+        def _get_solver(cls, model, solver_cfg):
+            wanted = getattr(solver_cfg, "solver_type", None)
+            if wanted in by_type or wanted is None:
+                return original(cls, model, solver_cfg)
+            built = getattr(newton.solvers, f"Solver{wanted.upper()}", None)
+            if built is None:
+                return original(cls, model, solver_cfg)
+            kwargs = {k: v for k, v in vars(solver_cfg).items() if k != "solver_type"}
+            return built(model, **kwargs)
+
+        NewtonStage._get_solver = classmethod(_get_solver)
+        NewtonStage._asset_checks_solver_patched = True
+    stage_handle.cfg.solver_cfg = dataclasses.make_dataclass(
+        f"{solver.upper()}SolverConfigSuppliedByAssetChecks", [("solver_type", str, solver)])()
+    return f"cfg.solver_cfg = {solver!r} through asset_checks (this Isaac's _get_solver has no branch for it)"
 
 
 def select_solver(stage, engine, solver):
