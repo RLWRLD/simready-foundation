@@ -60,11 +60,18 @@ def mesh_points(stage, root_path):
 
 def deformable_state(ctx, previous, dt):
     """(positions, speeds, where they came from) this step, whichever engine is running."""
+    from simready_benchmark_engine_kit.physics_utils import active_physics_engine
+
     positions, velocities = newton_particles()
     source = "newton particles"
     if positions is None:
         from asset_checks.kit.scene import ASSET_PRIM
 
+        if active_physics_engine() == "newton":
+            # Under Newton the particles are the simulation. Falling back to the mesh here would
+            # measure the points as authored and report a still asset, hiding the real finding:
+            # this Newton did not import the asset as a deformable at all.
+            return None, None, "newton, no particles"
         positions = mesh_points(ctx.scene._stage, ASSET_PRIM)
         source = "mesh points"
         velocities = None if positions is None or previous is None or previous.shape != positions.shape \
@@ -123,6 +130,10 @@ async def deformable_drop(ctx):
     physics = ctx.scene.add_physics(fps=physics_fps)
     physics.stop()
     physics.play()
+    # One frame of the starting state, so a run that fails on its first step still has a picture of
+    # what it was given -- which is the whole story when an engine did not import the asset.
+    ctx.scene.update_camera_follow()
+    await ctx.capture_frame(label="deformable_drop")
 
     start_z, rest_run = None, 0
     lowest_seen, deepest_below, fastest = None, 0.0, 0.0
@@ -131,8 +142,11 @@ async def deformable_drop(ctx):
         await ctx.physics_step()
         positions, speed, source = deformable_state(ctx, previous, 1.0 / physics_fps)
         if positions is None:
-            ctx.fail("nothing deformable to measure: the asset did not import as a deformable in "
-                     "this engine, or this solver does not simulate it")
+            ctx.fail("nothing deformable to measure: " + (
+                "this Newton built no particles from the asset, so its importer did not read it as a "
+                "deformable (Newton 1.2.1 has no USD deformable import; 1.5 reads the proposal's "
+                "Physics*DeformableSimAPI names)" if source == "newton, no particles" else
+                "the asset has no deformable geometry this engine could find"))
             ctx.add_metric("deformable_drop_passed", 0)
             return
         if not np.isfinite(positions).all():
