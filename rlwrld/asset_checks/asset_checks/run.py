@@ -209,26 +209,85 @@ KEY_METRICS = {
 }
 
 
+MARKS = {"pass": "O", "fail": "X", "skipped": "-"}
+
+
+def _cell_mark(result):
+    """One character for the matrix: what the test said, or ! when the run itself did not count."""
+    if result.get("invalid"):
+        return "!"
+    return MARKS.get(result.get("verdict"), "?")
+
+
+def _reason(result):
+    if result.get("invalid"):
+        return "INVALID: " + "; ".join(result["invalid"])
+    message = (result.get("message") or "").strip().splitlines()
+    if result.get("verdict") == "pass" or not message:
+        return ""
+    return (message[1] if len(message) > 1 else message[0]).split(": ", 1)[-1].strip()
+
+
 def summarize(rows, out):
-    head = ["asset", "env", "contact", "NVIDIA test", "NVIDIA verdict", "NVIDIA metrics", "PR #2 criteria on this trajectory",
-            "max dip mm", "tilt deg", "runtime variant", "payload schemas lost"]
-    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    """<out>/summary.md: a verdict matrix per experiment (assets down, environments across), then
+    every cell's reason, then the per-run detail. The matrix is the point -- a run is a comparison
+    across environments, and one row per run buries that once there is more than a handful."""
+    assets = sorted({asset for asset, _, _ in rows})
+    environments = [name for name in envs.ENVIRONMENTS if any(env == name for _, env, _ in rows)]
+    experiments = sorted({(r.get("request") or {}).get("experiment") or r.get("test", "?") for _, _, r in rows})
+    by_cell = {(asset, (r.get("request") or {}).get("experiment") or r.get("test", "?"), env): r for asset, env, r in rows}
+    lines, reasons = [], []
+    for experiment in experiments:
+        lines += [f"## {experiment}", "", "| asset | " + " | ".join(environments) + " |",
+                  "|---" * (len(environments) + 1) + "|"]
+        for asset in assets:
+            marks = []
+            for env in environments:
+                result = by_cell.get((asset, experiment, env))
+                marks.append("" if result is None else _cell_mark(result))
+                why = "" if result is None else _reason(result)
+                if why:
+                    reasons.append(f"- `{asset}` / {env} / {experiment}: {why}")
+            lines.append(f"| {asset} | " + " | ".join(marks) + " |")
+        reference = "physx" if "physx" in environments else (environments[0] if environments else None)
+        agreement = []
+        for env in environments:
+            if env == reference:
+                continue
+            pairs = [(by_cell.get((a, experiment, reference)), by_cell.get((a, experiment, env))) for a in assets]
+            pairs = [(x, y) for x, y in pairs if x and y and not x.get("invalid") and not y.get("invalid")
+                     and x.get("verdict") != "skipped" and y.get("verdict") != "skipped"]
+            if pairs:
+                agreement.append(f"{env} {sum(x['verdict'] == y['verdict'] for x, y in pairs)}/{len(pairs)}")
+        if agreement:
+            lines += ["", f"Agreement with {reference} (cells both ran): " + ", ".join(agreement)]
+        lines.append("")
+    lines += ["Legend: O pass, X fail, - skipped by the test, ! the run did not count, blank not run.", ""]
+    if reasons:
+        lines += ["## Why", ""] + reasons + [""]
+
+    head = ["asset", "env", "experiment", "contact", "solver", "NVIDIA verdict", "NVIDIA metrics",
+            "PR #2 criteria on this trajectory", "max dip mm", "tilt deg", "runtime variant", "payload schemas lost"]
+    lines += ["## Every run", "", "| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for asset, env, r in rows:
+        experiment = (r.get("request") or {}).get("experiment") or r.get("test", "?")
         if r.get("invalid"):
-            lines.append("| " + " | ".join([asset, env, "", (r.get("request") or {}).get("experiment", ""), "INVALID: " + "; ".join(r["invalid"])[:160]] + [""] * (len(head) - 5)) + " |")
+            lines.append("| " + " | ".join([asset, env, experiment, "", "", "INVALID: " + "; ".join(r["invalid"])[:160]]
+                                           + [""] * (len(head) - 6)) + " |")
             continue
         v, p = r.get("variant") or {}, r.get("pr2_criteria")
         sel = f"{v['selected']['variantSet']}={v['selected']['option']}" if v.get("selected") else ("none declared" if not v.get("declared") else "not declared for this engine")
         lost = sum(len(x) for x in (v.get("payload_schemas_not_composed") or {}).values())
         metrics = r.get("metrics") or {}
         shown = ", ".join(f"{k.split('_', 2)[-1]}={metrics[k]['value']}" for k in KEY_METRICS.get(r["test"], ()) if k in metrics)
-        message = (r.get("message") or "").strip().splitlines()
-        verdict = r["verdict"] + ("" if r["verdict"] == "pass" or not message else ": " + message[0][:90])
+        verdict = r["verdict"] + (": " + _reason(r)[:90] if _reason(r) else "")
         pr2 = "" if p is None else (("pass" if p["passed"] else "FAIL: " + p["message"][:50]) + (f" ({p['message'][:60]})" if p["passed"] and p["message"] else ""))
         dip = "" if p is None else f"{p['max_penetration_m'] * 1000:.1f}"
         traj = r.get("trajectory") or {}
         tilt = str(traj["tilt_deg"][-1]) if traj.get("tilt_deg") and r["test"] != "grasp_and_lift" else ""  # a grasp lifts and shakes the asset
-        lines.append("| " + " | ".join([asset, env, r.get("contact_profile", ""), r["test"], verdict, shown, pr2, dip, tilt, sel, str(lost)]) + " |")
+        ran = ((r.get("solver_seen") or [{}])[-1]).get("solver") or (r.get("solver") or {}).get("requested", "")
+        lines.append("| " + " | ".join([asset, env, experiment, r.get("contact_profile", ""), str(ran), verdict, shown,
+                                        pr2, dip, tilt, sel, str(lost)]) + " |")
     notes = [
         "",
         "NVIDIA's tests run unmodified; their verdicts and metrics are the tests' own. PR #2 (newton15_cert.py) runs its",
@@ -236,7 +295,7 @@ def summarize(rows, out):
         "NVIDIA's trajectory. `max dip`: deepest collider vertex below the floor; `tilt`: final rotation from the first step.",
     ]
     (out / "summary.md").write_text("\n".join(lines + notes) + "\n")
-    print("\n".join(lines))
+    print("\n".join(lines[:lines.index("Legend: O pass, X fail, - skipped by the test, ! the run did not count, blank not run.") + 1]))
 
 
 def main():
