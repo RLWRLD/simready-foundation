@@ -62,22 +62,24 @@ def deformable_state(ctx, previous, dt):
     """(positions, speeds, where they came from) this step, whichever engine is running."""
     from simready_benchmark_engine_kit.physics_utils import active_physics_engine
 
-    positions, velocities = newton_particles()
-    source = "newton particles"
-    if positions is None:
-        from asset_checks.kit.scene import ASSET_PRIM
+    from asset_checks.kit.scene import ASSET_PRIM
 
-        if active_physics_engine() == "newton":
-            # Under Newton the particles are the simulation. Falling back to the mesh here would
-            # measure the points as authored and report a still asset, hiding the real finding:
-            # this Newton did not import the asset as a deformable at all.
+    # Whether the engine built anything to simulate, and where that thing is, are two questions.
+    # Newton's particle array answers the first: no particles means the importer did not read the
+    # asset as a deformable, which no amount of geometry reading would reveal. The geometry answers
+    # the second for every engine alike -- PhysX has no particle array, and a Newton solver's
+    # particle frame is its own (VBD reports a cloth authored at 5 cm as starting at 75 cm) -- and it
+    # is also what a renderer and a person see.
+    if active_physics_engine() == "newton":
+        positions, velocities = newton_particles()
+        if positions is None:
             return None, None, "newton, no particles"
-        positions = mesh_points(ctx.scene._stage, ASSET_PRIM)
-        source = "mesh points"
-        velocities = None if positions is None or previous is None or previous.shape != positions.shape \
-            else (positions - previous) / dt
-    if positions is None:
-        return None, None, source
+        source = "newton particles"
+    else:
+        positions, source = mesh_points(ctx.scene._stage, ASSET_PRIM), "deformable geometry"
+        if positions is None:
+            return None, None, "no deformable geometry"
+        velocities = None if previous is None or previous.shape != positions.shape else (positions - previous) / dt
     speeds = np.abs(velocities).max() if velocities is not None and len(velocities) else 0.0
     return positions, float(speeds), source
 
@@ -184,11 +186,15 @@ async def deformable_drop(ctx):
         frames = frame + 1
         low = float(positions[:, 2].min())
         if lowest_seen is None:
-            if start_z is None:
-                start_z = low
-            lowest_seen = min(start_z, low)
-            ctx.log(f"[deformable] starts at {start_z:.4f} by its own geometry; the first step reads "
-                    f"{low:.4f} from {source}")
+            # A solver reports its particles in its own frame: Newton VBD puts a cloth authored at
+            # 5 cm at 75 cm. One step of falling apart, the first reading is the start, so the offset
+            # between the two frames is constant and the floor moves with it. Measured, not assumed:
+            # under XPBD it comes out at zero and nothing shifts.
+            offset = 0.0 if start_z is None else low - start_z
+            floor += offset
+            start_z, lowest_seen = low, low
+            ctx.log(f"[deformable] starts at {low:.4f} in {source}; the asset's own geometry says "
+                    f"{low - offset:.4f}, so the floor is taken as {floor:.4f} here")
         lowest_seen = min(lowest_seen, low)
         deepest_below = max(deepest_below, floor - low)
         previous = positions
@@ -207,6 +213,7 @@ async def deformable_drop(ctx):
     ctx.add_metric("deformable_drop_points", int(len(positions)))
     ctx.add_metric("deformable_drop_start_z", round(start_z, 4))
     ctx.add_metric("deformable_drop_lifted_by", round(lifted, 4))
+    ctx.add_metric("deformable_drop_floor_used", round(floor, 4))
     ctx.log(f"[deformable] measured from {source}")
     ctx.add_metric("deformable_drop_fall_m", round(fell, 4))
     ctx.add_metric("deformable_drop_lowest_z", round(lowest_seen, 4))
