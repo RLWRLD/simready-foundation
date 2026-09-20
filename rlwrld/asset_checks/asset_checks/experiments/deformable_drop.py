@@ -82,6 +82,24 @@ def deformable_state(ctx, previous, dt):
     return positions, float(speeds), source
 
 
+def lift_to(ctx, target_z):
+    """Put the asset's lowest point at target_z. NVIDIA's room helper places a rigid body by its
+    bounding box; a deformable's box is the same USD geometry, but the helper refuses an asset with
+    no rigid body, so this moves the asset's own transform. Newton and PhysX both read the geometry
+    in world space when the timeline starts, so a transform authored now is where it begins."""
+    from pxr import Gf, Usd, UsdGeom
+
+    from asset_checks.kit.scene import ASSET_PRIM
+
+    prim = ctx.scene._stage.GetPrimAtPath(ASSET_PRIM)
+    box = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render", "proxy"]).ComputeWorldBound(prim)
+    low = box.ComputeAlignedRange().GetMin()[2]
+    api = UsdGeom.XformCommonAPI(prim)
+    translate = api.GetXformVectors(Usd.TimeCode.Default())[0]  # the move is relative to where it is
+    api.SetTranslate(Gf.Vec3d(translate[0], translate[1], float(translate[2] + target_z - low)))
+    return target_z - low
+
+
 @test(
     features=[{"id": "FET_003_STANDARD", "version": ">=0.1.0"}],
     name="deformable_drop",
@@ -107,6 +125,7 @@ def deformable_state(ctx, previous, dt):
         "floor_margin": 0.02,      # how close the lowest particle must come to the floor
         "tunnel_depth": 0.01,      # how far below the floor a particle may sit
         "min_fall": 0.01,          # how far the lowest particle must drop to count as falling
+        "drop_height": 0.05,       # where the asset's lowest point starts above the floor
         "rest_speed": 0.05,        # m/s, under which the asset counts as still
         "rest_hold_seconds": 0.5,
     },
@@ -125,17 +144,26 @@ async def deformable_drop(ctx):
     room = ctx.scene.add_room()
     room.auto_size(ctx.scene.asset)
     room.show_ground()
+    lifted = lift_to(ctx, floor + float(config["drop_height"]))
     ctx.scene.setup_camera_follow()  # where the runner places its camera and floor cues
 
     physics = ctx.scene.add_physics(fps=physics_fps)
-    physics.stop()
-    physics.play()
-    # One frame of the starting state, so a run that fails on its first step still has a picture of
-    # what it was given -- which is the whole story when an engine did not import the asset.
+
+    # Where it starts, and a picture of it, both taken before the timeline runs: a capture costs app
+    # updates, and with the timeline playing those step physics, so anything read after the first
+    # capture is already centimetres into the fall. The asset's own geometry is the start under every
+    # engine, and a run that dies on its first step still has a frame of what it was given.
+    from asset_checks.kit.scene import ASSET_PRIM
+
+    authored = mesh_points(ctx.scene._stage, ASSET_PRIM)
+    start_z = None if authored is None else float(authored[:, 2].min())
     ctx.scene.update_camera_follow()
     await ctx.capture_frame(label="deformable_drop")
 
-    start_z, rest_run = None, 0
+    physics.stop()
+    physics.play()
+
+    rest_run = 0
     lowest_seen, deepest_below, fastest = None, 0.0, 0.0
     settled_at, frames, previous, source = None, 0, None, None
     for frame in range(total_frames):
@@ -156,7 +184,11 @@ async def deformable_drop(ctx):
         frames = frame + 1
         low = float(positions[:, 2].min())
         if lowest_seen is None:
-            start_z = lowest_seen = low
+            if start_z is None:
+                start_z = low
+            lowest_seen = min(start_z, low)
+            ctx.log(f"[deformable] starts at {start_z:.4f} by its own geometry; the first step reads "
+                    f"{low:.4f} from {source}")
         lowest_seen = min(lowest_seen, low)
         deepest_below = max(deepest_below, floor - low)
         previous = positions
@@ -173,6 +205,8 @@ async def deformable_drop(ctx):
 
     fell = start_z - lowest_seen
     ctx.add_metric("deformable_drop_points", int(len(positions)))
+    ctx.add_metric("deformable_drop_start_z", round(start_z, 4))
+    ctx.add_metric("deformable_drop_lifted_by", round(lifted, 4))
     ctx.log(f"[deformable] measured from {source}")
     ctx.add_metric("deformable_drop_fall_m", round(fell, 4))
     ctx.add_metric("deformable_drop_lowest_z", round(lowest_seen, 4))
