@@ -1,11 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Two engine-kit names NVIDIA's Foundation 7.1 tests import that the public engine-kit 2026.6.5 lacks.
+"""What NVIDIA's Foundation 7.1 tests need from engine-kit that the public 2026.6.5 does not give them.
 
 The 7.1 tests do `from simready_benchmark_engine_kit.physics_utils import active_physics_engine` and
 `from simready_benchmark_engine_kit import fabric_utils` inside their functions, under PhysX as well
 as Newton; the release they were written against (>= 2026.6.6) is unpublished. Each name is supplied
 only if engine-kit does not provide it, only in this Kit process, and `install()` reports what it
 supplied so result.json records it.
+
+`install()` also makes one existing name engine-aware. `physics_utils.check_physics_cookable` is, by
+its own docstring, a crash guard for PhysX cooking ("colliders [that] would crash PhysX during
+cooking"): it refuses a dynamic collider whose approximation PhysX cannot cook, such as `none`.
+Newton does not cook with PhysX and has no such restriction, yet the drop, slope and grasp tests run
+that guard under every engine, so three of NVIDIA's own sample props (toaster, dishwand, toolbox)
+skip on Newton instead of being tested. Under Newton the guard is replaced with one that keeps
+NVIDIA's other half, `check_has_colliders`, and drops the PhysX cooking half; the replacement records
+every skip it withholds, and the run's result.json says the swap happened.
 """
 import sys
 import types
@@ -58,8 +67,33 @@ def _fabric_utils():
     return module
 
 
+WITHHELD_COOK_SKIPS = []  # what the PhysX cooking guard would have skipped under Newton
+
+
+def _engine_aware_prechecks(physics_utils) -> dict:
+    """Replace the PhysX cooking guard with one that does nothing under a non-PhysX engine."""
+    cookable, ready = physics_utils.check_physics_cookable, physics_utils.check_physics_ready
+
+    def check_physics_cookable(stage, asset_root_path):
+        message = cookable(stage, asset_root_path)
+        if message is None or active_physics_engine() == "physx":
+            return message
+        WITHHELD_COOK_SKIPS.append({"asset_root": asset_root_path, "physx_would_skip": message})
+        return None
+
+    def check_physics_ready(stage, asset_root_path):
+        message = check_physics_cookable(stage, asset_root_path)
+        return message if message is not None else physics_utils.check_has_colliders(stage, asset_root_path)
+
+    physics_utils.check_physics_cookable = check_physics_cookable
+    physics_utils.check_physics_ready = check_physics_ready
+    return {"physics_utils.check_physics_cookable": "asset_checks.kit.nvidia_api (PhysX-only guard)",
+            "physics_utils.check_physics_ready": "asset_checks.kit.nvidia_api (PhysX-only guard)"}
+
+
 def install(engine: str) -> dict:
-    """Set the run's engine; supply whichever of the two names engine-kit lacks. Returns what was supplied."""
+    """Set the run's engine, supply whichever names engine-kit lacks, and make the PhysX cooking
+    guard engine-aware. Returns what was supplied or replaced."""
     global _ENGINE
     import importlib.util
 
@@ -67,6 +101,8 @@ def install(engine: str) -> dict:
 
     _ENGINE = engine
     supplied = {}
+    if engine != "physx":
+        supplied.update(_engine_aware_prechecks(physics_utils))
     if not hasattr(physics_utils, "active_physics_engine"):
         physics_utils.active_physics_engine = active_physics_engine
         supplied["physics_utils.active_physics_engine"] = "asset_checks.kit.nvidia_api"

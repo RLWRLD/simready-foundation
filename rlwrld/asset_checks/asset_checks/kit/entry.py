@@ -22,9 +22,13 @@ def _versions():
     return out
 
 
+ENTERED = "[asset_checks] entry reached"  # run.py reads this out of kit.log; see REACHED_ENTRY
+
+
 def main():
     request_path = sys.argv[1]
     req = json.load(open(request_path))
+    print(f"{ENTERED} {request_path}", flush=True)
     result = {"status": "error", "request": req}
 
     async def run():

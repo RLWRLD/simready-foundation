@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import sys
@@ -83,9 +84,35 @@ def frames_per_step(traj):
     return {"frame_s": frame, "plays": plays}
 
 
+REACHED_ENTRY = "[asset_checks] entry reached"  # printed by kit/entry.py on its first line
+
+
+def started_the_test(out_dir) -> bool:
+    """Whether Kit got as far as running our entry script. A Kit that hangs in startup (extension
+    registry, material library, shader cache) writes a kit.log without this line and no result.json;
+    a test that ran and failed always has it. The marker is printed by the script itself, so an
+    unrelated log line cannot stand in for it."""
+    log = out_dir / "kit.log"
+    return log.exists() and REACHED_ENTRY in log.read_text(errors="replace")
+
+
+def keep_valid(cell):
+    """A finished cell's result when it is valid, else None so the caller re-runs it. `--resume` is
+    the one way a run directory is filled in: every cell is either kept whole or replaced whole, so
+    a repaired cell can never end up nested inside the one it replaces."""
+    path = cell / "result.json"
+    if not path.is_file():
+        return None
+    try:
+        result = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+    return result if result.get("verdict") and not result.get("invalid") else None
+
+
 def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, validated, contact_profile, dump_physics=False, trace_contacts=0, camera="fixed",
-            visual_cues=True):
-    out_dir.mkdir(parents=True)
+            visual_cues=True, startup_retries=1):
+    out_dir.mkdir(parents=True, exist_ok=True)
     expected = envs.gpu_settings(gpu)
     request = {"asset": str(asset), "experiment": experiment, "engine": env.engine, "env": env.name,
                "out_dir": str(out_dir), "expected_settings": expected, "capture_px": capture_px,
@@ -96,18 +123,29 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, va
     cmd = [str(bench / "isaac-run"), env.venv, str(bench / f".venv-{env.venv}" / "bin" / "isaacsim"), env.experience,
            "--exec", f"{ENTRY} {out_dir / 'request.json'}", *envs.kit_flags(gpu)]
     environ = dict(os.environ, PYTHONPATH=str(PACKAGE_ROOT), SIMREADY_PHYSICS_RUNTIME=envs.PHYSICS_RUNTIME[env.engine])
-    with open(out_dir / "kit.log", "w") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=environ, start_new_session=True)
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+    startups = []
+    for attempt in range(startup_retries + 1):
+        with open(out_dir / "kit.log", "w") as log:
+            proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=environ, start_new_session=True)
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+        # Only a Kit that never reached the entry script is retried, and the test itself is never
+        # re-run: a test that started and failed keeps its verdict, however it ended.
+        if (out_dir / "result.json").exists() or started_the_test(out_dir) or attempt == startup_retries:
+            break
+        startups.append({"attempt": attempt + 1, "kit_exit": proc.returncode, "timeout_s": timeout,
+                         "kit_log": (out_dir / f"kit.startup{attempt + 1}.log").name})
+        (out_dir / "kit.log").rename(out_dir / f"kit.startup{attempt + 1}.log")
+        print(f"[asset_checks]   Kit never started the test (exit {proc.returncode}); retrying", flush=True)
     problems = []
     result_path = out_dir / "result.json"
     result = json.loads(result_path.read_text()) if result_path.exists() else {}
     if not result:
-        problems.append(f"no result.json (Kit exit {proc.returncode}, timeout {timeout}s)")
+        where = "never started the test" if not started_the_test(out_dir) else "started the test and wrote nothing"
+        problems.append(f"no result.json: Kit {where} (exit {proc.returncode}, timeout {timeout}s)")
     elif result.get("status") != "done":
         error = (result.get("error") or "").strip()
         problems.append(("error: " + error.splitlines()[-1]) if error else "status not done")
@@ -154,6 +192,13 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, va
     if "[BENCHMARK_COMPAT]" in (out_dir / "kit.log").read_text(errors="replace"):
         problems.append("the benchmark compat bridge is active in this Kit")
     result["invalid"] = problems
+    if startups:
+        result["startup_retries"] = startups
+    # The verdict on the run itself belongs next to the run: without it on disk a later reader --
+    # `--resume`, a report, a person -- cannot tell a cell that passed its checks from one that
+    # failed them, since Kit's own result.json knows nothing about them.
+    if result:
+        result_path.write_text(json.dumps(result, indent=1))
     return result
 
 
@@ -197,7 +242,9 @@ def summarize(rows, out):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--bench", default=os.environ.get("SIMREADY_BENCH"), help="simready-bench directory (isaac-run, venvs, GPU)")
-    ap.add_argument("--out", required=True, help="new directory for results")
+    ap.add_argument("--out", required=True, help="new directory for results (with --resume, an existing one)")
+    ap.add_argument("--resume", action="store_true",
+                    help="reuse an existing --out: keep every cell that already holds a valid result, run the rest")
     ap.add_argument("--envs", default=",".join(envs.DEFAULT_ENVIRONMENTS),
                     help=f"comma-separated; known: {', '.join(envs.ENVIRONMENTS)}")
     ap.add_argument("--experiments", default="drop")
@@ -219,8 +266,8 @@ def main():
     if not args.bench:
         sys.exit("[asset_checks] --bench or SIMREADY_BENCH is required")
     bench, out = pathlib.Path(args.bench).resolve(), pathlib.Path(args.out).resolve()
-    if out.exists():
-        sys.exit(f"[asset_checks] {out} exists; results never mix with an earlier run")
+    if out.exists() and not args.resume:
+        sys.exit(f"[asset_checks] {out} exists; results never mix with an earlier run (use --resume to fill in its missing cells)")
     unknown = set(args.envs.split(",")) - set(envs.ENVIRONMENTS)
     if unknown:
         sys.exit(f"[asset_checks] unknown environments {sorted(unknown)}; known: {list(envs.ENVIRONMENTS)}")
@@ -239,8 +286,17 @@ def main():
             print(f"[asset_checks] {asset.name}: validated {', '.join(v for v in validated if v.startswith('FET_003')) or 'no FET_003 feature'}", flush=True)
         for env in selected:
             for experiment in args.experiments.split(","):
+                cell = out / asset.stem / env.name / experiment
+                if args.resume:
+                    kept = keep_valid(cell)
+                    if kept is not None:
+                        rows.append((asset.stem, env.name, kept))
+                        print(f"[asset_checks] {asset.name} / {env.name} / {experiment}: kept ({kept['verdict']})", flush=True)
+                        continue
+                    if cell.exists():  # an invalid or half-written cell is replaced, never merged into
+                        shutil.rmtree(cell)
                 print(f"[asset_checks] {asset.name} / {env.name} / {experiment} ...", flush=True)
-                result = run_one(bench, gpu, env, experiment, asset, out / asset.stem / env.name / experiment, args.timeout, args.capture_px, validated, args.newton_contact, args.dump_physics, args.trace_contacts, args.camera, not args.plain_scene)
+                result = run_one(bench, gpu, env, experiment, asset, cell, args.timeout, args.capture_px, validated, args.newton_contact, args.dump_physics, args.trace_contacts, args.camera, not args.plain_scene)
                 rows.append((asset.stem, env.name, result))
                 first = ((result.get("message") or "").strip().splitlines() or [""])[0][:120]
                 print(f"[asset_checks]   {'INVALID: ' + '; '.join(result['invalid']) if result['invalid'] else (result['verdict'] + ' ' + first).strip()}", flush=True)
