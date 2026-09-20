@@ -75,6 +75,32 @@ Added here, because those pieces assume PhysX:
   `--trace-contacts N` records the solver's pad/asset contacts (count, normal force, depth) every N
   steps.
 
+## Adding an experiment
+
+An experiment is one of NVIDIA's registered tests. `kit/nvidia_test.py` names the ones this runs:
+
+```python
+TESTS = {
+    "drop":  ("simready_benchmark_kit_suite.fet003_physics.ground_drop", "ground_drop"),
+    "slope": ("simready_benchmark_kit_suite.fet003_physics.slope_drop",  "slope_drop"),
+    "grasp": ("simready_benchmark_kit_suite.fet005_grasp.grasp_and_lift", "grasp_and_lift"),
+}
+```
+
+To add one, put `"<your name>": ("<module that registers it>", "<its registered name>")` in that
+table and pass `--experiments <your name>`. `registered()` imports the module and takes the test the
+registry holds under that name, failing if it is not registered exactly once; the test's own
+`config_defaults` are its parameters, and anything passed in the request must be a key it declares.
+The installed suite registers more than these three -- `fet001_visual`, `fet004_multibody`,
+`fet011_semantics`, `fet022_driven_joints`, `fet028_gripper` -- and a test of your own registered
+with NVIDIA's `@test` decorator works the same way.
+
+What the runner gives every experiment, whatever it is: the asset with its runtime physics variant
+selected, the solver asked for, one frame per physics step, live poses under Newton, the fixed
+camera and floor cues, the per-step trajectory, and a result that is INVALID unless the environment,
+solver, stepping, pose source and media all came out as asked. What an experiment has to bring is
+its own scene, its own phases and its own verdict -- none of which this runner touches.
+
 ## Known limits
 
 - Newton 1.2.1 reads a collider's authored mass only when its rigid body also has MassAPI; NVIDIA's
