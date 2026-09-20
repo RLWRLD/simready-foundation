@@ -19,6 +19,8 @@ TESTS = {
     "drop": ("simready_benchmark_kit_suite.fet003_physics.ground_drop", "ground_drop"),
     "slope": ("simready_benchmark_kit_suite.fet003_physics.slope_drop", "slope_drop"),
     "grasp": ("simready_benchmark_kit_suite.fet005_grasp.grasp_and_lift", "grasp_and_lift"),
+    # ours, because NVIDIA's tests all refuse an asset without UsdPhysics.RigidBodyAPI
+    "deformable_drop": ("asset_checks.experiments.deformable_drop", "deformable_drop"),
 }
 
 

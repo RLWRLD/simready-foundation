@@ -226,9 +226,16 @@ def select_solver(stage, engine, solver):
     scenes = [p for p in Usd.PrimRange(stage.GetPseudoRoot()) if p.IsA(UsdPhysics.Scene)]
     if not scenes:
         raise RuntimeError("no PhysicsScene on the stage to select a solver on")
+    # engine-kit applies MjcSceneAPI when it builds a Newton scene, and Isaac takes a scene with two
+    # solver schemas as having none ("Multiple solver APIs detected"), so the other one goes.
+    replaced = []
     for prim in scenes:
         for other in set(mapping.values()) - {schema}:
             if prim.HasAPI(other):
-                raise RuntimeError(f"{prim.GetPath()} already carries {other}; two solver schemas are refused")
+                prim.RemoveAPI(other)
+                replaced.append(f"{prim.GetPath()}:{other}")
         prim.ApplyAPI(schema)
-    return {"requested": solver, "applied": schema, "scenes": [str(p.GetPath()) for p in scenes], **fit}
+        if not prim.HasAPI(schema):
+            raise RuntimeError(f"applied {schema} to {prim.GetPath()} and it did not take")
+    return {"requested": solver, "applied": schema, "replaced": replaced,
+            "scenes": [str(p.GetPath()) for p in scenes], **fit}
