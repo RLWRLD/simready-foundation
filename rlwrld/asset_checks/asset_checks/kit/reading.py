@@ -199,3 +199,79 @@ def lowest_point(points, matrices):
         m = np.asarray(matrices[body])
         lows.append(float((pts @ m[:3, :3] + m[3, :3])[:, 2].min()))
     return min(lows)
+
+
+LEGACY_MASS_ATTR = "pxr:usd:physics_mass"  # an older encoding UsdPhysics.MassAPI does not resolve
+
+
+def authored_mass(stage, root_path):
+    """(canonical mass, mass in the older namespace). The first is UsdPhysics.MassAPI on each rigid
+    body, else on the colliders under it. The second is `pxr:usd:physics_mass`, which some exporters
+    write as well or instead -- NVIDIA's lamp writes only that. Which one an engine ends up using is
+    not assumed here: `stack_notes` reports both against the mass the engine actually simulated."""
+    from pxr import Usd, UsdPhysics
+
+    read = legacy = 0.0
+    for body in rigid_bodies(stage, root_path):
+        for prim in Usd.PrimRange(body):
+            attr = prim.GetAttribute(LEGACY_MASS_ATTR)
+            if attr and attr.HasAuthoredValue():
+                legacy += float(attr.Get() or 0.0)
+        own = UsdPhysics.MassAPI(body).GetMassAttr() if body.HasAPI(UsdPhysics.MassAPI) else None
+        if own is not None and own.HasAuthoredValue():
+            read += float(own.Get() or 0.0)
+            continue
+        for prim in Usd.PrimRange(body):
+            attr = UsdPhysics.MassAPI(prim).GetMassAttr() if prim.HasAPI(UsdPhysics.MassAPI) else None
+            if attr is not None and attr.HasAuthoredValue():
+                read += float(attr.Get() or 0.0)
+    return read, legacy
+
+
+def simulated_mass(stage, root_path):
+    """The mass Newton's model ended up with for the asset's bodies, or None outside Newton."""
+    import numpy as np
+
+    import isaacsim.physics.newton as isaac_newton
+
+    model = getattr(isaac_newton.acquire_stage(), "model", None)
+    if model is None:
+        return None
+    labels = list(getattr(model, "body_label", None) or getattr(model, "body_key", None) or [])
+    mass = np.asarray(model.body_mass.numpy())
+    return float(sum(m for label, m in zip(labels, mass) if str(label).startswith(root_path)))
+
+
+def stack_notes(stage, engine, root_path):
+    """What this engine did to the asset that its USD did not ask for. These do not change a verdict
+    -- they change how one should be read -- so they travel with the result instead of being left in
+    a log for someone to find: both were first noticed only by reading dumps by hand."""
+    from pxr import Usd, UsdPhysics
+
+    notes = []
+    if engine != "newton":
+        return notes
+    joints = [p for p in Usd.PrimRange(stage.GetPrimAtPath(root_path), Usd.TraverseInstanceProxies())
+              if p.IsA(UsdPhysics.Joint)]
+    ARMATURE = ("newton:armature", "mjc:armature", "physxJoint:armature")
+    unauthored = [str(j.GetPath()) for j in joints
+                  if not any(j.GetAttribute(n).HasAuthoredValue() for n in ARMATURE)]
+    if unauthored:
+        notes.append({"note": "joint_armature_default",
+                      "detail": f"{len(unauthored)} of the asset's {len(joints)} joints author no armature, so Isaac's "
+                                f"Newton stage gives each its default (cfg.armature, 0.1 kg m^2); PhysX uses 0. On light "
+                                f"links this can hold a joint still that PhysX lets move.",
+                      "joints": unauthored[:8]})
+    canonical, legacy = authored_mass(stage, root_path)
+    simulated = simulated_mass(stage, root_path)
+    if simulated is not None and not any(m > 0 and abs(simulated - m) <= 0.01 * m for m in (canonical, legacy)):
+        declared = ", ".join(filter(None, [f"{canonical:.4f} kg as UsdPhysics.MassAPI" if canonical > 0 else "",
+                                           f"{legacy:.4f} kg as {LEGACY_MASS_ATTR}" if legacy > 0 else ""])) or "no mass"
+        notes.append({"note": "mass_differs_from_usd",
+                      "detail": f"the asset declares {declared} and this Newton simulated {simulated:.4f} kg. "
+                                f"Newton 1.2.1 reads a collider's MassAPI only when its rigid body has one too, and "
+                                f"otherwise recomputes the mass from density.",
+                      "authored_kg": round(canonical, 5), "legacy_kg": round(legacy, 5),
+                      "simulated_kg": round(simulated, 5),
+                      "ratio_to_authored": round(simulated / canonical, 3) if canonical > 0 else None})
+    return notes

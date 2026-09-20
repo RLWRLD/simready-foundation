@@ -211,6 +211,7 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
             return BoundsResult(tuple(mn), tuple(mx))
 
         solver_seen = []  # what MuJoCo compiled, read on the first step after each play (Newton)
+        notes = []  # what this engine did to the asset that its USD did not ask for
         stepped_plays = 0  # plays whose first step re-armed engine-kit's pause
         physics_dumps = []  # contact.dump() of the same moment, when the run asks for it
         measured_plays = 0
@@ -233,6 +234,8 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
 
                 Proxy.measured_plays = Scene.plays
                 Proxy.solver_seen.append(contact.measure())
+                if not Proxy.notes:  # the model exists once the first play has built it
+                    Proxy.notes = reading.stack_notes(self._scene_handle._stage, engine, scene_mod.ASSET_PRIM)
                 if dump_dir is not None:
                     Proxy.physics_dumps.append(contact.dump(f"{dump_dir}/physics_play{Scene.plays}.npz"))
 
@@ -304,6 +307,7 @@ async def run(req):
         "physics_dumps": Proxy.physics_dumps,
         "camera": Scene.camera,
         "solver": Scene.solver,
+        "notes": Proxy.notes,
         "look": Scene.look,
         "contact_trace": trace.rows if trace is not None else None,
         "engine_observed": recorder.engine_observed, "pose_source": sorted(set(recorder.traj["source"])),

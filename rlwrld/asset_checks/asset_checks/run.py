@@ -263,6 +263,15 @@ def summarize(rows, out):
             lines += ["", f"Agreement with {reference} (cells both ran): " + ", ".join(agreement)]
         lines.append("")
     lines += ["Legend: O pass, X fail, - skipped by the test, ! the run did not count, blank not run.", ""]
+    seen = {}
+    for asset, env, r in rows:
+        for note in r.get("notes") or []:
+            seen.setdefault((note["note"], note["detail"]), []).append(f"{asset}/{env}")
+    if seen:
+        lines += ["## Read these verdicts with", ""]
+        for (name, detail), where in sorted(seen.items()):
+            lines += [f"- **{name}** ({len(where)} runs, e.g. {', '.join(sorted(where)[:3])}): {detail}"]
+        lines.append("")
     if reasons:
         lines += ["## Why", ""] + reasons + [""]
 
@@ -320,6 +329,8 @@ def main():
                     help="render NVIDIA's test room as is, without the floor grid and key light")
     ap.add_argument("--camera", default="fixed", choices=("fixed", "follow"),
                     help="fixed: one camera framing the test's whole motion (slope keeps follow); follow: engine-kit's follow camera")
+    ap.add_argument("--keep-going", action="store_true",
+                    help="finish the matrix even when an environment's first cell does not count (default: stop)")
     ap.add_argument("assets", nargs="+")
     args = ap.parse_args()
     if not args.bench:
@@ -334,7 +345,7 @@ def main():
     selected = [envs.ENVIRONMENTS[name] for name in args.envs.split(",")]
     for venv in sorted({env.venv for env in selected}):
         preflight(bench, venv)
-    rows = []
+    rows, first_cell = [], {}
     for asset in args.assets:
         asset = pathlib.Path(asset).resolve()
         validated = None
@@ -359,6 +370,16 @@ def main():
                 rows.append((asset.stem, env.name, result))
                 first = ((result.get("message") or "").strip().splitlines() or [""])[0][:120]
                 print(f"[asset_checks]   {'INVALID: ' + '; '.join(result['invalid']) if result['invalid'] else (result['verdict'] + ' ' + first).strip()}", flush=True)
+                # An environment whose very first cell does not count is broken for every cell in it
+                # -- a launch, a flag or a supplement that environment cannot take. Stopping here
+                # costs one cell; carrying on has cost a whole matrix twice.
+                if env.name not in first_cell:
+                    first_cell[env.name] = result["invalid"]
+                    if result["invalid"] and not args.keep_going:
+                        summarize(rows, out)
+                        sys.exit(f"[asset_checks] {env.name}'s first cell did not count: {'; '.join(result['invalid'])}\n"
+                                 f"[asset_checks] stopping before the rest of the matrix; fix it and re-run with --resume, "
+                                 f"or pass --keep-going to run it anyway")
     summarize(rows, out)
     sys.exit(1 if any(r["invalid"] for _, _, r in rows) else 0)
 
