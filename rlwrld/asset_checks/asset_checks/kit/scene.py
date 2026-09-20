@@ -141,11 +141,28 @@ def add_visual_cues(stage, center_xy, tile_m=0.1, half_extent_m=5.0, key_intensi
             "floor_top_z": round(top, 5), "key_light": str(key.GetPath()), "key_intensity": key_intensity}
 
 
+DEFAULT_NEWTON_SOLVER = "mujoco"  # what Isaac's Newton stage builds when no scene schema selects one
+
+
+def _schema_registered(identifier) -> bool:
+    """Whether this Kit registers that schema identifier. A schema's USD identifier is not its Tf
+    type name (the deformable proposal ships as OmniUsdPhysicsDeformableSchema* types with
+    PhysicsDeformable* identifiers), so ask the registry by identifier."""
+    from pxr import Plug, Usd
+
+    registry = Usd.SchemaRegistry()
+    return any(registry.GetSchemaTypeName(t) == identifier
+               for t in Plug.Registry().GetAllDerivedTypes("UsdAPISchemaBase"))
+
+
 def select_solver(stage, engine, solver):
-    """Ask Isaac for `solver` by applying its scene API schema to every PhysicsScene, and report what
-    was applied. Isaac 6.1.0 reads those schemas (`impl/utils.py newton_solver_to_api_schema`) and
-    refuses a stage carrying two of them. Under PhysX there is nothing to select; a Newton run on an
-    Isaac without the mapping is refused here rather than silently simulating with another solver."""
+    """Ask Isaac for `solver` and report how. Isaac 6.1.0 reads a solver's scene API schema off the
+    PhysicsScene (`impl/utils.py newton_solver_to_api_schema`) and refuses a stage carrying two of
+    them. Under PhysX there is nothing to select. Asking for the Isaac's own default needs nothing
+    applied -- Isaac 6.0.1 has no schema mapping at all and always builds SolverMuJoCo -- so it is
+    reported as such; asking for anything else on an Isaac that cannot select it is refused here
+    rather than silently simulating with another solver. Either way run.py checks the solver that
+    actually integrated the scene against the one asked for."""
     from pxr import Usd, UsdPhysics
 
     from asset_checks.envs import NEWTON_SOLVER_SCENE_API
@@ -157,9 +174,14 @@ def select_solver(stage, engine, solver):
     except ImportError:  # Isaac 6.0.1: the solver comes from the Python config, not from USD
         mapping = None
     schema = NEWTON_SOLVER_SCENE_API[solver]
+    if solver == DEFAULT_NEWTON_SOLVER and (mapping is None or not _schema_registered(schema)):
+        return {"requested": solver, "applied": None,
+                "reason": f"this Isaac builds {solver} by default and cannot select from USD"}
     if mapping is None or mapping.get(solver) != schema:
         raise RuntimeError(f"this Isaac cannot select the {solver!r} solver from USD "
                            f"(schema map: {mapping}); run it on an Isaac that maps {schema}")
+    if not _schema_registered(schema):
+        raise RuntimeError(f"{schema} is not a registered schema in this Isaac, so {solver!r} cannot be asked for")
     scenes = [p for p in Usd.PrimRange(stage.GetPseudoRoot()) if p.IsA(UsdPhysics.Scene)]
     if not scenes:
         raise RuntimeError("no PhysicsScene on the stage to select a solver on")

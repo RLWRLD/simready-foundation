@@ -165,7 +165,7 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, va
         newton = (result.get("versions") or {}).get("newton") or ""
         if env.newton and not newton.startswith(env.newton):
             problems.append(f"Newton {newton!r}, {env.newton}x expected")
-        if result.get("verdict") != "skipped" and not result.get("media"):
+        if result.get("verdict") not in ("skipped",) and not result.get("media") and not result.get("test_exception"):
             problems.append("no media recorded")
         if result.get("media") and not result.get("camera"):
             problems.append("media recorded but the camera placement was not")
