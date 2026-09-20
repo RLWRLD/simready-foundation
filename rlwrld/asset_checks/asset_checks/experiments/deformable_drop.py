@@ -20,7 +20,7 @@ import numpy as np
 from simready_benchmark.core.decorator import test
 
 
-def particle_state():
+def newton_particles():
     """(positions, velocities) of Newton's particles this step, or (None, None) without Newton."""
     try:
         import isaacsim.physics.newton as isaac_newton
@@ -32,6 +32,47 @@ def particle_state():
     positions = np.asarray(state.particle_q.numpy())
     velocities = np.asarray(state.particle_qd.numpy()) if getattr(state, "particle_qd", None) is not None else None
     return (positions if len(positions) else None), velocities
+
+
+def mesh_points(stage, root_path):
+    """Every point of the deformable geometry under root_path, in world space, from the stage.
+
+    Newton owns its particles and the state above is the direct reading. PhysX has no such array
+    here, and writes the deformed geometry back to the mesh instead, so for any other engine the
+    points are the measurement. Velocity is not read back this way; the caller differences positions.
+    """
+    from pxr import Usd, UsdGeom
+
+    from asset_checks.kit.reading import raw_api_schemas
+    from asset_checks.kit.scene import DEFORMABLE_SIM_API
+
+    deformable = [prim for prim in Usd.PrimRange(stage.GetPrimAtPath(root_path), Usd.TraverseInstanceProxies())
+                  if any(name.endswith(api) for name in raw_api_schemas(prim) for api in DEFORMABLE_SIM_API)]
+    out = []
+    for prim in deformable:
+        points = UsdGeom.Mesh(prim).GetPointsAttr().Get()
+        if not points:
+            continue
+        to_world = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        out.extend([to_world.Transform(p) for p in points])
+    return np.asarray([[p[0], p[1], p[2]] for p in out]) if out else None
+
+
+def deformable_state(ctx, previous, dt):
+    """(positions, speeds, where they came from) this step, whichever engine is running."""
+    positions, velocities = newton_particles()
+    source = "newton particles"
+    if positions is None:
+        from asset_checks.kit.scene import ASSET_PRIM
+
+        positions = mesh_points(ctx.scene._stage, ASSET_PRIM)
+        source = "mesh points"
+        velocities = None if positions is None or previous is None or previous.shape != positions.shape \
+            else (positions - previous) / dt
+    if positions is None:
+        return None, None, source
+    speeds = np.abs(velocities).max() if velocities is not None and len(velocities) else 0.0
+    return positions, float(speeds), source
 
 
 @test(
@@ -83,15 +124,15 @@ async def deformable_drop(ctx):
     physics.stop()
     physics.play()
 
-    start_z = rest_run = 0.0, 0
+    start_z, rest_run = None, 0
     lowest_seen, deepest_below, fastest = None, 0.0, 0.0
-    settled_at, frames = None, 0
+    settled_at, frames, previous, source = None, 0, None, None
     for frame in range(total_frames):
         await ctx.physics_step()
-        positions, velocities = particle_state()
+        positions, speed, source = deformable_state(ctx, previous, 1.0 / physics_fps)
         if positions is None:
-            ctx.fail("no particles in the simulation: the asset did not import as a deformable, or "
-                     "this solver does not simulate particles")
+            ctx.fail("nothing deformable to measure: the asset did not import as a deformable in "
+                     "this engine, or this solver does not simulate it")
             ctx.add_metric("deformable_drop_passed", 0)
             return
         if not np.isfinite(positions).all():
@@ -101,10 +142,10 @@ async def deformable_drop(ctx):
         frames = frame + 1
         low = float(positions[:, 2].min())
         if lowest_seen is None:
-            start_z, lowest_seen = (low, 0), low
+            start_z = lowest_seen = low
         lowest_seen = min(lowest_seen, low)
         deepest_below = max(deepest_below, floor - low)
-        speed = float(np.abs(velocities).max()) if velocities is not None and len(velocities) else 0.0
+        previous = positions
         fastest = max(fastest, speed)
         rest_run = rest_run + 1 if speed < float(config["rest_speed"]) else 0
         if settled_at is None and rest_run >= rest_frames:
@@ -116,8 +157,9 @@ async def deformable_drop(ctx):
         if settled_at is not None and frame > rest_frames * 2:
             break
 
-    fell = start_z[0] - lowest_seen
-    ctx.add_metric("deformable_drop_particles", int(len(positions)))
+    fell = start_z - lowest_seen
+    ctx.add_metric("deformable_drop_points", int(len(positions)))
+    ctx.log(f"[deformable] measured from {source}")
     ctx.add_metric("deformable_drop_fall_m", round(fell, 4))
     ctx.add_metric("deformable_drop_lowest_z", round(lowest_seen, 4))
     ctx.add_metric("deformable_drop_below_floor_m", round(deepest_below, 4))

@@ -195,6 +195,22 @@ def _schema_registered(identifier) -> bool:
                for t in Plug.Registry().GetAllDerivedTypes("UsdAPISchemaBase"))
 
 
+def _select_solver_by_config(solver):
+    """Isaac 6.0.1's Newton stage has no schema mapping: `_get_solver` reads `cfg.solver_cfg`, whose
+    `solver_type` it switches on, and raises for anything but mujoco and xpbd. Setting the config
+    before the first play is how a solver is asked for there. Returns what was set."""
+    from isaacsim.physics.newton.impl import solver_config
+    import isaacsim.physics.newton as isaac_newton
+
+    by_type = {getattr(cls, "__dataclass_fields__", {}).get("solver_type").default: cls
+               for cls in vars(solver_config).values()
+               if isinstance(cls, type) and "solver_type" in getattr(cls, "__dataclass_fields__", {})}
+    if solver not in by_type:
+        raise RuntimeError(f"this Isaac has no solver config for {solver!r}; it has {sorted(by_type)}")
+    isaac_newton.acquire_stage().cfg.solver_cfg = by_type[solver]()
+    return f"cfg.solver_cfg = {by_type[solver].__name__}"
+
+
 def select_solver(stage, engine, solver):
     """Ask Isaac for `solver` and report how. Isaac 6.1.0 reads a solver's scene API schema off the
     PhysicsScene (`impl/utils.py newton_solver_to_api_schema`) and refuses a stage carrying two of
@@ -215,10 +231,13 @@ def select_solver(stage, engine, solver):
     except ImportError:  # Isaac 6.0.1: the solver comes from the Python config, not from USD
         mapping = None
     schema = NEWTON_SOLVER_SCENE_API[solver]
-    if solver == DEFAULT_NEWTON_SOLVER and (mapping is None or not _schema_registered(schema)):
+    if mapping is None:  # Isaac 6.0.1 takes the solver from its Python config, not from USD
+        return {"requested": solver, "applied": _select_solver_by_config(solver), **fit,
+                "reason": "this Isaac selects a solver from its config, not from a scene schema"}
+    if solver == DEFAULT_NEWTON_SOLVER and not _schema_registered(schema):
         return {"requested": solver, "applied": None, **fit,
                 "reason": f"this Isaac builds {solver} by default and cannot select from USD"}
-    if mapping is None or mapping.get(solver) != schema:
+    if mapping.get(solver) != schema:
         raise RuntimeError(f"this Isaac cannot select the {solver!r} solver from USD "
                            f"(schema map: {mapping}); run it on an Isaac that maps {schema}")
     if not _schema_registered(schema):
