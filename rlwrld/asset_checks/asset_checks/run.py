@@ -90,7 +90,7 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, va
     request = {"asset": str(asset), "experiment": experiment, "engine": env.engine, "env": env.name,
                "out_dir": str(out_dir), "expected_settings": expected, "capture_px": capture_px,
                "validated_features": validated, "contact_profile": contact_profile, "dump_physics": dump_physics,
-               "trace_contacts": trace_contacts, "camera": camera, "visual_cues": visual_cues,
+               "trace_contacts": trace_contacts, "camera": camera, "visual_cues": visual_cues, "solver": env.solver,
                "code": code_version()}
     (out_dir / "request.json").write_text(json.dumps(request, indent=1))
     cmd = [str(bench / "isaac-run"), env.venv, str(bench / f".venv-{env.venv}" / "bin" / "isaacsim"), env.experience,
@@ -117,6 +117,13 @@ def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, va
             problems.append(f"engine {result.get('engine_observed')!r} simulated, {env.engine!r} expected")
         if result.get("kit_settings") != expected:
             problems.append(f"Kit settings {result.get('kit_settings')} != {expected}")
+        asked = (result.get("solver") or {}).get("requested")
+        if stepped and asked != env.solver:
+            problems.append(f"solver {asked!r} selected, {env.solver!r} expected")
+        ran = ((result.get("solver_seen") or [{}])[-1]).get("solver")
+        expected_class = {"mujoco": "SolverMuJoCo", "vbd": "SolverVBD", "xpbd": "SolverXPBD"}.get(env.solver)
+        if stepped and expected_class and ran and ran != expected_class:
+            problems.append(f"{ran} integrated the scene, {expected_class} expected")
         newton = (result.get("versions") or {}).get("newton") or ""
         if env.newton and not newton.startswith(env.newton):
             problems.append(f"Newton {newton!r}, {env.newton}x expected")
@@ -191,7 +198,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--bench", default=os.environ.get("SIMREADY_BENCH"), help="simready-bench directory (isaac-run, venvs, GPU)")
     ap.add_argument("--out", required=True, help="new directory for results")
-    ap.add_argument("--envs", default=",".join(envs.ENVIRONMENTS))
+    ap.add_argument("--envs", default=",".join(envs.DEFAULT_ENVIRONMENTS),
+                    help=f"comma-separated; known: {', '.join(envs.ENVIRONMENTS)}")
     ap.add_argument("--experiments", default="drop")
     ap.add_argument("--newton-contact", default="stock", choices=("stock", "pr2"),
                     help="Newton contact settings: stock, or PR #2's (newton15_cert.py) solref/condim/cone/impratio")

@@ -83,7 +83,7 @@ class Recorder:
 
 
 def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace=None, test_config=None, camera_mode="fixed",
-             visual_cues=True):
+             visual_cues=True, solver="physx"):
     from simready_benchmark_engine_kit.kit_engine_proxy import BoundsResult, KitEngineProxy
     from simready_benchmark_engine_kit.scene_handle import KitSceneHandle
 
@@ -102,6 +102,8 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
             play = physics.play
 
             def play_counted():  # the profile is authored before every play, so a rebuilt gripper gets it too
+                if Scene.solver is None:  # the scene exists by the first play; a rebuild keeps the schema
+                    Scene.solver = scene_mod.select_solver(self._stage, engine, solver)
                 if contact_profile is not None:
                     Scene.contact_applied.append(contact.apply(self._stage, contact_profile))
                 Scene.plays += 1
@@ -116,6 +118,7 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
             return handle
 
         camera = None  # how the video camera was placed, recorded in result.json
+        solver = None  # which solver was asked for and how, recorded in result.json
         look = None  # the floor grid and key light added for the videos, recorded in result.json
 
         def setup_camera_follow(self, config=None):
@@ -258,11 +261,15 @@ async def run(req):
     profile_name = req.get("contact_profile", "stock")
     if profile_name not in contact.PROFILES:
         raise ValueError(f"unknown contact profile {profile_name!r}; known: {sorted(contact.PROFILES)}")
-    profile = contact.PROFILES[profile_name] if engine == "newton" else None  # PR #2's settings are MuJoCo's
+    # PR #2's settings are MuJoCo's: they are authored as mjc:/newton: contact attributes that only
+    # SolverMuJoCo reads. Asking for them under another solver would author values nothing consumes.
+    if profile_name != "stock" and req["solver"] != "mujoco":
+        raise ValueError(f"contact profile {profile_name!r} is MuJoCo's; solver is {req['solver']!r}")
+    profile = contact.PROFILES[profile_name] if req["solver"] == "mujoco" else None
     recorder = Recorder(engine, 1.0 / float(config.get("physics_fps", 240)))
     trace = contact.Trace(req["trace_contacts"]) if engine == "newton" and req.get("trace_contacts") else None
     Scene, Proxy = _classes(engine, asset, recorder, profile, out if req.get("dump_physics") else None, trace,
-                            config, req.get("camera", "fixed"), req.get("visual_cues", True))
+                            config, req.get("camera", "fixed"), req.get("visual_cues", True), req["solver"])
 
     stage = await scene_mod.new_stage()
     handle = Scene(stage)
@@ -294,6 +301,7 @@ async def run(req):
         "solver_seen": Proxy.solver_seen,
         "physics_dumps": Proxy.physics_dumps,
         "camera": Scene.camera,
+        "solver": Scene.solver,
         "look": Scene.look,
         "contact_trace": trace.rows if trace is not None else None,
         "engine_observed": recorder.engine_observed, "pose_source": sorted(set(recorder.traj["source"])),

@@ -6,22 +6,43 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Environment:
+    """One thing an asset can be checked in: an Isaac Sim build, a physics engine, and a solver.
+
+    The three are independent and a result only means something with all three named: Newton's
+    version moves with Isaac's (isaacsim-core pins `newton[sim]==`), so a Newton 1.2-vs-1.5
+    difference is an Isaac+Newton difference until an environment holds one of them still.
+    """
+
     name: str  # label in results and reports
     venv: str  # simready-bench venv tag passed to isaac-run
     experience: str  # Kit experience the isaacsim launcher starts
-    engine: str  # physics engine that experience simulates with
+    engine: str  # physics engine that experience simulates with: "physx" or "newton"
     newton: str  # Newton version prefix the venv must report ("" when the engine is not Newton)
+    solver: str  # what integrates the scene: "physx", or a Newton solver ("mujoco", "vbd", "xpbd")
     note: str
 
+    @property
+    def isaac(self) -> str:
+        return {"isaac601": "6.0.1", "isaac610": "6.1.0"}[self.venv]
+
+
+# A Newton solver other than the default is selected by applying its scene API schema to the
+# PhysicsScene (Isaac 6.1.0 `impl/utils.py newton_solver_to_api_schema`); Isaac 6.0.1 has no such
+# mapping and its `_get_solver` accepts only mujoco and xpbd.
+NEWTON_SOLVER_SCENE_API = {"mujoco": "MjcSceneAPI", "xpbd": "NewtonXpbdSceneAPI", "vbd": "NewtonVbdSceneAPI"}
 
 ENVIRONMENTS = {
     env.name: env
     for env in (
-        Environment("physx", "isaac610", "isaacsim.exp.full", "physx", "", "Isaac Sim 6.1.0, PhysX"),
-        Environment("newton12", "isaac601", "isaacsim.exp.full.newton", "newton", "1.2.", "Isaac Sim 6.0.1, Newton 1.2.1"),
-        Environment("newton15", "isaac610", "isaacsim.exp.full.newton", "newton", "1.5.", "Isaac Sim 6.1.0, Newton 1.5.0"),
+        Environment("physx", "isaac610", "isaacsim.exp.full", "physx", "", "physx", "Isaac Sim 6.1.0, PhysX"),
+        Environment("physx601", "isaac601", "isaacsim.exp.full", "physx", "", "physx", "Isaac Sim 6.0.1, PhysX"),
+        Environment("newton12", "isaac601", "isaacsim.exp.full.newton", "newton", "1.2.", "mujoco", "Isaac Sim 6.0.1, Newton 1.2.1, MuJoCo"),
+        Environment("newton15", "isaac610", "isaacsim.exp.full.newton", "newton", "1.5.", "mujoco", "Isaac Sim 6.1.0, Newton 1.5.0, MuJoCo"),
+        Environment("newton15_vbd", "isaac610", "isaacsim.exp.full.newton", "newton", "1.5.", "vbd", "Isaac Sim 6.1.0, Newton 1.5.0, VBD"),
     )
 }
+
+DEFAULT_ENVIRONMENTS = ("physx", "newton12", "newton15")  # the rigid comparison; the rest are opt-in
 
 
 # SIMREADY_PHYSICS_RUNTIME per engine: NVIDIA's grasp_and_lift reads it (default "PhysX") to pick the

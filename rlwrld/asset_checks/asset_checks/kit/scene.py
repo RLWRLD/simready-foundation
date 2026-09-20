@@ -139,3 +139,33 @@ def add_visual_cues(stage, center_xy, tile_m=0.1, half_extent_m=5.0, key_intensi
     UsdGeom.XformCommonAPI(key).SetRotate(Gf.Vec3f(20.0, 0.0, 30.0))
     return {"added": True, "floor_grid": f"{LOOK_PRIM}/FloorGrid{{Light,Dark}}", "tile_m": tile_m, "extent_m": 2 * half_extent_m,
             "floor_top_z": round(top, 5), "key_light": str(key.GetPath()), "key_intensity": key_intensity}
+
+
+def select_solver(stage, engine, solver):
+    """Ask Isaac for `solver` by applying its scene API schema to every PhysicsScene, and report what
+    was applied. Isaac 6.1.0 reads those schemas (`impl/utils.py newton_solver_to_api_schema`) and
+    refuses a stage carrying two of them. Under PhysX there is nothing to select; a Newton run on an
+    Isaac without the mapping is refused here rather than silently simulating with another solver."""
+    from pxr import Usd, UsdPhysics
+
+    from asset_checks.envs import NEWTON_SOLVER_SCENE_API
+
+    if engine != "newton":
+        return {"requested": solver, "applied": None, "reason": f"{engine} has one solver"}
+    try:
+        from isaacsim.physics.newton.impl.utils import newton_solver_to_api_schema as mapping
+    except ImportError:  # Isaac 6.0.1: the solver comes from the Python config, not from USD
+        mapping = None
+    schema = NEWTON_SOLVER_SCENE_API[solver]
+    if mapping is None or mapping.get(solver) != schema:
+        raise RuntimeError(f"this Isaac cannot select the {solver!r} solver from USD "
+                           f"(schema map: {mapping}); run it on an Isaac that maps {schema}")
+    scenes = [p for p in Usd.PrimRange(stage.GetPseudoRoot()) if p.IsA(UsdPhysics.Scene)]
+    if not scenes:
+        raise RuntimeError("no PhysicsScene on the stage to select a solver on")
+    for prim in scenes:
+        for other in set(mapping.values()) - {schema}:
+            if prim.HasAPI(other):
+                raise RuntimeError(f"{prim.GetPath()} already carries {other}; two solver schemas are refused")
+        prim.ApplyAPI(schema)
+    return {"requested": solver, "applied": schema, "scenes": [str(p.GetPath()) for p in scenes]}
