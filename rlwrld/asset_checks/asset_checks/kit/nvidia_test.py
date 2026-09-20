@@ -262,10 +262,11 @@ async def run(req):
     if profile_name not in contact.PROFILES:
         raise ValueError(f"unknown contact profile {profile_name!r}; known: {sorted(contact.PROFILES)}")
     # PR #2's settings are MuJoCo's: they are authored as mjc:/newton: contact attributes that only
-    # SolverMuJoCo reads. Asking for them under another solver would author values nothing consumes.
-    if profile_name != "stock" and req["solver"] != "mujoco":
-        raise ValueError(f"contact profile {profile_name!r} is MuJoCo's; solver is {req['solver']!r}")
-    profile = contact.PROFILES[profile_name] if req["solver"] == "mujoco" else None
+    # SolverMuJoCo reads. A PhysX run ignores the flag, as it ignores every Newton-only option; a
+    # Newton run on another solver would author values nothing consumes, so that is refused.
+    if profile_name != "stock" and engine == "newton" and req["solver"] != "mujoco":
+        raise ValueError(f"contact profile {profile_name!r} is MuJoCo's; this Newton run uses {req['solver']!r}")
+    profile = contact.PROFILES[profile_name] if engine == "newton" and req["solver"] == "mujoco" else None
     recorder = Recorder(engine, 1.0 / float(config.get("physics_fps", 240)))
     trace = contact.Trace(req["trace_contacts"]) if engine == "newton" and req.get("trace_contacts") else None
     Scene, Proxy = _classes(engine, asset, recorder, profile, out if req.get("dump_physics") else None, trace,
