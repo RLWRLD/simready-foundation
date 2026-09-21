@@ -44,7 +44,8 @@ import recording
 import usd_deformable
 from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, GROUND_CONTACT_KE, ITERATIONS,
                          SELF_CONTACT, SUBSTEPS, XPBD_MAX_RELAXATION, auto_radius,
-                         contact_material, deformable_kind, relaxation_is_a_jacobi_factor,
+                         contact_material, contact_margin, deformable_kind,
+                         relaxation_is_a_jacobi_factor,
                          solver_elements, xpbd_relaxation)
 
 PLATE_BODY = 0        # the only body in the scene
@@ -55,7 +56,8 @@ MIN_RECOVERY = 0.5
 TUNNEL_DEPTH_OF_HEIGHT = 0.05
 
 
-def build(asset, solver_name, iterations, radius, press_to, margin, full_surface=True):
+def build(asset, solver_name, iterations, radius, margin, full_surface=True,
+          substeps=10, fps=60.0):
     measure = newton.ModelBuilder()
     measure.add_usd(Usd.Stage.Open(asset))
     # Where this Newton's importer has no path for what the asset declares -- 1.2.1 knows nothing
@@ -115,7 +117,10 @@ def build(asset, solver_name, iterations, radius, press_to, margin, full_surface
     # contacts are generated has both of its faces inside the same margin, and the asset gets
     # pushed from underneath as hard as from above: measured, the same press went from 13.9 mm
     # of compression to 3.1 mm when the plate was thinned below it.
-    margin = margin or radius * CONTACT_MARGIN_OF_RADIUS
+    # The press sets the asset down rather than dropping it, so gravity's stride does not apply;
+    # what decides the band here is how deep the plate means to go, because a particle outside it
+    # feels nothing at all.
+    margin = margin or contact_margin(radius, substeps, fps, 0.0, height)
     thickness = press_shape.plate_thickness(height, margin)
     start_z = top + thickness / 2.0 + radius * 2.0
     plate = builder.add_body(xform=wp.transform(wp.vec3(centre[0], centre[1], start_z), wp.quat_identity()),
@@ -186,7 +191,7 @@ def build(asset, solver_name, iterations, radius, press_to, margin, full_surface
         print(f"[press] soft_body_relaxation {relaxation:.4f}")
         solver = newton.solvers.SolverXPBD(model, iterations=iterations, soft_body_relaxation=relaxation)
     return (model, solver, pipeline, radius, height, start_z, thickness, sim_path,
-            (footprint[0] * 0.6, footprint[1] * 0.6, thickness / 2.0), margin)
+            (footprint[0] * 0.6, footprint[1] * 0.6, thickness / 2.0), margin, plate_shape)
 
 
 def main():
@@ -198,7 +203,6 @@ def main():
     ap.add_argument("--fps", type=float, default=60.0)
     ap.add_argument("--seconds", type=float, default=4.0)
     ap.add_argument("--radius", default="auto")
-    ap.add_argument("--press-to", type=float, default=0.6, help="plate stops at this much of the asset's height")
     ap.add_argument("--margin", type=float, default=0.0,
                     help="soft_contact_margin; 0 derives it from the asset's particle radius")
     ap.add_argument("--no-full-surface", action="store_true",
@@ -207,11 +211,10 @@ def main():
     args = ap.parse_args()
 
     substeps = args.substeps or SUBSTEPS[args.solver]
-    press_to_frac = args.press_to
     (model, solver, pipeline, radius, height, start_z, thickness, sim_path, plate_half,
-     margin) = build(
-        args.asset, args.solver, args.iterations, args.radius, args.press_to, args.margin,
-        not args.no_full_surface)
+     margin, plate_shape) = build(
+        args.asset, args.solver, args.iterations, args.radius, args.margin,
+        not args.no_full_surface, substeps, args.fps)
     frames = int(args.seconds * args.fps)
     # settle, descend, hold, lift, watch -- in fifths of the run.
     phase = frames // 5
@@ -241,7 +244,8 @@ def main():
           f"plate {thickness * 1000:.1f} mm thick parked at {start_z:.4f}, "
           f"{args.iterations} iterations x {substeps} substeps")
     start_top = lowest_top = bottom_z = None
-    deepest, recovered, contact_peak, settled_height = 0.0, None, 0, None
+    deepest, recovered, contact_peak, plate_peak, settled_height = 0.0, None, 0, 0, None
+    depth = None
     last_plate_z = start_z
     for frame in range(frames):
         if frame < phase:
@@ -267,12 +271,16 @@ def main():
             print(f"[press] diverged at {frame / args.fps:.2f}s")
             return
         # A press that generated no contact is a different failure from a press the asset
-        # resisted, and the two look identical in the heights alone. Count them.
-        for name in ("soft_contact_count", "soft_contact_max"):
-            counter = getattr(contacts, name, None)
-            if counter is not None and hasattr(counter, "numpy"):
-                contact_peak = max(contact_peak, int(np.asarray(counter.numpy()).max()))
-                break
+        # resisted, and the two look identical in the heights alone. Counting all soft contacts
+        # is not enough either: an asset resting on the floor produces hundreds of them whatever
+        # the plate does, so the plate's own are counted separately.
+        counter = getattr(contacts, "soft_contact_count", None)
+        if counter is not None and hasattr(counter, "numpy"):
+            total = int(np.asarray(counter.numpy()).max())
+            contact_peak = max(contact_peak, total)
+            if total and hasattr(contacts, "soft_contact_shape"):
+                shapes = np.asarray(contacts.soft_contact_shape.numpy())[:total]
+                plate_peak = max(plate_peak, int((shapes == plate_shape).sum()))
         top_now = float(q[:, 2].max())
         if frame == phase - 1:
             # Measure the asset only once it has settled under gravity. Reading its height at
@@ -283,9 +291,10 @@ def main():
             start_top = lowest_top = top_now
             floor_now = float(q[:, 2].min())
             settled_height = top_now - floor_now
-            bottom_z = floor_now + (top_now - floor_now) * press_to_frac + thickness / 2.0
-            print(f"[press] settled to {top_now:.4f}; plate will go to {bottom_z:.4f} "
-                  f"({press_to_frac * 100:.0f}% of the settled height)")
+            depth = press_shape.press_depth(settled_height, margin)
+            bottom_z = top_now - depth + thickness / 2.0
+            print(f"[press] settled to {top_now:.4f} ({settled_height * 1000:.1f} mm tall); the "
+                  f"plate will indent it {depth * 1000:.1f} mm, which is one contact margin")
         if start_top is None:
             continue
         lowest_top = min(lowest_top, top_now)
@@ -295,20 +304,21 @@ def main():
         if tape is not None:
             tape.frame(frame, q, plate_z=plate_z)
         if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
-            print(f"[press] t={frame / args.fps:5.2f}s  plate {plate_z:7.4f}  top {top_now:7.4f}  "
-                  f"floor {float(q[:, 2].min()):7.4f}", flush=True)
+            # The plate's underside is what meets the asset; its centre is what the schedule
+            # moves. Printing only the centre made every reading of this log arithmetic.
+            print(f"[press] t={frame / args.fps:5.2f}s  plate_underside {plate_z - thickness / 2.0:7.4f}  "
+                  f"top {top_now:7.4f}  floor {float(q[:, 2].min()):7.4f}", flush=True)
 
     compressed = start_top - lowest_top
     recovery = 0.0 if recovered is None or compressed <= 1e-9 else (recovered - lowest_top) / compressed
-    verdict = press_shape.verdict(contact_peak, compressed, height, deepest, recovery,
+    verdict = press_shape.verdict(plate_peak, compressed, height, deepest, recovery,
                                   settled_height=settled_height, margin=margin)
-    print(f"[press] most soft contacts in any frame: {contact_peak}")
-    # One token per measurement, no spaces inside a value: the runner reads this line, and a
-    # value it has to guess the end of is a value it will read wrong.
-    print(f"[press] RESULT start_top_m={start_top:.4f} lowest_top_m={lowest_top:.4f} "
-          f"compressed_mm={compressed * 1000:.1f} compressed_frac={compressed / height:.3f} "
-          f"recovered_frac={recovery:.2f} below_floor_mm={deepest * 1000:.1f} "
-          f"soft_contacts={contact_peak} verdict={verdict}")
+    print(f"[press] most soft contacts in any frame: {contact_peak}, of which {plate_peak} "
+          f"were with the plate")
+    # Both runners print through press_shape, so the two engines' results are the same line with
+    # the same names in the same order -- a table built from them compares like with like.
+    print(press_shape.result_line("press", start_top, lowest_top, compressed, height, recovery,
+                                  deepest, plate_peak, verdict, indent=depth))
     if tape is not None:
         tape.close()
         print(f"[press] wrote {args.usd}")

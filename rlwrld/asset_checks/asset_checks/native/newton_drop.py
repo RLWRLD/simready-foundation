@@ -78,6 +78,30 @@ GROUND_CONTACT_KE = 2.0e5   # example_rigid_soft_contact.GROUND_CONTACT_KE
 # be thicker than it -- to a size that has nothing to do with the asset. Two radii is the
 # asset's own resolution, which is what everything else here is derived from.
 CONTACT_MARGIN_OF_RADIUS = 2.0
+# Newton's grasping example gives a ~5 cm rubber duck a 1 cm soft-contact margin
+# (softbody/example_softbody_franka.py), and that ratio is not decoration: a penalty contact only
+# exists while the particle is inside the band, so the band is the deepest indentation the model
+# can represent. Measured on this banana with a band of 1.5 mm, a plate driven 10 mm in touched
+# 95 of 3074 particles -- a shell -- and swept through the rest without ever meeting them.
+CONTACT_MARGIN_OF_HEIGHT = 0.2
+
+
+def contact_margin(radius, substeps, fps, drop, height=0.0, gravity=9.81):
+    """How far out to look for contact: wide enough that nothing can step over the floor.
+
+    The rest offset is the asset's -- half its declared thickness, or its declared particle
+    radius -- and it decides where the asset comes to rest. The *detection* band is a property of
+    how the scene is being stepped, not of the asset, and tying it to the asset alone is what let
+    one solver fall through a floor another solver held.
+
+    A particle arriving from a drop of `drop` is doing sqrt(2*g*drop), and in one substep it
+    covers that divided by fps*substeps. If the band is narrower than that stride, the particle
+    can be above the floor at one substep and below it at the next with no contact in between:
+    measured, the same cloth tunnelled on VBD's 10 substeps (1.65 mm per step against a 1 mm
+    band) and did not on XPBD's 32 (0.52 mm). That difference was ours, not the solvers'.
+    """
+    stride = (2.0 * gravity * max(drop, 0.0)) ** 0.5 / (fps * substeps)
+    return max(CONTACT_MARGIN_OF_RADIUS * radius, CONTACT_MARGIN_OF_HEIGHT * height, stride)
 SUBSTEPS = {"xpbd": 32, "vbd": 10}   # rigid_soft_contact uses 32; the softbody examples use 10
 ITERATIONS = 10             # every official soft-body example is 5-10
 XPBD_MAX_RELAXATION = 0.9   # SolverXPBD's own default; never raise it, only lower it
@@ -178,7 +202,7 @@ def contact_material(declared, chosen):
     return friction, restitution
 
 
-def build(asset, solver_name, iterations, radius, drop, margin, full_surface):
+def build(asset, solver_name, iterations, radius, drop, margin, full_surface, substeps, fps):
     """`margin` and `radius` of 0/"auto" mean: take it from the asset, and say where it came from."""
     """`margin` of 0 means: take it from the asset."""
     # add_usd stamps `default_particle_radius` onto every particle it imports, so the radius
@@ -193,6 +217,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface):
         raise SystemExit(f"{asset}: nothing deformable -- neither this Newton's importer nor its "
                          f"declared schemas produced any particles")
     points = np.asarray(measure.particle_q, dtype=np.float64)
+    height = float(points[:, 2].max() - points[:, 2].min())
     declared, chosen = asset_properties.read(asset), {}
     if radius != "auto":
         radius = float(radius)
@@ -270,10 +295,12 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface):
     # Pipeline first, then the solver: SolverVBD sizes its per-body contact state from the
     # contacts that already exist, and Newton's own message says to construct CollisionPipeline
     # before SolverVBD. A static ground survives the wrong order; a rigid body does not.
-    margin = margin or radius * CONTACT_MARGIN_OF_RADIUS
-    print(f"[baseline] soft contact margin {margin * 1000:.2f} mm")
-    margin = margin or radius * CONTACT_MARGIN_OF_RADIUS
-    print(f"[baseline] soft contact margin {margin * 1000:.2f} mm")
+    margin = margin or contact_margin(radius, substeps, fps, drop, height)
+    print(f"[baseline] soft contact margin {margin * 1000:.2f} mm "
+          f"(rest offset {radius * 1000:.2f} mm, {substeps} substeps)")
+    margin = margin or contact_margin(radius, substeps, fps, drop, height)
+    print(f"[baseline] soft contact margin {margin * 1000:.2f} mm "
+          f"(rest offset {radius * 1000:.2f} mm, {substeps} substeps)")
     kwargs = {"broad_phase": "nxn", "soft_contact_margin": margin}
     if full_surface and solver_name == "vbd" and _pipeline_takes_full_surface():
         # Newton 1.5, and VBD only: SolverXPBD raises NotImplementedError on an edge/face soft
@@ -323,7 +350,7 @@ def main():
     substeps = args.substeps or SUBSTEPS[args.solver]
     model, solver, pipeline, radius, lift, sim_path = build(
         args.asset, args.solver, args.iterations, args.radius, args.drop, args.margin,
-        not args.no_full_surface)
+        not args.no_full_surface, substeps, args.fps)
     frames = int(args.seconds * args.fps)
     # The recording is written here rather than by newton.viewer.ViewerUSD: the two Newton
     # versions lay their viewer output out differently, and neither carries the asset's render
