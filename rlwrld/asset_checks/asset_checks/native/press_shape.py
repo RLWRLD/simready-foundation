@@ -32,22 +32,27 @@ def press_depth(height):
     from this number.
     """
     return INDENT_OF_HEIGHT * height
-PLATE_THICKNESS_OF_HEIGHT = 0.3
-PLATE_THICKNESS_OF_MARGIN = 2.5   # and never thinner than this many contact margins -- see below
+PLATE_THICKNESS_OF_HEIGHT = 0.6
 PLATE_FOOTPRINT = 0.6        # half-extents, as a fraction of the asset's own footprint
 PHASES = 5                   # settle, descend, hold, lift, watch -- one fifth of the run each
 
 
-def plate_thickness(height, contact_margin):
-    """Thick enough that the asset only ever meets one of its faces.
+def plate_thickness(height):
+    """How thick the plate is: the experiment's own geometry, in the asset's own units.
 
-    A plate thinner than the distance at which contacts are generated has both faces inside the
-    same margin, and the asset gets pushed up from underneath as hard as it is pushed down:
-    measured, the same press went from 13.9 mm of compression to 3.1 mm when the plate was
-    thinned to less than one and a half margins. Two and a half is clear of that with room to
-    spare, and it keeps the plate from growing into the thing the video is mostly of.
+    This used to be derived from the engine's contact margin, because a plate thinner than the
+    band has both of its faces inside it and pushes the asset up from underneath as hard as down
+    -- measured, the same press fell from 13.9 mm of compression to 3.1 mm. That constraint is
+    real and it is the engine's to satisfy: the plate is this thick, the indentation is
+    `press_depth`, and a band between the two is what an engine has to arrange. The numbers are
+    chosen so such a band exists -- half of 0.6 is 0.3, comfortably above the 0.2 it must cover.
     """
-    return max(PLATE_THICKNESS_OF_MARGIN * contact_margin, height * PLATE_THICKNESS_OF_HEIGHT)
+    return PLATE_THICKNESS_OF_HEIGHT * height
+
+
+def widest_usable_margin(height):
+    """The widest contact band an engine may use and still meet only one face of the plate."""
+    return 0.5 * plate_thickness(height)
 
 
 def plate_height(frame, frames, start_z, bottom_z):

@@ -31,6 +31,7 @@ import newton
 from pxr import Usd
 
 import asset_properties
+import drop_shape
 import usd_deformable
 import recording
 
@@ -115,9 +116,6 @@ SUBSTEPS = {"xpbd": 32, "vbd": 10}   # rigid_soft_contact uses 32; the softbody 
 ITERATIONS = 10             # every official soft-body example is 5-10
 XPBD_MAX_RELAXATION = 0.9   # SolverXPBD's own default; never raise it, only lower it
 # What counts as a pass, as fractions of the asset's own size and its own drop.
-MIN_FALL_OF_DROP = 0.5
-TUNNEL_DEPTH_OF_HEIGHT = 0.05
-SETTLED_SPEED_OF_HEIGHT = 2.0   # of the asset's height per second
 # "Settled" is judged on the 99th percentile of node speed, not the maximum. A maximum over a
 # few thousand nodes is decided by whichever single node is jittering, so an asset that has not
 # moved a tenth of a millimetre in a second still reads as moving; the percentile asks whether
@@ -354,7 +352,7 @@ def main():
     ap.add_argument("--fps", type=float, default=60.0)
     ap.add_argument("--seconds", type=float, default=3.0)
     ap.add_argument("--radius", default="auto")
-    ap.add_argument("--drop", type=float, default=0.05)
+    ap.add_argument("--drop", type=float, default=drop_shape.DROP_HEIGHT)
     ap.add_argument("--margin", type=float, default=0.0,
                     help="soft_contact_margin; 0 derives it from the asset's particle radius")
     ap.add_argument("--no-full-surface", action="store_true")
@@ -408,38 +406,14 @@ def main():
     speed = float(np.percentile(np.abs(qd), 99))
     peak = float(np.abs(qd).max())
     height = float(start[:, 2].max() - start[:, 2].min())
-    # Thresholds as fractions of the asset's own size and its own drop, so they mean the same
-    # thing for any asset. `below` allows for the radius because a particle centre is what is
-    # measured and a resting particle sits one radius above the floor.
-    if not np.isfinite(q).all():
-        verdict = "diverged"
-    elif fell < MIN_FALL_OF_DROP * lift:
-        verdict = "never-fell"
-    # A threshold written only as a fraction of the asset's height is zero for a sheet, and then
-    # any penetration at all is a failure. The contact scale never vanishes: a resting particle's
-    # centre sits one radius above the floor, so going more than a couple of radii below it is
-    # what tunnelling means whatever the asset's shape.
-    elif below > max(TUNNEL_DEPTH_OF_HEIGHT * height, 2.0 * radius):
-        verdict = "through-the-floor"
-        # "Settled" compared only against the asset's height is a threshold of zero for a sheet, and then
-    # any residual at all reads as motion. The contact size gives a scale that never vanishes: moving
-    # less than one contact radius per second is at rest for any asset.
-    elif speed > max(SETTLED_SPEED_OF_HEIGHT * height, radius):
-        verdict = "never-settled"
-    else:
-        verdict = "pass"
-    # How much of its authored height the asset still has once it has settled. Not a pass or a
-    # fail -- a soft body is supposed to spread under its own weight, and how much is the physics.
-    # But a solver that reads no material at all flattens to whatever the contact scale allows,
-    # and without this number in the table that collapse is invisible next to a verdict of "pass".
-    # Undefined for an asset with no height to keep -- a sheet -- so it is not reported at all
-    # rather than reported as zero, which would read as a total collapse.
-    kept = (q[:, 2].max() - q[:, 2].min()) / height if height > 2.0 * radius else None
-    height_kept = f"height_kept={kept:.2f} " if kept is not None else ""
-    print(f"[baseline] RESULT fell_mm={fell * 1000:.1f} rest_low_m={q[:, 2].min():.4f} "
-          f"rest_high_m={q[:, 2].max():.4f} thickness_mm={(q[:, 2].max() - q[:, 2].min()) * 1000:.1f} "
-          f"{height_kept}below_floor_mm={below * 1000:.1f} p99_speed={speed:.3f} "
-          f"max_speed={peak:.3f} verdict={verdict}")
+    # The verdict and the line it is printed on belong to the experiment, which is why
+    # they are asked for rather than written out here: the same words were spelled out
+    # in both drop runners, and a pair of copies is a pair waiting to drift.
+    decision = drop_shape.verdict(bool(np.isfinite(q).all()), fell, lift, below, height,
+                                  speed, radius)
+    kept = drop_shape.height_kept(float(q[:, 2].max() - q[:, 2].min()), height, radius)
+    print(drop_shape.result_line("baseline", fell, float(q[:, 2].min()), float(q[:, 2].max()),
+                                 below, speed, peak, decision, kept))
     if tape is not None:
         tape.close()
         print(f"[baseline] wrote {args.usd}")

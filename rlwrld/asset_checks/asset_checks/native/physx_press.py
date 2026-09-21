@@ -158,9 +158,9 @@ rest_shape.Set(raised)
 # The experiment says how deep the plate goes; PhysX's contact band has to cover that, or the
 # nodes past it feel nothing and the plate sweeps through. Same number Newton is given.
 indent = press_shape.press_depth(height)
-margin = args.margin or max(offset * 2.0, indent)
+margin = args.margin or min(max(offset * 2.0, indent), press_shape.widest_usable_margin(height))
 collision.CreateContactOffsetAttr(max(offset * 2.0, margin))
-thickness = press_shape.plate_thickness(height, margin)
+thickness = press_shape.plate_thickness(height)
 start_z = float(points[:, 2].max()) + thickness / 2.0 + offset * 2.0
 plate = UsdGeom.Cube.Define(stage, PLATE)
 plate.CreateSizeAttr(2.0)

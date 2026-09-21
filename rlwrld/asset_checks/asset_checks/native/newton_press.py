@@ -50,11 +50,6 @@ from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, GROUND_CONTACT_KE, I
                          solver_elements, xpbd_relaxation)
 
 PLATE_BODY = 0        # the only body in the scene
-# What counts as a pass, as fractions of the asset's own settled height rather than absolute
-# millimetres, so the same thresholds mean the same thing for a grape and for a melon.
-MIN_COMPRESSION = 0.05
-MIN_RECOVERY = 0.5
-TUNNEL_DEPTH_OF_HEIGHT = 0.05
 
 
 def build(asset, solver_name, iterations, radius, margin, full_surface=True,
@@ -124,13 +119,15 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # The experiment decides how deep; the engine makes that depth representable. `height` here
     # is the asset's authored height, an upper bound on what it will settle to, so the band is
     # never narrower than the indentation that is coming.
-    margin = margin or contact_margin(radius, substeps, fps, 0.0, press_shape.press_depth(height))
-    thickness = press_shape.plate_thickness(height, margin)
+    margin = margin or min(contact_margin(radius, substeps, fps, 0.0, press_shape.press_depth(height)),
+                       press_shape.widest_usable_margin(height))
+    thickness = press_shape.plate_thickness(height)
     start_z = top + thickness / 2.0 + radius * 2.0
     plate = builder.add_body(xform=wp.transform(wp.vec3(centre[0], centre[1], start_z), wp.quat_identity()),
                              mass=1.0, is_kinematic=True)
     plate_shape = builder.shape_count
-    builder.add_shape_box(plate, hx=footprint[0] * 0.6, hy=footprint[1] * 0.6, hz=thickness / 2.0,
+    builder.add_shape_box(plate, hx=footprint[0] * press_shape.PLATE_FOOTPRINT,
+                          hy=footprint[1] * press_shape.PLATE_FOOTPRINT, hz=thickness / 2.0,
                           cfg=newton.ModelBuilder.ShapeConfig(density=1000.0),
                           color=(0.25, 0.45, 0.85))
 
@@ -205,7 +202,8 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
         print(f"[press] soft_body_relaxation {relaxation:.4f}")
         solver = newton.solvers.SolverXPBD(model, iterations=iterations, soft_body_relaxation=relaxation)
     return (model, solver, pipeline, radius, height, start_z, thickness, sim_path,
-            (footprint[0] * 0.6, footprint[1] * 0.6, thickness / 2.0), margin, plate_shape)
+            (footprint[0] * press_shape.PLATE_FOOTPRINT,
+             footprint[1] * press_shape.PLATE_FOOTPRINT, thickness / 2.0), margin, plate_shape)
 
 
 def main():
