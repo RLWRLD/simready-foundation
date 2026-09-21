@@ -133,7 +133,10 @@ class Recording:
             self.plate_api = UsdGeom.XformCommonAPI(self.plate)
 
     def _bind_visual(self, asset, sim_prim_path, _unused):
-        source = self.stage.DefinePrim(VISUAL)
+        # A typed Xform, not a bare prim: USD's visibility computation walks ancestors through
+        # UsdGeomImageable, and skips one that has no type -- an `invisible` authored there was
+        # honoured by one renderer and not by another.
+        source = UsdGeom.Xform.Define(self.stage, VISUAL).GetPrim()
         source.GetReferences().AddReference(str(asset))
         # The asset's own simulated prim comes along with the reference and would sit inside the
         # moving mesh at its rest pose. The recording already draws that geometry, moving, as
@@ -290,9 +293,10 @@ class RigidRecording:
         self._ops = {}
         self._live = {}
 
-        # The asset, as it is.
-        visual = self.stage.DefinePrim(VISUAL)
+        # The asset, as it is. Typed roots throughout, for the reason `_bind_visual` gives.
+        visual = UsdGeom.Xform.Define(self.stage, VISUAL).GetPrim()
         visual.GetReferences().AddReference(str(asset))
+        UsdGeom.Xform.Define(self.stage, COLLISION)
         self.visual_bodies = {}
         for body in self.bodies:
             rel = body[len(self.asset_prim) + 1:]
@@ -335,7 +339,7 @@ class RigidRecording:
         if self.fixtures:
             if not fixtures_layer:
                 raise SystemExit("[recording] the run recorded fixtures but no fixtures layer was given")
-            root = self.stage.DefinePrim(FIXTURES)
+            root = UsdGeom.Xform.Define(self.stage, FIXTURES).GetPrim()
             root.GetReferences().AddReference(str(fixtures_layer))
             for live, copy_path in self.fixtures.items():
                 prim = self.stage.GetPrimAtPath(f"{FIXTURES}/{Sdf.Path(copy_path).name}")

@@ -196,6 +196,7 @@ def main():
 
     results = {}
     stem = pathlib.Path(asset).stem
+    (out / stem).mkdir(parents=True, exist_ok=True)
     for env in envs:
         for experiment in experiments:
             cell = f"{stem}__{env}__{experiment}"
@@ -252,9 +253,10 @@ def main():
             subprocess.call([str(BENCH / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare",
                              str(out), "--role", view, "--envs", ",".join(envs)],
                             env={**os.environ, "PYTHONPATH": str(HERE.parents[1])})
-    (out / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
-    (out / "summary.md").write_text(summary(asset, results))
-    print(f"\n[run] wrote {out / 'results.json'}")
+    # Per asset, under its own directory: several assets share one <out>, as they do in a rigid run.
+    (out / stem / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
+    (out / stem / "summary.md").write_text(summary(asset, results))
+    print(f"\n[run] wrote {out / stem / 'results.json'}")
     for cell, row in sorted(results.items()):
         state = row.get("skipped") or row.get("error") or row.get("diverged") or "ok"
         made = ", ".join((row.get("videos") or {}).values()) or "-"
