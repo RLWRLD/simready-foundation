@@ -67,7 +67,12 @@ SELF_CONTACT = {"volume": False, "surface": True}
 def deformable_kind(model):
     """What this asset is made of, asked of the model rather than assumed."""
     return "volume" if model.tet_count else "surface"
-GROUND_CONTACT_KE = 2.0e5   # example_rigid_soft_contact.GROUND_CONTACT_KE
+# There is no separate stiffness for the floor or the plate. Newton's grasping example sets the
+# shapes' material to the very same number it sets the soft contact to
+# (`shape_material_ke.fill_(self.soft_contact_ke)`), because for a rigid-soft contact VBD reads
+# the shape's material -- and a fixture softer than the contact is the softer of the two, so the
+# contact gives there instead. Measured: with the contact raised to the asset's own modulus but
+# the fixtures left at 2e5, a plate indenting 6.2 mm moved the banana 1.3 mm with 2003 contacts.
 # How far out a soft contact is generated, in particle radii. Newton's examples say 0.01 m, but
 # they are metre-scale scenes; on a 17 cm banana that margin is a centimetre of empty space
 # around every particle, and it forces every other length in the scene -- the press plate has to
@@ -295,14 +300,15 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     model.soft_contact_restitution = restitution
     # Only the floor we added is ours to give a material to. Filling every shape would overwrite
     # whatever the asset's own shapes were imported with.
-    for array, value in ((model.shape_material_ke, GROUND_CONTACT_KE),
+    for array, value in ((model.shape_material_ke, model.soft_contact_ke),
                          (model.shape_material_kd, CONTACT[kind][solver_name]["soft_contact_kd"]),
                          (model.shape_material_mu, friction)):
         values = array.numpy()
         values[ground_shape] = value
         array.assign(wp.array(values, dtype=float))
     chosen["particle_radius_used"] = (radius, "read back from the model, whatever set it")
-    chosen["ground_ke"] = (GROUND_CONTACT_KE, "the floor is the experiment's, not the asset's")
+    chosen["floor_ke"] = (model.soft_contact_ke, "the floor is as stiff as the contact, because "
+                                                 "it is the same contact")
     asset_properties.report("baseline", declared, chosen)
 
     # Pipeline first, then the solver: SolverVBD sizes its per-body contact state from the
@@ -384,6 +390,14 @@ def main():
     print(f"[baseline] contact {CONTACT[deformable_kind(model)][args.solver]}")
     print(f"[baseline] starts z [{start[:, 2].min():.4f}, {start[:, 2].max():.4f}]")
     for frame in range(frames):
+        # SolverVBD keeps a bounding-volume hierarchy for collision and it does not notice the
+        # scene moving on its own: Newton's grasping example rebuilds it once per frame, right
+        # before the substep loop, and we never did. The cost of not doing it is invisible until
+        # something moves a long way -- measured, a plate held 5 mm inside the banana while only
+        # 553 of its 3074 particles were ever in contact, because the tree still described where
+        # everything had been at the start.
+        if hasattr(solver, "rebuild_bvh"):
+            solver.rebuild_bvh(state_0)
         for _ in range(substeps):
             state_0.clear_forces()
             pipeline.collide(state_0, contacts)

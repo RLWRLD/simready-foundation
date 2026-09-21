@@ -42,7 +42,7 @@ import asset_properties
 import press_shape
 import recording
 import usd_deformable
-from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, GROUND_CONTACT_KE, ITERATIONS,
+from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, ITERATIONS,
                          CONTACT_STIFFNESS_OF_MATERIAL, SELF_CONTACT, SUBSTEPS,
                          XPBD_MAX_RELAXATION, auto_radius,
                          contact_material, contact_margin, deformable_kind,
@@ -156,14 +156,15 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # in with. Friction is the same number the asset (or, failing that, this run) set globally,
     # so the plate does not grip differently from the ground.
     fixtures = [ground_shape, plate_shape]
-    for array, value in ((model.shape_material_ke, GROUND_CONTACT_KE),
+    for array, value in ((model.shape_material_ke, model.soft_contact_ke),
                          (model.shape_material_kd, CONTACT[kind][solver_name]["soft_contact_kd"]),
                          (model.shape_material_mu, friction)):
         values = array.numpy()
         values[fixtures] = value
         array.assign(wp.array(values, dtype=float))
     chosen["particle_radius_used"] = (radius, "read back from the model, whatever set it")
-    chosen["fixture_ke"] = (GROUND_CONTACT_KE, "the floor and plate are the experiment's")
+    chosen["fixture_ke"] = (model.soft_contact_ke, "the floor and the plate are as stiff as the "
+                                                   "contact, because it is the same contact")
     asset_properties.report("press", declared, chosen)
 
     # The pipeline is built BEFORE the solver, on purpose. SolverVBD sizes its per-body
@@ -272,6 +273,13 @@ def main():
             plate_z = start_z
         speed = (plate_z - last_plate_z) * args.fps
         last_plate_z = plate_z
+        # Newton's grasping example rebuilds SolverVBD's BVH once per frame, so this does too.
+        # It is not, as was briefly claimed here, the reason a plate can sit inside this asset:
+        # adding it changed the measured compression by 0.1 mm. The tree it rebuilds is for
+        # particle self-contact; shape collision is refreshed by `pipeline.collide` every substep
+        # regardless. It is kept because the example does it, not because it fixed anything.
+        if hasattr(solver, "rebuild_bvh"):
+            solver.rebuild_bvh(state_0)
         for _ in range(substeps):
             state_0.clear_forces()
             place_plate(state_0, plate_z, speed)
@@ -322,7 +330,7 @@ def main():
                   f"top {top_now:7.4f}  floor {float(q[:, 2].min()):7.4f}", flush=True)
 
     compressed = start_top - lowest_top
-    recovery = 0.0 if recovered is None or compressed <= 1e-9 else (recovered - lowest_top) / compressed
+    recovery = press_shape.recovery_fraction(recovered, lowest_top, compressed, radius)
     verdict = press_shape.verdict(plate_peak, compressed, height, deepest, recovery,
                                   settled_height=settled_height)
     print(f"[press] most soft contacts in any frame: {contact_peak}, of which {plate_peak} "
