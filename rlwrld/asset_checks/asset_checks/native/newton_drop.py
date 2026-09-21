@@ -42,10 +42,30 @@ import recording
 # VBD 0.3 and XPBD 1.0 because two examples happened to use those would mean the two solvers were
 # never rubbing the same banana on the same floor. It comes from the asset, or from one stated
 # default shared by every solver.
+# ...and they depend on what the asset is made of, not only on which solver runs it. Newton's own
+# examples are explicit about this: a volumetric soft body gets ke ~1e5
+# (multiphysics/example_rigid_soft_contact.py) and a cloth gets ke ~1e2
+# (cloth/example_cloth_hanging.py, which splits kd by solver in exactly this shape). Using the
+# soft-body numbers on a sheet is a thousandfold too stiff and it diverges in two hundredths of a
+# second -- measured.
 CONTACT = {
-    "xpbd": {"soft_contact_ke": 75.0, "soft_contact_kd": 1.0, "soft_contact_kf": 1.0e3},
-    "vbd": {"soft_contact_ke": 1.0e5, "soft_contact_kd": 1.0e-4, "soft_contact_kf": 1.0e3},
+    "volume": {
+        "xpbd": {"soft_contact_ke": 75.0, "soft_contact_kd": 1.0, "soft_contact_kf": 1.0e3},
+        "vbd": {"soft_contact_ke": 1.0e5, "soft_contact_kd": 1.0e-4, "soft_contact_kf": 1.0e3},
+    },
+    "surface": {
+        "xpbd": {"soft_contact_ke": 1.0e2, "soft_contact_kd": 1.0e0},
+        "vbd": {"soft_contact_ke": 1.0e2, "soft_contact_kd": 1.0e2},
+    },
 }
+# A sheet can fold onto itself; a volume cannot fold through itself the same way, and Newton's
+# soft-body examples leave self-contact off while its cloth examples turn it on.
+SELF_CONTACT = {"volume": False, "surface": True}
+
+
+def deformable_kind(model):
+    """What this asset is made of, asked of the model rather than assumed."""
+    return "volume" if model.tet_count else "surface"
 GROUND_CONTACT_KE = 2.0e5   # example_rigid_soft_contact.GROUND_CONTACT_KE
 # How far out a soft contact is generated, in particle radii. Newton's examples say 0.01 m, but
 # they are metre-scale scenes; on a 17 cm banana that margin is a centimetre of empty space
@@ -177,10 +197,11 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface):
     if radius != "auto":
         radius = float(radius)
         chosen["requested_particle_radius"] = (radius, "asked for on the command line")
-    elif declared.get("particle_radius") is not None:
-        # Newton's importer does not read this attribute, so an asset that spells out its own
-        # particle size gets Newton's 0.1 m default instead. Read it here or it is simply lost.
-        radius = declared["particle_radius"]
+    elif asset_properties.contact_size(declared)[0] is not None:
+        # Newton's importer reads neither `newton:particleRadius` nor a surface's shell thickness,
+        # so an asset that spells out its own contact size gets Newton's 0.1 m default instead.
+        # One function answers for both kinds, so every engine is given the same number.
+        radius = asset_properties.contact_size(declared)[0]
     else:
         radius = auto_radius(points)
         chosen["derived_particle_radius"] = (radius, "the asset declares none; half the median "
@@ -225,18 +246,19 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface):
     if solver_name == "vbd":
         builder.color()  # SolverVBD refuses a model without particle colour groups
     model = builder.finalize()
-    for name, value in CONTACT[solver_name].items():
+    kind = deformable_kind(model)
+    for name, value in CONTACT[kind][solver_name].items():
         setattr(model, name, value)
-    for name in CONTACT[solver_name]:
-        chosen[name] = (CONTACT[solver_name][name],
-                        f"penalty numerics for {solver_name}, from Newton's example_rigid_soft_contact.py")
+    for name, value in CONTACT[kind][solver_name].items():
+        chosen[name] = (value, f"penalty numerics for a {kind} deformable on {solver_name}, from "
+                               f"Newton's own examples for that pair")
     friction, restitution = contact_material(declared, chosen)
     model.soft_contact_mu = friction
     model.soft_contact_restitution = restitution
     # Only the floor we added is ours to give a material to. Filling every shape would overwrite
     # whatever the asset's own shapes were imported with.
     for array, value in ((model.shape_material_ke, GROUND_CONTACT_KE),
-                         (model.shape_material_kd, CONTACT[solver_name]["soft_contact_kd"]),
+                         (model.shape_material_kd, CONTACT[kind][solver_name]["soft_contact_kd"]),
                          (model.shape_material_mu, friction)):
         values = array.numpy()
         values[ground_shape] = value
@@ -264,8 +286,11 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface):
     print(f"[baseline] full-surface soft contact: {kwargs.get('enable_rigid_soft_full_surface_contact', False)}")
 
     if solver_name == "vbd":
-        solver = newton.solvers.SolverVBD(model, iterations=iterations, particle_enable_self_contact=False,
-                                          rigid_body_particle_contact_buffer_size=max(256, model.particle_count))
+        solver = newton.solvers.SolverVBD(
+            model, iterations=iterations,
+            particle_enable_self_contact=SELF_CONTACT[kind],
+            particle_self_contact_radius=radius, particle_self_contact_margin=radius * 2.0,
+            rigid_body_particle_contact_buffer_size=max(256, model.particle_count))
     else:
         if relaxation_is_a_jacobi_factor():
             relaxation = xpbd_relaxation(model.tet_count, model.particle_count)
@@ -317,7 +342,7 @@ def main():
     print(f"[baseline] {args.asset.split('/')[-1]} on {args.solver}: {model.particle_count} particles, "
           f"radius {radius * 1000:.2f} mm, lifted {lift * 100:.1f} cm, {args.iterations} iterations x "
           f"{substeps} substeps at {args.fps:g} fps")
-    print(f"[baseline] contact {CONTACT[args.solver]}")
+    print(f"[baseline] contact {CONTACT[deformable_kind(model)][args.solver]}")
     print(f"[baseline] starts z [{start[:, 2].min():.4f}, {start[:, 2].max():.4f}]")
     for frame in range(frames):
         for _ in range(substeps):
@@ -349,15 +374,31 @@ def main():
         verdict = "diverged"
     elif fell < MIN_FALL_OF_DROP * lift:
         verdict = "never-fell"
-    elif below > TUNNEL_DEPTH_OF_HEIGHT * height:
+    # A threshold written only as a fraction of the asset's height is zero for a sheet, and then
+    # any penetration at all is a failure. The contact scale never vanishes: a resting particle's
+    # centre sits one radius above the floor, so going more than a couple of radii below it is
+    # what tunnelling means whatever the asset's shape.
+    elif below > max(TUNNEL_DEPTH_OF_HEIGHT * height, 2.0 * radius):
         verdict = "through-the-floor"
-    elif speed > SETTLED_SPEED_OF_HEIGHT * height:
+        # "Settled" compared only against the asset's height is a threshold of zero for a sheet, and then
+    # any residual at all reads as motion. The contact size gives a scale that never vanishes: moving
+    # less than one contact radius per second is at rest for any asset.
+    elif speed > max(SETTLED_SPEED_OF_HEIGHT * height, radius):
         verdict = "never-settled"
     else:
         verdict = "pass"
+    # How much of its authored height the asset still has once it has settled. Not a pass or a
+    # fail -- a soft body is supposed to spread under its own weight, and how much is the physics.
+    # But a solver that reads no material at all flattens to whatever the contact scale allows,
+    # and without this number in the table that collapse is invisible next to a verdict of "pass".
+    # Undefined for an asset with no height to keep -- a sheet -- so it is not reported at all
+    # rather than reported as zero, which would read as a total collapse.
+    kept = (q[:, 2].max() - q[:, 2].min()) / height if height > 2.0 * radius else None
+    height_kept = f"height_kept={kept:.2f} " if kept is not None else ""
     print(f"[baseline] RESULT fell_mm={fell * 1000:.1f} rest_low_m={q[:, 2].min():.4f} "
           f"rest_high_m={q[:, 2].max():.4f} thickness_mm={(q[:, 2].max() - q[:, 2].min()) * 1000:.1f} "
-          f"below_floor_mm={below * 1000:.1f} p99_speed={speed:.3f} max_speed={peak:.3f} verdict={verdict}")
+          f"{height_kept}below_floor_mm={below * 1000:.1f} p99_speed={speed:.3f} "
+          f"max_speed={peak:.3f} verdict={verdict}")
     if tape is not None:
         tape.close()
         print(f"[baseline] wrote {args.usd}")

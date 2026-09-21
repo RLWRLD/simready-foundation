@@ -68,7 +68,16 @@ def recovery_frame(frames):
     return 4 * phase + phase // 2
 
 
-def verdict(contacts, compressed, height, deepest, recovery):
+def verdict(contacts, compressed, height, deepest, recovery, settled_height=None, margin=None):
+    """What the run showed. `nothing-to-press` is not a physics failure -- it says the experiment
+    does not apply, which is a different thing and must not be read as one.
+
+    An asset flatter than the distance at which contact is even resolved has no height to lose. A
+    sheet resting on the floor is the obvious case: reporting `did-not-deform` for it would blame
+    the solver for a question nobody could answer.
+    """
+    if settled_height is not None and margin is not None and settled_height < margin:
+        return "nothing-to-press"
     if contacts == 0:
         return "no-contact"          # the plate never met the asset: not a measurement at all
     if compressed < MIN_COMPRESSION * height:

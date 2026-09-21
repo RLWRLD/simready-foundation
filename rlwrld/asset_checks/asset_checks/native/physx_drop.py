@@ -127,15 +127,22 @@ print(f"[physx] simulating {target.GetPath()} as body {body.GetPath()}")
 # on the prim and PhysX builds the body from that, so an ancestor Xform does not reach it. It is
 # also exactly what the Newton runner does to its particles, so both engines start from the same
 # geometry rather than from the same intention.
-points = np.asarray(UsdGeom.PointBased(body).GetPointsAttr().Get(), dtype=np.float64)
+# The geometry is the prim carrying the *sim* schema and the body is the one carrying the *body*
+# schema; they are the same prim only when the asset authors a TetMesh that is itself the body. A
+# cooked surface hierarchy puts an Xform on top with the mesh underneath, and reading points off
+# the Xform gets nothing at all.
+geometry = target
+points = np.asarray(UsdGeom.PointBased(geometry).GetPointsAttr().Get(), dtype=np.float64)
+if points.ndim != 2:
+    raise SystemExit(f"[physx] {geometry.GetPath()} carries no points to place")
 height = float(points[:, 2].max() - points[:, 2].min())
 lift = args.drop - float(points[:, 2].min())
 points[:, 2] += lift
 raised = [Gf.Vec3f(*p) for p in points]
-UsdGeom.PointBased(body).GetPointsAttr().Set(raised)
-rest_shape = body.GetAttribute("omniphysics:restShapePoints")
+UsdGeom.PointBased(geometry).GetPointsAttr().Set(raised)
+rest_shape = geometry.GetAttribute("omniphysics:restShapePoints")
 if not rest_shape or not rest_shape.HasAuthoredValue():
-    raise SystemExit(f"[physx] {body.GetPath()} authors no omniphysics:restShapePoints; PhysX would "
+    raise SystemExit(f"[physx] {geometry.GetPath()} authors no omniphysics:restShapePoints; PhysX would "
                      f"build the body from a shape this script cannot place")
 rest_shape.Set(raised)
 # Size the collision offsets to the asset, the way the Newton runs size their particle radius.
@@ -148,18 +155,17 @@ rest_shape.Set(raised)
 # picking a different number here than Newton gets would mean the two engines were never asked
 # to touch the ground in the same way.
 declared, chosen = asset_properties.read(args.visual_asset or args.asset), {}
-if declared.get("particle_radius") is not None:
-    offset = declared["particle_radius"]
-else:
+offset, offset_source = asset_properties.contact_size(declared)
+if offset is None:
     picked = np.random.default_rng(0).choice(len(points), size=min(512, len(points)), replace=False)
     spacing = np.sqrt(((points[picked][:, None, :] - points[None, :, :]) ** 2).sum(-1))
     spacing[spacing < 1e-9] = np.inf
     offset = float(np.median(spacing.min(axis=1)) * 0.5)
-    chosen["rest_offset"] = (offset, "the asset does not declare a particle radius; half the "
-                                     "median distance between neighbouring nodes")
+    chosen["rest_offset"] = (offset, "the asset declares neither a particle radius nor a shell "
+                                     "thickness; half the median distance between nodes")
 chosen["contact_offset"] = (offset * 2.0, "twice the rest offset, as Newton's contact margin is")
 asset_properties.report("physx", declared, chosen)
-collision = PhysxSchema.PhysxCollisionAPI.Apply(body)
+collision = PhysxSchema.PhysxCollisionAPI.Apply(geometry)
 collision.CreateRestOffsetAttr(offset)
 collision.CreateContactOffsetAttr(offset * 2.0)
 for _ in range(10):
@@ -233,15 +239,26 @@ if not np.isfinite(q).all():
     verdict = "diverged"
 elif fell < MIN_FALL_OF_DROP * (args.drop - offset):
     verdict = "never-fell"
-elif below > offset + TUNNEL_DEPTH_OF_HEIGHT * height:
+# A threshold written only as a fraction of the asset's height is zero for a sheet, and then any
+# penetration at all is a failure. The contact scale never vanishes: a resting node's centre sits
+# one offset above the floor, so more than a couple of offsets below it is what tunnelling means.
+elif below > max(offset + TUNNEL_DEPTH_OF_HEIGHT * height, 2.0 * offset):
     verdict = "through-the-floor"
-elif speed > SETTLED_SPEED_OF_HEIGHT * height:
+# "Settled" compared only against the asset's height is a threshold of zero for a sheet, and then
+# any residual at all reads as motion. The contact size gives a scale that never vanishes: moving
+# less than one contact radius per second is at rest for any asset.
+elif speed > max(SETTLED_SPEED_OF_HEIGHT * height, offset):
     verdict = "never-settled"
 else:
     verdict = "pass"
+# Not a pass or a fail: a soft body is supposed to spread under its own weight, and how much is
+# the physics. But a solver reading no material at all flattens to the contact scale, and without
+# this in the table that collapse is invisible beside a verdict of "pass". Undefined for a sheet.
+kept = (q[:, 2].max() - q[:, 2].min()) / height if height > 2.0 * offset else None
+height_kept = f"height_kept={kept:.2f} " if kept is not None else ""
 print(f"[physx] RESULT fell_mm={fell * 1000:.1f} rest_low_m={q[:, 2].min():.4f} "
       f"rest_high_m={q[:, 2].max():.4f} thickness_mm={(q[:, 2].max() - q[:, 2].min()) * 1000:.1f} "
-      f"below_floor_mm={below * 1000:.1f} p99_speed={speed:.3f} max_speed={peak:.3f} verdict={verdict}")
+      f"{height_kept}below_floor_mm={below * 1000:.1f} p99_speed={speed:.3f} max_speed={peak:.3f} verdict={verdict}")
 
 if tape is not None:
     tape.close()

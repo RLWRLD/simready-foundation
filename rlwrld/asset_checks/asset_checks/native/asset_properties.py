@@ -27,6 +27,10 @@ DENSITY = ("physics:density", "newton:density")
 DEFAULT_FRICTION = 0.5
 YOUNGS = ("physics:youngsModulus",)
 POISSON = ("physics:poissonsRatio",)
+# A surface deformable states its shell thickness rather than a particle radius. Newton's own
+# importer takes half of it as the collision radius, so that is the contact size the asset is
+# asking for, and it is the one every engine should be given.
+THICKNESS = ("physics:thickness", "newton:thickness")
 
 
 def _first(prims, names):
@@ -54,7 +58,8 @@ def read(asset):
     found = {}
     for key, names in (("particle_radius", RADIUS), ("friction", FRICTION),
                        ("restitution", RESTITUTION), ("density", DENSITY),
-                       ("youngs_modulus", YOUNGS), ("poissons_ratio", POISSON)):
+                       ("youngs_modulus", YOUNGS), ("poissons_ratio", POISSON),
+                       ("thickness", THICKNESS)):
         value, where = _first(prims, names)
         found[key] = value
         found[key + "_source"] = where
@@ -67,10 +72,25 @@ def report(tag, declared, chosen):
     A run whose log does not say this cannot be audited later, and a benchmark nobody can audit
     is a benchmark nobody should believe.
     """
-    for key in ("particle_radius", "friction", "restitution", "density",
+    for key in ("particle_radius", "thickness", "friction", "restitution", "density",
                 "youngs_modulus", "poissons_ratio"):
         value, where = declared.get(key), declared.get(key + "_source")
         if value is not None:
             print(f"[{tag}] asset: {key} = {value:g}  ({where})")
     for key, (value, why) in sorted(chosen.items()):
         print(f"[{tag}] ours:  {key} = {value:g}  -- {why}")
+
+
+def contact_size(declared):
+    """The radius at which this asset expects contact to happen, if it says.
+
+    A volume deformable states a particle radius; a surface one states a shell thickness and
+    Newton halves it. Returning the same number to every engine is what keeps them touching the
+    floor the same way -- PhysX's own default is scale-free and Newton's importer only reads one
+    of the two attributes.
+    """
+    if declared.get("particle_radius") is not None:
+        return declared["particle_radius"], declared.get("particle_radius_source")
+    if declared.get("thickness") is not None:
+        return 0.5 * declared["thickness"], f"half of {declared.get('thickness_source')}"
+    return None, None
