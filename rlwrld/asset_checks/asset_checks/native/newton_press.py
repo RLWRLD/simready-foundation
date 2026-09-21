@@ -43,7 +43,8 @@ import press_shape
 import recording
 import usd_deformable
 from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, GROUND_CONTACT_KE, ITERATIONS,
-                         SELF_CONTACT, SUBSTEPS, XPBD_MAX_RELAXATION, auto_radius,
+                         CONTACT_STIFFNESS_OF_MATERIAL, SELF_CONTACT, SUBSTEPS,
+                         XPBD_MAX_RELAXATION, auto_radius,
                          contact_material, contact_margin, deformable_kind,
                          relaxation_is_a_jacobi_factor,
                          solver_elements, xpbd_relaxation)
@@ -120,7 +121,10 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # The press sets the asset down rather than dropping it, so gravity's stride does not apply;
     # what decides the band here is how deep the plate means to go, because a particle outside it
     # feels nothing at all.
-    margin = margin or contact_margin(radius, substeps, fps, 0.0, height)
+    # The experiment decides how deep; the engine makes that depth representable. `height` here
+    # is the asset's authored height, an upper bound on what it will settle to, so the band is
+    # never narrower than the indentation that is coming.
+    margin = margin or contact_margin(radius, substeps, fps, 0.0, press_shape.press_depth(height))
     thickness = press_shape.plate_thickness(height, margin)
     start_z = top + thickness / 2.0 + radius * 2.0
     plate = builder.add_body(xform=wp.transform(wp.vec3(centre[0], centre[1], start_z), wp.quat_identity()),
@@ -138,6 +142,16 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
         setattr(model, name, value)
         chosen[name] = (value, f"penalty numerics for a {kind} deformable on {solver_name}, from "
                                f"Newton's own examples for that pair")
+    if kind == "volume":
+        # A contact softer than the material yields instead of the material: the plate sinks in
+        # and the asset barely moves. Newton's grasping example sets the contact to twice its
+        # duck's shear modulus, and this asset's own modulus is the scale here.
+        material_ke = CONTACT_STIFFNESS_OF_MATERIAL * float(np.median(model.tet_materials.numpy()[:, 0]))
+        model.soft_contact_ke = max(model.soft_contact_ke, material_ke)
+        chosen["soft_contact_ke"] = (model.soft_contact_ke,
+                                     "raised to twice the asset's own shear modulus, the ratio "
+                                     "Newton's grasping example uses, so the contact does not "
+                                     "give where the material should")
     friction, restitution = contact_material(declared, chosen)
     model.soft_contact_mu = friction
     model.soft_contact_restitution = restitution
@@ -291,10 +305,10 @@ def main():
             start_top = lowest_top = top_now
             floor_now = float(q[:, 2].min())
             settled_height = top_now - floor_now
-            depth = press_shape.press_depth(settled_height, margin)
+            depth = press_shape.press_depth(settled_height)
             bottom_z = top_now - depth + thickness / 2.0
             print(f"[press] settled to {top_now:.4f} ({settled_height * 1000:.1f} mm tall); the "
-                  f"plate will indent it {depth * 1000:.1f} mm, which is one contact margin")
+                  f"plate will indent it {depth * 1000:.1f} mm, ")
         if start_top is None:
             continue
         lowest_top = min(lowest_top, top_now)
@@ -312,7 +326,7 @@ def main():
     compressed = start_top - lowest_top
     recovery = 0.0 if recovered is None or compressed <= 1e-9 else (recovered - lowest_top) / compressed
     verdict = press_shape.verdict(plate_peak, compressed, height, deepest, recovery,
-                                  settled_height=settled_height, margin=margin)
+                                  settled_height=settled_height)
     print(f"[press] most soft contacts in any frame: {contact_peak}, of which {plate_peak} "
           f"were with the plate")
     # Both runners print through press_shape, so the two engines' results are the same line with

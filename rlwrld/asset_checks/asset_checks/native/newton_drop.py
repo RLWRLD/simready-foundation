@@ -78,16 +78,25 @@ GROUND_CONTACT_KE = 2.0e5   # example_rigid_soft_contact.GROUND_CONTACT_KE
 # be thicker than it -- to a size that has nothing to do with the asset. Two radii is the
 # asset's own resolution, which is what everything else here is derived from.
 CONTACT_MARGIN_OF_RADIUS = 2.0
-# Newton's grasping example gives a ~5 cm rubber duck a 1 cm soft-contact margin
-# (softbody/example_softbody_franka.py), and that ratio is not decoration: a penalty contact only
-# exists while the particle is inside the band, so the band is the deepest indentation the model
-# can represent. Measured on this banana with a band of 1.5 mm, a plate driven 10 mm in touched
-# 95 of 3074 particles -- a shell -- and swept through the rest without ever meeting them.
-CONTACT_MARGIN_OF_HEIGHT = 0.2
+# A penalty contact exists only while the particle is inside the band, so the band is the deepest
+# indentation the model can represent. Measured on this banana with a band of 1.5 mm, a plate
+# driven 10 mm in touched 95 of 3074 particles -- a shell -- and swept through the rest without
+# ever meeting them. The experiment says how deep it presses; this is how an engine is made able
+# to feel that, which is the engine's side of the bargain and not the experiment's.
+#
+# Newton's own grasping example sets a contact stiffness twice its duck's shear modulus
+# (softbody/example_softbody_franka.py: k_mu 1e6, soft_contact_ke 2e6). The ratio is the point: a
+# contact softer than the material yields instead of the material, and the plate then sinks in
+# while the asset barely moves -- measured, 9.5 mm in and 2 mm of give, with 2276 contacts.
+CONTACT_STIFFNESS_OF_MATERIAL = 2.0
 
 
-def contact_margin(radius, substeps, fps, drop, height=0.0, gravity=9.81):
-    """How far out to look for contact: wide enough that nothing can step over the floor.
+def contact_margin(radius, substeps, fps, drop, depth=0.0, gravity=9.81):
+    """How far out to look for contact: wide enough for everything the experiment asks of it.
+
+    `depth` is the indentation the experiment intends, which the band has to cover or the
+    particles past it feel nothing. `drop` is the fall it intends, which sets how far a particle
+    moves in one substep.
 
     The rest offset is the asset's -- half its declared thickness, or its declared particle
     radius -- and it decides where the asset comes to rest. The *detection* band is a property of
@@ -101,7 +110,7 @@ def contact_margin(radius, substeps, fps, drop, height=0.0, gravity=9.81):
     band) and did not on XPBD's 32 (0.52 mm). That difference was ours, not the solvers'.
     """
     stride = (2.0 * gravity * max(drop, 0.0)) ** 0.5 / (fps * substeps)
-    return max(CONTACT_MARGIN_OF_RADIUS * radius, CONTACT_MARGIN_OF_HEIGHT * height, stride)
+    return max(CONTACT_MARGIN_OF_RADIUS * radius, depth, stride)
 SUBSTEPS = {"xpbd": 32, "vbd": 10}   # rigid_soft_contact uses 32; the softbody examples use 10
 ITERATIONS = 10             # every official soft-body example is 5-10
 XPBD_MAX_RELAXATION = 0.9   # SolverXPBD's own default; never raise it, only lower it
@@ -274,6 +283,12 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     kind = deformable_kind(model)
     for name, value in CONTACT[kind][solver_name].items():
         setattr(model, name, value)
+    if kind == "volume":
+        # The contact has to be at least as stiff as what it is pressing, or it is the contact
+        # that gives. The asset's own shear modulus is the scale, and the ratio is the grasping
+        # example's. The penalty examples are quoted for a beam a hundred times softer than this.
+        material_ke = CONTACT_STIFFNESS_OF_MATERIAL * float(np.median(model.tet_materials.numpy()[:, 0]))
+        model.soft_contact_ke = max(model.soft_contact_ke, material_ke)
     for name, value in CONTACT[kind][solver_name].items():
         chosen[name] = (value, f"penalty numerics for a {kind} deformable on {solver_name}, from "
                                f"Newton's own examples for that pair")
@@ -295,10 +310,9 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     # Pipeline first, then the solver: SolverVBD sizes its per-body contact state from the
     # contacts that already exist, and Newton's own message says to construct CollisionPipeline
     # before SolverVBD. A static ground survives the wrong order; a rigid body does not.
-    margin = margin or contact_margin(radius, substeps, fps, drop, height)
+    margin = margin or contact_margin(radius, substeps, fps, drop)
     print(f"[baseline] soft contact margin {margin * 1000:.2f} mm "
           f"(rest offset {radius * 1000:.2f} mm, {substeps} substeps)")
-    margin = margin or contact_margin(radius, substeps, fps, drop, height)
     print(f"[baseline] soft contact margin {margin * 1000:.2f} mm "
           f"(rest offset {radius * 1000:.2f} mm, {substeps} substeps)")
     kwargs = {"broad_phase": "nxn", "soft_contact_margin": margin}
