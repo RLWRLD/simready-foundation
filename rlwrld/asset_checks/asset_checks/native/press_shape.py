@@ -14,7 +14,17 @@ Nothing here imports a physics engine, so either can read it.
 MIN_COMPRESSION = 0.05       # it has to give at least this much
 MIN_RECOVERY = 0.5           # and get back at least this much of what it gave
 TUNNEL_DEPTH_OF_HEIGHT = 0.05
-PRESS_TO = 0.6               # the plate's underside stops at this much of the settled height
+def press_depth(settled_height, margin):
+    """How far into the asset the plate goes: as deep as contact can actually be felt.
+
+    A fixed fraction of the asset's height was the obvious choice and it is the wrong one. A
+    penalty contact exists only while the particle is within the margin of the shape, so a plate
+    driven deeper than that meets a shell of particles and passes through the rest -- measured,
+    95 of 3074. Pressing exactly one margin deep is the deepest indentation the contact model
+    represents faithfully, and it is the same rule for any asset because the margin is already
+    derived from the asset's own size.
+    """
+    return min(margin, settled_height)
 PLATE_THICKNESS_OF_HEIGHT = 0.3
 PLATE_THICKNESS_OF_MARGIN = 2.5   # and never thinner than this many contact margins -- see below
 PLATE_FOOTPRINT = 0.6        # half-extents, as a fraction of the asset's own footprint
@@ -89,10 +99,15 @@ def verdict(contacts, compressed, height, deepest, recovery, settled_height=None
     return "pass"
 
 
-def result_line(tag, start_top, lowest_top, compressed, height, recovery, deepest, contacts, decision):
+def result_line(tag, start_top, lowest_top, compressed, height, recovery, deepest, contacts,
+                decision, indent=None):
     """One token per measurement, no spaces inside a value: the runner reads this line, and a
     value whose end it has to guess is a value it will read wrong."""
-    return (f"[{tag}] RESULT start_top_m={start_top:.4f} lowest_top_m={lowest_top:.4f} "
+    # `indent` is how far the plate went in and `compressed` is how far the asset gave. They are
+    # not the same number and the gap is the part of the plate the material did not get out of
+    # the way of, so both are reported rather than only the flattering one.
+    indented = f"indented_mm={indent * 1000:.1f} " if indent is not None else ""
+    return (f"[{tag}] RESULT {indented}start_top_m={start_top:.4f} lowest_top_m={lowest_top:.4f} "
             f"compressed_mm={compressed * 1000:.1f} compressed_frac={compressed / height:.3f} "
             f"recovered_frac={recovery:.2f} below_floor_mm={deepest * 1000:.1f} "
             f"soft_contacts={contacts} verdict={decision}")

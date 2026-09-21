@@ -202,7 +202,7 @@ if args.usd:
                                       footprint[1] * press_shape.PLATE_FOOTPRINT, thickness / 2.0))
 
 settle_at, recover_at = press_shape.settle_frame(frames), press_shape.recovery_frame(frames)
-start_top = lowest_top = bottom_z = recovered = settled_height = None
+start_top = lowest_top = bottom_z = recovered = settled_height = depth = None
 deepest = 0.0
 for frame in range(frames):
     plate_z = press_shape.plate_height(frame, frames, start_z, bottom_z)
@@ -219,8 +219,11 @@ for frame in range(frames):
     if frame == settle_at:
         start_top = lowest_top = top_now
         floor_now = float(q[:, 2].min())
-        bottom_z = floor_now + (top_now - floor_now) * press_shape.PRESS_TO + thickness / 2.0
-        print(f"[physx] settled to {top_now:.4f}; plate will go to {bottom_z:.4f}")
+        settled_height = top_now - floor_now
+        depth = press_shape.press_depth(settled_height, offset * 2.0)
+        bottom_z = top_now - depth + thickness / 2.0
+        print(f"[physx] settled to {top_now:.4f} ({settled_height * 1000:.1f} mm tall); the plate "
+              f"will indent it {depth * 1000:.1f} mm, which is one contact margin")
     if start_top is None:
         continue
     lowest_top = min(lowest_top, top_now)
@@ -240,7 +243,8 @@ print(press_shape.result_line("physx", start_top or 0.0, lowest_top or 0.0, comp
                               recovery, max(0.0, deepest - offset), touched,
                               press_shape.verdict(touched, compressed, height,
                                                   max(0.0, deepest - offset), recovery,
-                                                  settled_height=settled_height, margin=offset * 2.0)))
+                                                  settled_height=settled_height, margin=offset * 2.0),
+                              indent=depth))
 if tape is not None:
     tape.close()
     print(f"[physx] wrote {args.usd}")
