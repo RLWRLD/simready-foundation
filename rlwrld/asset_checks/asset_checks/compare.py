@@ -34,7 +34,7 @@ def reason(result):
 def label(path, width, env, result):
     from PIL import Image, ImageDraw, ImageFont
 
-    verdict = result.get("verdict") if result else "not run"
+    verdict = (result.get("verdict") if result else None) or "no verdict"
     colour = {"pass": (90, 200, 110), "fail": (235, 90, 80)}.get(verdict, (235, 180, 60))
     size = max(14, width // 32)
     font = ImageFont.truetype(FONT, size) if pathlib.Path(FONT).exists() else ImageFont.load_default(size)
