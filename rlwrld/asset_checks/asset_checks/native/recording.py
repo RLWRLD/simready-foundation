@@ -201,13 +201,27 @@ class Recording:
               f"{'tetrahedra' if self.elements.shape[1] == 4 else 'triangles'} "
               f"({self.binding['outside']} outside, carried by their nearest)")
 
+    @staticmethod
+    def _write_points(pointbased, points, time):
+        """The points at this time, and the extent with them.
+
+        A mesh with animated points and a static authored extent reports the authored box at every
+        time: `UsdGeom.BBoxCache` reads the extent when one is there rather than the points, and a
+        mesh referenced from the asset brings the asset's. A cloth that fell 49.5 mm read as never
+        moving, and the camera framed the recording's floor instead of it.
+        """
+        points = np.asarray(points, dtype=np.float64)
+        pointbased.GetPointsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*p) for p in points]), time)
+        lo, hi = points.min(axis=0), points.max(axis=0)
+        pointbased.CreateExtentAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*lo), Gf.Vec3f(*hi)]), time)
+
     def frame(self, index, node_points, plate_z=None):
         nodes = np.asarray(node_points, dtype=np.float64)
         time = Usd.TimeCode(index)
-        self.sim.GetPointsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*p) for p in nodes]), time)
+        self._write_points(self.sim, nodes, time)
         if self.visual is not None:
             moved = nodes if self.binding is None else skinning.deform(self.binding, self.elements, nodes)
-            self.visual.GetPointsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*p) for p in moved]), time)
+            self._write_points(self.visual, moved, time)
         if self.plate is not None and plate_z is not None:
             where = Gf.Vec3d(self.plate_centre[0], self.plate_centre[1], float(plate_z))
             self.plate_api.SetTranslate(where, time)

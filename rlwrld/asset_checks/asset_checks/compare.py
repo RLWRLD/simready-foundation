@@ -111,7 +111,10 @@ def main():
                     source = f"[{2 * i}:v]null"
                 inputs += ["-loop", "1", "-i", str(band)]
                 chains.append(f"{source}[v{i}];[{2 * i + 1}:v]fps={FPS}[l{i}];[l{i}][v{i}]vstack=shortest=1[p{i}]")
-            graph = ";".join(chains) + ";" + "".join(f"[p{i}]" for i in range(len(panels))) + f"hstack={len(panels)}[out]"
+            # ffmpeg's hstack refuses a single input, so one panel is the strip as it is.
+            joined = (f"[p0]null[out]" if len(panels) == 1 else
+                      "".join(f"[p{i}]" for i in range(len(panels))) + f"hstack={len(panels)}[out]")
+            graph = ";".join(chains) + ";" + joined
             target = out_dir / f"{asset}__{test}.mp4"
             subprocess.run([ffmpeg, "-v", "error", "-y", *inputs, "-filter_complex", graph, "-map", "[out]",
                             "-t", f"{length:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", str(target)], check=True)

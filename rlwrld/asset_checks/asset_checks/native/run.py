@@ -210,11 +210,12 @@ def comparison_videos(out, asset, results, wanted, panel_px):
         code = subprocess.call([str(BENCH / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare",
                                 str(root), "--envs", ",".join(wanted), "--panel-px", str(panel_px)],
                                env={**os.environ, "PYTHONPATH": str(HERE.parents[1])})
-        for video in sorted((root / "compare").glob("*.mp4")):
+        strips = sorted((root / "compare").glob("*.mp4"))
+        for video in strips:
             target = out / "videos" / f"{video.stem.replace(f'{stem}_{mesh}__', f'{stem}__')}__{mesh}__compare.mp4"
             shutil.copyfile(video, target)
             made.append(target.name)
-        print(f"[run] compare({mesh}): exit {code}, {len(made)} strip(s)", flush=True)
+        print(f"[run] compare({mesh}): exit {code}, {len(strips)} strip(s)", flush=True)
     return made
 
 
