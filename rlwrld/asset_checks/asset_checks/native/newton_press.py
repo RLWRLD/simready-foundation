@@ -38,6 +38,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import press_shape
+import recording
 from newton_drop import (CONTACT, GROUND_CONTACT_KE, ITERATIONS, SUBSTEPS, XPBD_MAX_RELAXATION,
                          auto_radius, relaxation_is_a_jacobi_factor, xpbd_relaxation)
 
@@ -61,7 +63,10 @@ def build(asset, solver_name, iterations, radius, press_to, margin):
 
     builder = newton.ModelBuilder()
     builder.default_particle_radius = radius
-    builder.add_usd(Usd.Stage.Open(asset))
+    stage = Usd.Stage.Open(asset)
+    builder.add_usd(stage)
+    sim_path = next((str(prim.GetPath()) for prim in stage.Traverse()
+                     if prim.GetTypeName() == "TetMesh"), None)
     # Rest on the floor rather than fall onto it: this test is about the plate, not the drop.
     q = np.asarray(builder.particle_q, dtype=np.float64)
     q[:, 2] += radius - q[:, 2].min()
@@ -126,7 +131,8 @@ def build(asset, solver_name, iterations, radius, press_to, margin):
                       if relaxation_is_a_jacobi_factor() else XPBD_MAX_RELAXATION)
         print(f"[press] soft_body_relaxation {relaxation:.4f}")
         solver = newton.solvers.SolverXPBD(model, iterations=iterations, soft_body_relaxation=relaxation)
-    return model, solver, pipeline, radius, height, start_z, thickness
+    return (model, solver, pipeline, radius, height, start_z, thickness, sim_path,
+            (footprint[0] * 0.6, footprint[1] * 0.6, thickness / 2.0))
 
 
 def main():
@@ -145,16 +151,16 @@ def main():
 
     substeps = args.substeps or SUBSTEPS[args.solver]
     press_to_frac = args.press_to
-    model, solver, pipeline, radius, height, start_z, thickness = build(
+    (model, solver, pipeline, radius, height, start_z, thickness, sim_path, plate_half) = build(
         args.asset, args.solver, args.iterations, args.radius, args.press_to, args.margin)
     frames = int(args.seconds * args.fps)
     # settle, descend, hold, lift, watch -- in fifths of the run.
     phase = frames // 5
-    viewer = None
+    tape = None
     if args.usd:
-        from newton.viewer import ViewerUSD
-        viewer = ViewerUSD(output_path=args.usd, fps=int(args.fps), num_frames=frames)
-        viewer.set_model(model)
+        tape = recording.Recording(args.usd, int(args.fps), frames,
+                                   np.asarray(model.particle_q.numpy()), model.tet_indices.numpy(),
+                                   asset=args.asset, sim_prim_path=sim_path, plate=plate_half)
 
     state_0, state_1, control = model.state(), model.state(), model.control()
     contacts = pipeline.contacts()
@@ -225,10 +231,8 @@ def main():
         deepest = max(deepest, -float(q[:, 2].min()))
         if frame >= 4 * phase + phase // 2:
             recovered = top_now
-        if viewer is not None:
-            viewer.begin_frame(frame / args.fps)
-            viewer.log_state(state_0)
-            viewer.end_frame()
+        if tape is not None:
+            tape.frame(frame, q, plate_z=plate_z)
         if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
             print(f"[press] t={frame / args.fps:5.2f}s  plate {plate_z:7.4f}  top {top_now:7.4f}  "
                   f"floor {float(q[:, 2].min()):7.4f}", flush=True)
@@ -252,8 +256,8 @@ def main():
           f"compressed_mm={compressed * 1000:.1f} compressed_frac={compressed / height:.3f} "
           f"recovered_frac={recovery:.2f} below_floor_mm={deepest * 1000:.1f} "
           f"soft_contacts={contact_peak} verdict={verdict}")
-    if viewer is not None:
-        viewer.close()
+    if tape is not None:
+        tape.close()
         print(f"[press] wrote {args.usd}")
 
 

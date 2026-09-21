@@ -25,6 +25,9 @@ ap.add_argument("--fps", type=float, default=60.0)
 ap.add_argument("--substeps", type=int, default=4)
 ap.add_argument("--margin", type=float, default=0.0, help="0 = the engine's own contact offset")
 ap.add_argument("--usd", default=None)
+ap.add_argument("--visual-asset", default=None,
+                help="the original (Newton-flavour) asset to take the textured render mesh from; "
+                     "the PhysX copy this runs has its source subtree deactivated")
 args = ap.parse_args()
 
 EXPERIENCE = str(pathlib.Path(isaacsim.__file__).parent / "apps" / "isaacsim.exp.full.kit")
@@ -158,36 +161,16 @@ prim.set_nodal_velocities(wp.zeros((1, points.shape[0], 3), dtype=wp.float32))
 # descended 12 mm past the banana's top without touching it.
 plate_prim = RigidPrim(PLATE)
 
-out_stage = surface = plate_mesh = None
+# The same recording every runner writes. The visual mesh comes from the original asset, not the
+# PhysX copy being simulated -- the conversion deactivates the source subtree the textures are on.
 frames = int(args.seconds * args.fps)
+tape = None
 if args.usd:
-    out_stage = Usd.Stage.CreateNew(args.usd)
-    UsdGeom.SetStageUpAxis(out_stage, UsdGeom.Tokens.z)
-    UsdGeom.SetStageMetersPerUnit(out_stage, 1.0)
-    out_stage.SetDefaultPrim(UsdGeom.Xform.Define(out_stage, "/root").GetPrim())
-    out_stage.SetTimeCodesPerSecond(args.fps)
-    out_stage.SetFramesPerSecond(args.fps)
-    faces = {}
-    for tet in elements:
-        for tri in ((0, 1, 2), (0, 2, 3), (0, 3, 1), (1, 3, 2)):
-            key = tuple(sorted(int(tet[i]) for i in tri))
-            faces[key] = faces.get(key, 0) + 1
-    outside = [k for k, n in faces.items() if n == 1]
-    surface = UsdGeom.Mesh.Define(out_stage, "/root/deformable")
-    surface.CreateFaceVertexCountsAttr([3] * len(outside))
-    surface.CreateFaceVertexIndicesAttr([i for tri in outside for i in tri])
-    surface.CreateDisplayColorAttr([Gf.Vec3f(0.92, 0.78, 0.25)])
-    plate_mesh = UsdGeom.Cube.Define(out_stage, "/root/plate")
-    plate_mesh.CreateSizeAttr(2.0)
-    UsdGeom.XformCommonAPI(plate_mesh).SetScale(Gf.Vec3f(footprint[0] * press_shape.PLATE_FOOTPRINT,
-                                                         footprint[1] * press_shape.PLATE_FOOTPRINT,
-                                                         thickness / 2.0))
-    plate_mesh.CreateDisplayColorAttr([Gf.Vec3f(0.25, 0.45, 0.85)])
-    plane = UsdGeom.Mesh.Define(out_stage, "/root/ground")
-    plane.CreatePointsAttr([Gf.Vec3f(-half, -half, 0.0), Gf.Vec3f(half, -half, 0.0),
-                            Gf.Vec3f(half, half, 0.0), Gf.Vec3f(-half, half, 0.0)])
-    plane.CreateFaceVertexCountsAttr([4])
-    plane.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+    import recording
+    tape = recording.Recording(args.usd, int(args.fps), frames, points, elements,
+                               asset=args.visual_asset, sim_prim_path=str(body.GetPath()),
+                               plate=(footprint[0] * press_shape.PLATE_FOOTPRINT,
+                                      footprint[1] * press_shape.PLATE_FOOTPRINT, thickness / 2.0))
 
 settle_at, recover_at = press_shape.settle_frame(frames), press_shape.recovery_frame(frames)
 start_top = lowest_top = bottom_z = recovered = None
@@ -195,17 +178,14 @@ deepest = 0.0
 for frame in range(frames):
     plate_z = press_shape.plate_height(frame, frames, start_z, bottom_z)
     plate_prim.set_world_poses(positions=np.array([[centre[0], centre[1], plate_z]], dtype=np.float32))
-    if plate_mesh is not None:
-        UsdGeom.XformCommonAPI(plate_mesh).SetTranslate(Gf.Vec3d(centre[0], centre[1], plate_z),
-                                                        Usd.TimeCode(frame))
     for _ in range(args.substeps):
         app.update()
     q = world_nodes(prim)
     if not np.isfinite(q).all():
         print(f"[physx] diverged at {frame / args.fps:.2f}s")
         break
-    if surface is not None:
-        surface.GetPointsAttr().Set([Gf.Vec3f(*p) for p in q.astype(float)], Usd.TimeCode(frame))
+    if tape is not None:
+        tape.frame(frame, q, plate_z=plate_z)
     top_now = float(q[:, 2].max())
     if frame == settle_at:
         start_top = lowest_top = top_now
@@ -231,10 +211,8 @@ print(press_shape.result_line("physx", start_top or 0.0, lowest_top or 0.0, comp
                               recovery, max(0.0, deepest - offset), touched,
                               press_shape.verdict(touched, compressed, height,
                                                   max(0.0, deepest - offset), recovery)))
-if out_stage is not None:
-    out_stage.SetStartTimeCode(0)
-    out_stage.SetEndTimeCode(frames - 1)
-    out_stage.GetRootLayer().Save()
+if tape is not None:
+    tape.close()
     print(f"[physx] wrote {args.usd}")
 timeline.stop()
 app.close()
