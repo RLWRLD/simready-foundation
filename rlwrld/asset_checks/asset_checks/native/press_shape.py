@@ -108,9 +108,21 @@ def verdict(contacts, compressed, height, deepest, recovery, settled_height=None
         return "did-not-deform"
     if deepest > TUNNEL_DEPTH_OF_HEIGHT * height:
         return "pushed-through-floor"
-    if recovery < MIN_RECOVERY:
+    if recovery is not None and recovery < MIN_RECOVERY:
         return "did-not-spring-back"
     return "pass"
+
+
+def recovery_fraction(recovered_top, lowest_top, compressed, scale):
+    """How much of what it gave the asset got back, or None where it gave nothing.
+
+    Dividing by a compression of zero produced a recovery of 56456% on a cloth that never moved.
+    `scale` is the smallest length the run can distinguish -- below it, "how much came back" is a
+    ratio of two numbers that are both noise.
+    """
+    if recovered_top is None or compressed < scale:
+        return None
+    return (recovered_top - lowest_top) / compressed
 
 
 def result_line(tag, start_top, lowest_top, compressed, height, recovery, deepest, contacts,
@@ -125,7 +137,8 @@ def result_line(tag, start_top, lowest_top, compressed, height, recovery, deepes
     # fraction of the asset's height" still assumed the asset had one. The fraction is simply
     # not reported where it has no meaning, rather than the run dying on the way to its verdict.
     fraction = f"compressed_frac={compressed / height:.3f} " if height > 0.0 else ""
+    recovered = f"recovered_frac={recovery:.2f} " if recovery is not None else ""
     return (f"[{tag}] RESULT {indented}start_top_m={start_top:.4f} lowest_top_m={lowest_top:.4f} "
             f"compressed_mm={compressed * 1000:.1f} {fraction}"
-            f"recovered_frac={recovery:.2f} below_floor_mm={deepest * 1000:.1f} "
+            f"{recovered}below_floor_mm={deepest * 1000:.1f} "
             f"soft_contacts={contacts} verdict={decision}")

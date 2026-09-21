@@ -244,7 +244,7 @@ for frame in range(frames):
               f"floor {float(q[:, 2].min()):7.4f}", flush=True)
 
 compressed = (start_top - lowest_top) if start_top is not None else 0.0
-recovery = 0.0 if recovered is None or compressed <= 1e-9 else (recovered - lowest_top) / compressed
+recovery = press_shape.recovery_fraction(recovered, lowest_top, compressed, offset)
 # PhysX exposes no soft-contact count, so this is not one: it records only whether the plate's
 # underside ever got below the asset's top. Reported as a plain yes/no rather than as a count,
 # which a "1" in a column of thousands would be read as.
