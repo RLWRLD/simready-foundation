@@ -107,7 +107,11 @@ def result_line(tag, start_top, lowest_top, compressed, height, recovery, deepes
     # not the same number and the gap is the part of the plate the material did not get out of
     # the way of, so both are reported rather than only the flattering one.
     indented = f"indented_mm={indent * 1000:.1f} " if indent is not None else ""
+    # A sheet has no height, and dividing by it was the last place a threshold written as "a
+    # fraction of the asset's height" still assumed the asset had one. The fraction is simply
+    # not reported where it has no meaning, rather than the run dying on the way to its verdict.
+    fraction = f"compressed_frac={compressed / height:.3f} " if height > 0.0 else ""
     return (f"[{tag}] RESULT {indented}start_top_m={start_top:.4f} lowest_top_m={lowest_top:.4f} "
-            f"compressed_mm={compressed * 1000:.1f} compressed_frac={compressed / height:.3f} "
+            f"compressed_mm={compressed * 1000:.1f} {fraction}"
             f"recovered_frac={recovery:.2f} below_floor_mm={deepest * 1000:.1f} "
             f"soft_contacts={contacts} verdict={decision}")
