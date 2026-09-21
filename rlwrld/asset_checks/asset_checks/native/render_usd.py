@@ -105,7 +105,7 @@ def moving_prims(times):
     """
     caches = [UsdGeom.BBoxCache(Usd.TimeCode(t), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
               for t in times]
-    moving, still = [], []
+    moving, still = [], []   # `still`: visible, not scenery, and not moving -- what a fallback may frame
     for prim in stage.Traverse():
         if not (prim.IsA(UsdGeom.Gprim) or prim.IsA(UsdGeom.PointInstancer)):
             continue
@@ -114,11 +114,9 @@ def moving_prims(times):
             continue
         size = ranges[0].GetSize()
         if max(size[0], size[1], size[2]) > GROUND_SPAN:
-            still.append(prim)
-            continue
+            continue               # scenery; never the subject, moving or not
         if not UsdGeom.Imageable(prim).ComputeVisibility() == UsdGeom.Tokens.inherited:
-            still.append(prim)     # a hidden mesh must not pull the camera towards itself
-            continue
+            continue               # a hidden mesh must not pull the camera towards itself
         travel = max(Gf.Vec3d(a.GetMidpoint() - b.GetMidpoint()).GetLength()
                      for a in ranges for b in ranges)
         stretch = max(abs(max(a.GetSize()) - max(b.GetSize())) for a in ranges for b in ranges)
@@ -180,7 +178,8 @@ room.set_size(*(max(math.ceil(max(float(s), 0.01) * ROOM_OF_SUBJECT / snap) * sn
 room.set_color(*WALL_COLOUR)
 room.show_ground(color=GROUND_COLOUR)
 handle.lighting.add_dome(intensity=DOME_INTENSITY)
-cues = rigid_scene.add_visual_cues(stage, (centre[0], centre[1]))
+room_xy = [max(math.ceil(max(float(s), 0.01) * ROOM_OF_SUBJECT / snap) * snap, snap) for s in (size[0], size[1])]
+cues = rigid_scene.add_visual_cues(stage, (centre[0], centre[1]), half_extent_m=max(room_xy) / 2.0)
 print(f"[render] room {tuple(round(max(math.ceil(max(float(s), 0.01) * ROOM_OF_SUBJECT / snap) * snap, snap), 3) for s in size)}, "
       f"floor cues {cues}")
 
