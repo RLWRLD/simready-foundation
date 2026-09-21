@@ -32,12 +32,22 @@ app = SimulationApp({"headless": True}, experience=EXPERIENCE)
 import omni.kit.commands  # noqa: E402
 import omni.usd  # noqa: E402
 from omni.physx.scripts import deformableUtils  # noqa: E402
+import sys  # noqa: E402
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import asset_properties  # noqa: E402
 from pxr import Sdf, Usd, UsdGeom, UsdShade  # noqa: E402
 
 SOURCE, OUT = sys.argv[1], sys.argv[2]
 VOLUME_SIM = "PhysicsVolumeDeformableSimAPI"
 SURFACE_SIM = "PhysicsSurfaceDeformableSimAPI"
-MATERIAL_FIELDS = ("youngsModulus", "poissonsRatio", "density", "staticFriction", "dynamicFriction")
+# What each kind of deformable material is made of. A volume deformable is described by a
+# modulus and a Poisson ratio; a surface one by three stiffnesses and a thickness. PhysX takes
+# the surface quantities one-for-one under an `omniphysics:surface*` prefix -- and, unlike
+# Newton's isotropic membrane, it can actually honour shearStiffness.
+SHARED_FIELDS = ("density", "staticFriction", "dynamicFriction")
+VOLUME_FIELDS = ("youngsModulus", "poissonsRatio")
+SURFACE_FIELDS = ("stretchStiffness", "shearStiffness", "bendStiffness", "thickness")
 
 
 def raw_schemas(prim):
@@ -71,15 +81,19 @@ if source_material is None:
     raise SystemExit(f"[to-physx] {SOURCE} binds no deformable material; refusing to write an asset that "
                      f"would run on PhysX's default of 5e5 Pa while Newton runs the declared one")
 
+volume = VOLUME_SIM in raw_schemas(sim_prim)
+wanted = SHARED_FIELDS + (VOLUME_FIELDS if volume else SURFACE_FIELDS)
 values = {}
-for name in MATERIAL_FIELDS:
+for name in wanted:
     attr = source_material.GetAttribute(f"physics:{name}")
     if attr and attr.HasAuthoredValue():
         values[name] = float(attr.Get())
-if "youngsModulus" not in values:
-    raise SystemExit(f"[to-physx] {source_material.GetPath()} authors no physics:youngsModulus; refusing to guess")
+required = "youngsModulus" if volume else "stretchStiffness"
+if required not in values:
+    raise SystemExit(f"[to-physx] {source_material.GetPath()} authors no physics:{required}, which is "
+                     f"what a {'volume' if volume else 'surface'} deformable is made of; refusing to "
+                     f"guess the stiffness of an asset")
 
-volume = VOLUME_SIM in raw_schemas(sim_prim)
 body_path = Sdf.Path("/Asset/Body")
 if volume and sim_prim.IsA(UsdGeom.TetMesh):
     # Hand PhysX the asset's own tetrahedra rather than letting it cook new ones.
@@ -119,12 +133,27 @@ for _ in range(30):
     app.update()
 
 material_path = "/Asset/PhysicsMaterial"
-if not deformableUtils.add_deformable_material(
-        stage, material_path,
-        density=values.get("density"), youngs_modulus=values["youngsModulus"],
-        poissons_ratio=values.get("poissonsRatio"),
-        static_friction=values.get("staticFriction"), dynamic_friction=values.get("dynamicFriction")):
-    raise SystemExit(f"[to-physx] add_deformable_material failed at {material_path}")
+# Friction the asset did not declare must not come from this helper's own defaults (0.5 static,
+# 0.25 dynamic): Newton would run the same silent asset at 0.5, and the two engines would be
+# sliding on different floors while every other number matched.
+friction = values.get("dynamicFriction", asset_properties.DEFAULT_FRICTION)
+shared = {"density": values.get("density"), "static_friction": values.get("staticFriction", friction),
+          "dynamic_friction": friction}
+if volume:
+    made = deformableUtils.add_deformable_material(
+        stage, material_path, youngs_modulus=values["youngsModulus"],
+        poissons_ratio=values.get("poissonsRatio"), **shared)
+else:
+    # The surface stiffnesses are passed straight through as overrides. PhysX would otherwise
+    # derive them from a Young's modulus this asset never authored.
+    made = deformableUtils.add_surface_deformable_material(
+        stage, material_path, surface_thickness=values.get("thickness"),
+        surface_stretch_stiffness=values.get("stretchStiffness"),
+        surface_shear_stiffness=values.get("shearStiffness"),
+        surface_bend_stiffness=values.get("bendStiffness"), **shared)
+if not made:
+    raise SystemExit(f"[to-physx] could not author the {'volume' if volume else 'surface'} "
+                     f"material at {material_path}")
 material = UsdShade.Material.Get(stage, material_path)
 UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(body_path)).Bind(
     material, UsdShade.Tokens.weakerThanDescendants, "physics")

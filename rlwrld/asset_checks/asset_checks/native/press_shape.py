@@ -16,7 +16,7 @@ MIN_RECOVERY = 0.5           # and get back at least this much of what it gave
 TUNNEL_DEPTH_OF_HEIGHT = 0.05
 PRESS_TO = 0.6               # the plate's underside stops at this much of the settled height
 PLATE_THICKNESS_OF_HEIGHT = 0.3
-PLATE_THICKNESS_OF_MARGIN = 4.0   # and never thinner than this many contact margins -- see below
+PLATE_THICKNESS_OF_MARGIN = 2.5   # and never thinner than this many contact margins -- see below
 PLATE_FOOTPRINT = 0.6        # half-extents, as a fraction of the asset's own footprint
 PHASES = 5                   # settle, descend, hold, lift, watch -- one fifth of the run each
 
@@ -27,7 +27,8 @@ def plate_thickness(height, contact_margin):
     A plate thinner than the distance at which contacts are generated has both faces inside the
     same margin, and the asset gets pushed up from underneath as hard as it is pushed down:
     measured, the same press went from 13.9 mm of compression to 3.1 mm when the plate was
-    thinned below the margin.
+    thinned to less than one and a half margins. Two and a half is clear of that with room to
+    spare, and it keeps the plate from growing into the thing the video is mostly of.
     """
     return max(PLATE_THICKNESS_OF_MARGIN * contact_margin, height * PLATE_THICKNESS_OF_HEIGHT)
 

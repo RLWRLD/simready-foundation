@@ -96,6 +96,42 @@ def run(command, log_path, timeout):
     return code, round(time.time() - started, 1)
 
 
+# What each experiment is worth reading, and in what order. The runner does not know what these
+# mean -- the experiment prints them and this only lays them out -- but a table nobody can read
+# is a table nobody checks.
+COLUMNS = {
+    "drop": [("verdict", "verdict"), ("fell_mm", "fell (mm)"), ("thickness_mm", "settled (mm)"),
+             ("below_floor_mm", "below floor (mm)"), ("p99_speed", "p99 speed")],
+    "press": [("verdict", "verdict"), ("compressed_mm", "compressed (mm)"),
+              ("compressed_frac", "of height"), ("recovered_frac", "recovered"),
+              ("below_floor_mm", "below floor (mm)"), ("soft_contacts", "contacts")],
+}
+
+
+def summary(asset, results):
+    """One table per experiment, plus where each video is."""
+    lines = [f"# {pathlib.Path(asset).name}", "",
+             "Two videos per cell, from one run: `__sim` is the tetrahedral surface the solver",
+             "moved, `__visual` is the asset's own textured mesh carried along by it.", ""]
+    for experiment, columns in COLUMNS.items():
+        rows = {c: r for c, r in results.items() if r.get("experiment") == experiment}
+        if not rows:
+            continue
+        lines += [f"## {experiment}", "",
+                  "| environment | " + " | ".join(label for _, label in columns) + " | videos |",
+                  "|---" * (len(columns) + 2) + "|"]
+        for cell, row in sorted(rows.items()):
+            if row.get("skipped") or row.get("error"):
+                lines.append(f"| {row['env']} | {row.get('skipped') or row['error']} |"
+                             + " |" * len(columns))
+                continue
+            values = " | ".join(str(row.get(key, "-")) for key, _ in columns)
+            videos = ", ".join(f"`{name}`" for name in (row.get("videos") or {}).values()) or "-"
+            lines.append(f"| {row['env']} | {values} | {videos} |")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("asset")
@@ -176,6 +212,7 @@ def main():
                 print(f"[run] {cell}: {len(written)} {mesh} frames -> {video.name}", flush=True)
 
     (out / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
+    (out / "summary.md").write_text(summary(asset, results))
     print(f"\n[run] wrote {out / 'results.json'}")
     for cell, row in sorted(results.items()):
         state = row.get("skipped") or row.get("error") or row.get("diverged") or "ok"

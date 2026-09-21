@@ -1,0 +1,129 @@
+# What Newton's own examples do, and where ours differs
+
+Read 2026-09-21 out of the installed packages, not the web: the shipped
+`newton/examples/` tree is the primary source and it matches the version we run.
+
+| example | venv | what it is |
+|---|---|---|
+| `softbody/example_softbody_franka.py` | 601 + 610 | Franka **grasps** a tet-mesh rubber duck (VBD) |
+| `softbody/example_softbody_hanging.py` | 601 + 610 | soft beams hanging, damping sweep |
+| `multiphysics/example_softbody_dropping_to_cloth.py` | 601 + 610 | soft body **dropped** onto cloth |
+| `multiphysics/example_rigid_soft_contact.py` | 610 | sphere **presses** a soft FEM beam (xpbd / vbd / semi-implicit / coupled) |
+| `vbd/example_vbd_gripper_soft_grid.py` | 610 | parallel-jaw gripper closes, **grips**, lifts, holds |
+
+## Every one of them drives Newton directly
+
+`ModelBuilder` -> `builder.color()` (VBD) -> `finalize()` -> `CollisionPipeline` ->
+per substep `clear_forces()`, `pipeline.collide()`, `solver.step()`. None of them goes
+through Isaac Sim. Isaac is a host application, not the engine under test.
+
+## Numbers, quoted
+
+| knob | official | ours (before today) |
+|---|---|---|
+| `sim_substeps` | 10 (softbody), 20 (gripper), 32 (rigid-soft) | **5** |
+| `iterations` | 5-10 | 15 |
+| `soft_contact_kd` | 0 / 1e-5 / 1e-3 / 1e1 / 2e-1 | **1e2** |
+| `soft_contact_ke` | 1e2 .. 2e6, paired with the above | 1e5 floor |
+| particle radius | `builder.default_particle_radius = 0.01` **before** `add_usd` | per-particle after import |
+| `soft_contact_margin` | 0.01 (meter scale) | 4 x radius |
+
+`soft_contact_kd` is the one that is not a matter of taste: every official example is
+between 0 and 2e-1, and we ran 1e2 -- two to seven orders of magnitude of damping the
+asset never asked for.
+
+## The flag that explains the press failures
+
+`CollisionPipeline(..., enable_rigid_soft_full_surface_contact=True)` -- Newton 1.5.0 only.
+The gripper example's own docstring says it plainly: with the flag off, only
+per-particle contact exists, "the grid slips out and falls". A plate pressing a
+deformable, or a floor holding one, is the same geometry problem. Newton 1.2.1's
+`CollisionPipeline` has no such parameter, so 1.2 is expected to be worse at contact
+here -- that is a property of the engine, which is exactly what we are measuring.
+
+## Rendering does not need Isaac
+
+`newton.viewer.ViewerUSD` exists in both versions and `log_state` writes particles
+(`_log_particles`) and cloth triangles (`_log_triangles`) as animated USD. Isaac's
+Fabric sync writes rigid body transforms only, which is why every deformable video so
+far was still.
+
+## What the two Newton versions actually do with the asset's material
+
+Measured 2026-09-21 on `assets/fruits/banana.usda`, which declares
+`physics:youngsModulus = 4800000`, `physics:poissonsRatio = 0.4`, and says so about itself:
+*"stiffness variant: E is the literature value x 6, requested for handover experiments"*.
+Newton 1.5.0 derives exactly the Lame pair those imply -- `k_mu = 1.714e6`,
+`k_lambda = 6.857e6`. So does 1.2.1's importer.
+
+Then the two solvers part ways. `xpbd/kernels.py::solve_tetrahedra`:
+
+| | Newton 1.2.1 | Newton 1.5.0 |
+|---|---|---|
+| compliance | `relaxation` (a constant 0.9) | `inv_rest_volume / k_mu` |
+| the material lines | commented out | read |
+| `relaxation` | not applied to the correction | multiplies the correction |
+
+**Newton 1.2.1's XPBD does not read the asset's stiffness at all.** Negative test, the same
+drop with the tet material multiplied by 100: 1.2.1 answers 0.01423 m and 0.01471 m -- a
+hundredfold change in stiffness moves the result by 3%. Any stiffness comparison run on
+1.2.1 + XPBD is measuring nothing about the asset.
+
+1.5.0 reads it and, at 4.8 MPa, diverges: z reaches +-94 m in the first frame. It is the tet
+solve alone -- with contacts switched off it still explodes, with the tet solve switched off it
+falls cleanly. Not a tuning shortfall either: 32 -> 1024 substeps only halves the blow-up per
+doubling (94, 21, 11, 5.5, 2.7 m), and 10 -> 40 iterations does not fix it.
+
+## The knob that does fix it, and the rule behind it
+
+`apply_particle_deltas` adds every constraint's correction to a particle **in full**; it never
+divides by how many constraints touched it. `soft_body_relaxation` is therefore the only
+averaging in the Jacobi sweep, and SolverXPBD passes it to `solve_tetrahedra` and nowhere else.
+A particle shared by n tet constraints is moved n times too far unless relaxation carries 1/n:
+
+    relaxation = 1 / (2 constraints x 4 particles x tet_count / particle_count)
+
+The banana: 2 x 4 x 12936 / 3074 = 33.7 -> 0.030. Measured: 0.9 and 0.3 diverge; 0.1 settles at
+29.5 mm thick and 0.03 at 28.2 mm, against VBD's 29.9 mm. The rule is the mesh's own
+connectivity, so it holds for an asset nobody has seen yet, and it is capped at SolverXPBD's
+own default so a coarse or soft asset is left alone.
+
+## Two more things the examples had right and we had wrong
+
+**Build the CollisionPipeline before the solver.** `softbody/example_softbody_franka.py` -- the
+grasping one -- constructs the pipeline first, and SolverVBD's own error message says why:
+*"Pre-size before capture by constructing CollisionPipeline before SolverVBD"*. It sizes its
+per-body contact state from the contacts that exist when it is built. Built the other way round
+a static ground still works (a plane hangs off body -1 and needs no per-body list) so a drop
+test passes and hides it; a rigid body in the scene gets no contacts at all.
+
+**The per-body particle contact list is fixed at 256 and never grows.** Both versions'
+`SolverVBD` docstring says `rigid_body_particle_contact_buffer_size` "will not be dynamically
+resized during runtime", and Newton's own release notes describe the symptom -- contacts past
+the limit are dropped without a word. A 3074-particle asset needs it sized from the asset.
+
+## Newton 1.2.1's VBD does not drive a jointed body
+
+Measured, by counting soft contacts per shape during a press:
+
+| | ground contacts | plate contacts | plate body_q |
+|---|---|---|---|
+| Newton 1.2.1 | 1149 | **0** | 0.0589 -> 0.0586 (it never moved) |
+| Newton 1.5.0 | 4988 | 3126 | 0.0590 -> 0.0393 (it pressed) |
+
+The prismatic drive the gripper example uses is simply not actuated by 1.2.1's VBD; the
+docs' own feature matrix calls it "rigid bodies with limited joint support". So the press
+plate is **kinematic** -- its pose prescribed each substep, its velocity handed to the solver
+for friction. That also removes a confound worth naming: a PD-driven plate stops at a depth
+that depends on how hard the asset pushes back, so every engine would press to a different
+depth. Prescribing the motion presses every engine's asset by the same amount and leaves the
+asset's response as the only variable. Newton 1.2.1 + VBD then compresses the banana 13.0 mm
+and it recovers 100%.
+
+## Measure the asset after it settles, not as authored
+
+The banana's authored pose is not its resting shape: lying down under gravity costs it 16 mm
+of height before any plate moves. A press that takes its "start height" from frame zero reports
+that settling as compression it never caused -- and worse, it aims the plate at a height the
+asset no longer has, so the plate stops in the air and presses nothing. The press now measures
+at the end of its settle phase and derives the plate's depth from that.
