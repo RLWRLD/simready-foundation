@@ -87,11 +87,11 @@ scene.CreateGravityMagnitudeAttr(9.81)
 # banana was squeezed 11 mm through the sheet, which says nothing about PhysX and everything
 # about the floor it was given. The box's top face is at z = 0, so the two engines' floors are
 # in the same place.
-half, depth = 2.0, 0.5
+half, floor_depth = 2.0, 0.5   # how far the floor extends below z = 0
 ground = UsdGeom.Cube.Define(stage, "/World/Ground")
 ground.CreateSizeAttr(2.0)
-UsdGeom.XformCommonAPI(ground).SetScale(Gf.Vec3f(half, half, depth / 2.0))
-UsdGeom.XformCommonAPI(ground).SetTranslate(Gf.Vec3d(0.0, 0.0, -depth / 2.0))
+UsdGeom.XformCommonAPI(ground).SetScale(Gf.Vec3f(half, half, floor_depth / 2.0))
+UsdGeom.XformCommonAPI(ground).SetTranslate(Gf.Vec3d(0.0, 0.0, -floor_depth / 2.0))
 UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
 for _ in range(30):
     app.update()
