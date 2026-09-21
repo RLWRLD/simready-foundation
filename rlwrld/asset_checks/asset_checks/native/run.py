@@ -19,26 +19,27 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
 
 import agreement
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+from asset_checks import envs as rigid_envs  # noqa: E402
+
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 BENCH = pathlib.Path("/home/wongyun/Workspace/Research/Robotics/simready-bench")
 
-# Environment name -> (venv tag, engine, solver). The names are the ones in asset_checks.envs;
-# what changes here is only how a deformable is driven in each.
-ENVIRONMENTS = {
-    "physx": ("isaac610", "physx", "physx"),
-    "physx601": ("isaac601", "physx", "physx"),
-    "newton12_vbd": ("isaac601", "newton", "vbd"),
-    "newton12_xpbd": ("isaac601", "newton", "xpbd"),
-    "newton15_vbd": ("isaac610", "newton", "vbd"),
-    "newton15_xpbd": ("isaac610", "newton", "xpbd"),
-}
+# The environments are `asset_checks.envs`' -- the same table the rigid runs use, down to the
+# header text a comparison video prints. Only the solvers that can move particles are here:
+# `kit/scene.py::SOLVER_SIMULATES` records that MuJoCo refuses a stage whose bodies are particles,
+# measured rather than assumed, so the two `mujoco` environments are not offered for a deformable.
+PARTICLE_SOLVERS = ("physx", "vbd", "xpbd")
+ENVIRONMENTS = {name: (e.venv, e.engine, e.solver) for name, e in rigid_envs.ENVIRONMENTS.items()
+                if e.solver in PARTICLE_SOLVERS}
 EXPERIMENTS = ("drop", "press")
 # PhysX is driven from inside Kit, so it needs the isaac-run launcher; Newton is a plain import.
 SCRIPTS = {("newton", "drop"): "newton_drop.py", ("newton", "press"): "newton_press.py",
@@ -172,6 +173,51 @@ def summary(asset, results):
     return "\n".join(lines)
 
 
+def comparison_videos(out, asset, results, wanted, panel_px):
+    """The rigid runs' own side-by-side strip, made by the rigid runs' own compositor.
+
+    `asset_checks.compare` reads `<root>/<asset>/<env>/<test>/result.json` and writes one video per
+    asset and test with a panel per environment, each under a dark band naming the environment and
+    its verdict. It is the same code and the same layout that made the 2026-09-19 rigid videos, so
+    a deformable strip sits beside a rigid one without the eye having to re-orient. All this does
+    is lay out what it expects: a directory per cell, the cell's video in it, and the verdict in
+    the shape it reads. One strip for the solver's own surface and one for the asset's render mesh.
+    """
+    stem = pathlib.Path(asset).stem
+    made = []
+    for mesh in ("sim", "visual"):
+        root = out / f"panels_{mesh}"
+        cells = 0
+        for row in results.values():
+            cell_dir = root / f"{stem}_{mesh}" / row["env"] / row["experiment"]
+            cell_dir.mkdir(parents=True, exist_ok=True)
+            name = (row.get("videos") or {}).get(mesh)
+            media = []
+            if name:
+                link = cell_dir / name
+                if not link.exists():
+                    link.symlink_to(os.path.relpath(out / "videos" / name, cell_dir))
+                media = [{"kind": "video", "filename": name}]
+                cells += 1
+            # `compare.label` colours on "pass"/"fail" and prints the message after FAIL, so the
+            # experiment's own word for what happened is what a viewer reads.
+            said = row.get("verdict") or row.get("skipped") or row.get("error") or row.get("diverged")
+            (cell_dir / "result.json").write_text(json.dumps(
+                {"verdict": "pass" if row.get("verdict") == "pass" else "fail",
+                 "message": said or "no result", "media": media}, indent=2))
+        if not cells:
+            continue
+        code = subprocess.call([str(BENCH / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare",
+                                str(root), "--envs", ",".join(wanted), "--panel-px", str(panel_px)],
+                               env={**os.environ, "PYTHONPATH": str(HERE.parents[1])})
+        for video in sorted((root / "compare").glob("*.mp4")):
+            target = out / "videos" / f"{video.stem.replace(f'{stem}_{mesh}__', f'{stem}__')}__{mesh}__compare.mp4"
+            shutil.copyfile(video, target)
+            made.append(target.name)
+        print(f"[run] compare({mesh}): exit {code}, {len(made)} strip(s)", flush=True)
+    return made
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("asset")
@@ -260,6 +306,9 @@ def main():
                     results[cell]["videos"][mesh] = video.name
                 print(f"[run] {cell}: {len(written)} {mesh} frames -> {video.name}", flush=True)
 
+    if not args.no_render:
+        for name in comparison_videos(out, asset, results, envs, args.size):
+            print(f"[run] side by side: {name}", flush=True)
     (out / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
     (out / "summary.md").write_text(summary(asset, results))
     print(f"\n[run] wrote {out / 'results.json'}")

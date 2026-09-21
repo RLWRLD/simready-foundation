@@ -251,7 +251,8 @@ peak = float(np.abs(v).max())
 # The verdict and the line it is printed on belong to the experiment, which is why
 # they are asked for rather than written out here: the same words were spelled out
 # in both drop runners, and a pair of copies is a pair waiting to drift.
-decision = drop_shape.verdict(bool(np.isfinite(q).all()), fell, lift, below, height,
+decision = drop_shape.verdict(bool(np.isfinite(q).all()), fell,
+                              float(start[:, 2].min()), below, height,
                               speed, offset)
 kept = drop_shape.height_kept(float(q[:, 2].max() - q[:, 2].min()), height, offset)
 print(drop_shape.result_line("physx", fell, float(q[:, 2].min()), float(q[:, 2].max()),

@@ -77,8 +77,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir")
     ap.add_argument("--panel-px", type=int, default=640)
+    ap.add_argument("--envs", default=",".join(envs.ENVIRONMENTS),
+                    help="which environments get a panel, in order (default: all of them)")
     args = ap.parse_args()
     ffmpeg, root, px = imageio_ffmpeg.get_ffmpeg_exe(), pathlib.Path(args.run_dir), args.panel_px
+    wanted = [e.strip() for e in args.envs.split(",") if e.strip()]
+    unknown = [e for e in wanted if e not in envs.ENVIRONMENTS]
+    if unknown:
+        raise SystemExit(f"unknown environment(s): {', '.join(unknown)}")
     cells = {}
     for res in root.glob("*/*/*/result.json"):
         asset, env, test = res.parts[-4:-1]
@@ -88,7 +94,7 @@ def main():
     written = 0
     for (asset, test), by_env in sorted(cells.items()):
         panels = []
-        for env in envs.ENVIRONMENTS:
+        for env in wanted:
             result = json.loads(by_env[env].read_text()) if env in by_env else None
             panels.append((env, result, video_of(ffmpeg, by_env[env].parent, result) if env in by_env else None))
         length = max([duration(ffmpeg, v) for _, _, v in panels if v] or [2.0])
