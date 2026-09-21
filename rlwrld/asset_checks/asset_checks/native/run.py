@@ -23,6 +23,8 @@ import subprocess
 import sys
 import time
 
+import agreement
+
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 BENCH = pathlib.Path("/home/wongyun/Workspace/Research/Robotics/simready-bench")
@@ -164,6 +166,9 @@ def summary(asset, results):
             videos = ", ".join(f"`{name}`" for name in (row.get("videos") or {}).values()) or "-"
             lines.append(f"| {row['env']} | {values} | {videos} |")
         lines.append("")
+    table = agreement.section(results)
+    if table:
+        lines.append(table)
     return "\n".join(lines)
 
 

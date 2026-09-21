@@ -142,6 +142,14 @@ if declared.get("youngs_modulus") is not None:
                                           "PhysX contacts run off the bound material's modulus, "
                                           "not a separate penalty constant")
 asset_properties.report("physx", declared, chosen)
+# Of the five environments only Newton's VBD has a self-collision switch. The OmniPhysics
+# deformable schemas this conversion applies declare none -- their only self-collision attribute is
+# a `selfCollisionFilterPose` purpose -- so PhysX runs whatever its own default is and there is
+# nothing to set from the USD. Said out loud because the alternative is a reader assuming all five
+# ran the same model.
+_declared, _why = asset_properties.self_collision(declared)
+print(f"[physx] self-collision: the asset says {'on' if _declared else 'nothing (' + _why + ')'}, "
+      f"and this schema family has no switch to honour it with")
 collision = PhysxSchema.PhysxCollisionAPI.Apply(geometry)
 collision.CreateRestOffsetAttr(offset)
 
