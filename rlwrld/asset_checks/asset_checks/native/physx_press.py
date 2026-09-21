@@ -1,0 +1,240 @@
+"""Inside Kit: press a PhysX deformable with the same plate, on the same schedule, as Newton.
+
+    ./isaac-run isaac610 asset_checks/native/physx_press.py <asset.usda>
+        [--seconds 4] [--fps 60] [--usd out.usda]
+
+The schedule, the plate's size and depth, and what counts as a pass all come from
+`press_shape.py`, which is the experiment and knows about no engine. What is here is only how
+PhysX is asked: the plate is a kinematic rigid body whose transform is written each frame, and
+the asset is read through DeformablePrim's tensor view, exactly as the drop is.
+"""
+import argparse
+import pathlib
+import sys
+
+import isaacsim
+from isaacsim import SimulationApp
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import press_shape  # noqa: E402
+
+ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+ap.add_argument("asset")
+ap.add_argument("--seconds", type=float, default=4.0)
+ap.add_argument("--fps", type=float, default=60.0)
+ap.add_argument("--substeps", type=int, default=4)
+ap.add_argument("--margin", type=float, default=0.0, help="0 = the engine's own contact offset")
+ap.add_argument("--usd", default=None)
+args = ap.parse_args()
+
+EXPERIENCE = str(pathlib.Path(isaacsim.__file__).parent / "apps" / "isaacsim.exp.full.kit")
+app = SimulationApp({"headless": True}, experience=EXPERIENCE)
+
+import numpy as np  # noqa: E402
+import omni.timeline  # noqa: E402
+import omni.usd  # noqa: E402
+from isaacsim.core.experimental.prims import DeformablePrim, RigidPrim  # noqa: E402
+from isaacsim.core.simulation_manager import SimulationManager  # noqa: E402
+from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics  # noqa: E402
+
+SIM_API = "OmniPhysicsVolumeDeformableSimAPI"
+BODY_API = "OmniPhysicsDeformableBodyAPI"
+PLATE = "/World/PressPlate"
+
+
+def simulation_mesh(result):
+    array = result[0] if isinstance(result, tuple) else result
+    return np.asarray(array.numpy() if hasattr(array, "numpy") else array)
+
+
+def world_nodes(prim):
+    local = simulation_mesh(prim.get_nodal_positions()).reshape(-1, 3)
+    positions, orientations = prim.get_world_poses()
+    p = np.asarray(positions.numpy() if hasattr(positions, "numpy") else positions).reshape(-1, 3)[0]
+    q = np.asarray(orientations.numpy() if hasattr(orientations, "numpy") else orientations).reshape(-1, 4)[0]
+    w, x, y, z = q[0], q[1], q[2], q[3]
+    rotation = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
+    return local @ rotation.T + p
+
+
+omni.usd.get_context().new_stage()
+stage = omni.usd.get_context().get_stage()
+UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+stage.SetDefaultPrim(UsdGeom.Xform.Define(stage, "/World").GetPrim())
+asset = stage.DefinePrim("/World/Asset")
+asset.GetReferences().AddReference(args.asset)
+
+scene = UsdPhysics.Scene.Define(stage, "/World/PhysicsScene")
+scene.CreateGravityDirectionAttr(Gf.Vec3f(0.0, 0.0, -1.0))
+scene.CreateGravityMagnitudeAttr(9.81)
+# A solid floor, not a sheet. Newton's `add_ground_plane` is a half-space -- infinitely thick --
+# and a zero-thickness triangle mesh is a weaker collider by construction: measured, a pressed
+# banana was squeezed 11 mm through the sheet, which says nothing about PhysX and everything
+# about the floor it was given. The box's top face is at z = 0, so the two engines' floors are
+# in the same place.
+half, depth = 2.0, 0.5
+ground = UsdGeom.Cube.Define(stage, "/World/Ground")
+ground.CreateSizeAttr(2.0)
+UsdGeom.XformCommonAPI(ground).SetScale(Gf.Vec3f(half, half, depth / 2.0))
+UsdGeom.XformCommonAPI(ground).SetTranslate(Gf.Vec3d(0.0, 0.0, -depth / 2.0))
+UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
+for _ in range(30):
+    app.update()
+
+body = target = None
+for prim_ in Usd.PrimRange(asset, Usd.TraverseInstanceProxies()):
+    if body is None and BODY_API in prim_.GetAppliedSchemas():
+        body = prim_
+    if target is None and SIM_API in prim_.GetAppliedSchemas():
+        target = prim_
+if body is None:
+    raise SystemExit(f"[physx] {args.asset} declares no {BODY_API}; PhysX has nothing to simulate")
+
+points = np.asarray(UsdGeom.PointBased(body).GetPointsAttr().Get(), dtype=np.float64)
+height = float(points[:, 2].max() - points[:, 2].min())
+footprint = (float(points[:, 0].max() - points[:, 0].min()), float(points[:, 1].max() - points[:, 1].min()))
+centre = (float(points[:, 0].mean()), float(points[:, 1].mean()))
+
+# Same collision sizing as the drop: PhysX's own defaults are scale-free and rest this asset
+# 17 mm above the floor. Half the median distance between neighbouring nodes is the asset's own
+# resolution, and it is the same quantity Newton's particle radius is set from.
+picked = np.random.default_rng(0).choice(len(points), size=min(512, len(points)), replace=False)
+spacing = np.sqrt(((points[picked][:, None, :] - points[None, :, :]) ** 2).sum(-1))
+spacing[spacing < 1e-9] = np.inf
+offset = float(np.median(spacing.min(axis=1)) * 0.5)
+collision = PhysxSchema.PhysxCollisionAPI.Apply(body)
+collision.CreateRestOffsetAttr(offset)
+collision.CreateContactOffsetAttr(offset * 2.0)
+
+# Rest on the floor rather than fall onto it: this test is about the plate.
+lift = offset - float(points[:, 2].min())
+points[:, 2] += lift
+raised = [Gf.Vec3f(*p) for p in points]
+UsdGeom.PointBased(body).GetPointsAttr().Set(raised)
+rest_shape = body.GetAttribute("omniphysics:restShapePoints")
+if not rest_shape or not rest_shape.HasAuthoredValue():
+    raise SystemExit(f"[physx] {body.GetPath()} authors no omniphysics:restShapePoints")
+rest_shape.Set(raised)
+
+# The margin that matters here is PhysX's own contact offset, not a number carried over from
+# Newton: the plate has to be thicker than the distance at which *this* engine makes contacts.
+thickness = press_shape.plate_thickness(height, max(args.margin, offset * 2.0) if args.margin else offset * 2.0)
+start_z = float(points[:, 2].max()) + thickness / 2.0 + offset * 2.0
+plate = UsdGeom.Cube.Define(stage, PLATE)
+plate.CreateSizeAttr(2.0)
+UsdGeom.XformCommonAPI(plate).SetScale(Gf.Vec3f(footprint[0] * press_shape.PLATE_FOOTPRINT,
+                                                footprint[1] * press_shape.PLATE_FOOTPRINT,
+                                                thickness / 2.0))
+UsdGeom.XformCommonAPI(plate).SetTranslate(Gf.Vec3d(centre[0], centre[1], start_z))
+plate.CreateDisplayColorAttr([Gf.Vec3f(0.25, 0.45, 0.85)])
+UsdPhysics.CollisionAPI.Apply(plate.GetPrim())
+rigid = UsdPhysics.RigidBodyAPI.Apply(plate.GetPrim())
+rigid.CreateKinematicEnabledAttr(True)
+for _ in range(10):
+    app.update()
+print(f"[physx] {height * 1000:.1f} mm tall, rest offset {offset * 1000:.2f} mm, "
+      f"plate {thickness * 1000:.1f} mm thick parked at {start_z:.4f}")
+
+SimulationManager.set_physics_sim_device("cuda")
+timeline = omni.timeline.get_timeline_interface()
+timeline.set_time_codes_per_second(args.fps)
+timeline.play()
+for _ in range(5):
+    app.update()
+
+prim = DeformablePrim(str(body.GetPath()))
+elements = simulation_mesh(prim.get_element_indices()).reshape(-1, 4)
+import warp as wp  # noqa: E402
+prim.set_nodal_positions(wp.array(points.reshape(1, -1, 3).astype(np.float32), dtype=wp.float32))
+prim.set_nodal_velocities(wp.zeros((1, points.shape[0], 3), dtype=wp.float32))
+# The plate is driven through the physics view, not by writing its USD transform. A kinematic
+# body takes its target from the solver's own state; the transform on the prim is where it was
+# authored, and editing that mid-run moves the picture and nothing else -- measured, the plate
+# descended 12 mm past the banana's top without touching it.
+plate_prim = RigidPrim(PLATE)
+
+out_stage = surface = plate_mesh = None
+frames = int(args.seconds * args.fps)
+if args.usd:
+    out_stage = Usd.Stage.CreateNew(args.usd)
+    UsdGeom.SetStageUpAxis(out_stage, UsdGeom.Tokens.z)
+    UsdGeom.SetStageMetersPerUnit(out_stage, 1.0)
+    out_stage.SetDefaultPrim(UsdGeom.Xform.Define(out_stage, "/root").GetPrim())
+    out_stage.SetTimeCodesPerSecond(args.fps)
+    out_stage.SetFramesPerSecond(args.fps)
+    faces = {}
+    for tet in elements:
+        for tri in ((0, 1, 2), (0, 2, 3), (0, 3, 1), (1, 3, 2)):
+            key = tuple(sorted(int(tet[i]) for i in tri))
+            faces[key] = faces.get(key, 0) + 1
+    outside = [k for k, n in faces.items() if n == 1]
+    surface = UsdGeom.Mesh.Define(out_stage, "/root/deformable")
+    surface.CreateFaceVertexCountsAttr([3] * len(outside))
+    surface.CreateFaceVertexIndicesAttr([i for tri in outside for i in tri])
+    surface.CreateDisplayColorAttr([Gf.Vec3f(0.92, 0.78, 0.25)])
+    plate_mesh = UsdGeom.Cube.Define(out_stage, "/root/plate")
+    plate_mesh.CreateSizeAttr(2.0)
+    UsdGeom.XformCommonAPI(plate_mesh).SetScale(Gf.Vec3f(footprint[0] * press_shape.PLATE_FOOTPRINT,
+                                                         footprint[1] * press_shape.PLATE_FOOTPRINT,
+                                                         thickness / 2.0))
+    plate_mesh.CreateDisplayColorAttr([Gf.Vec3f(0.25, 0.45, 0.85)])
+    plane = UsdGeom.Mesh.Define(out_stage, "/root/ground")
+    plane.CreatePointsAttr([Gf.Vec3f(-half, -half, 0.0), Gf.Vec3f(half, -half, 0.0),
+                            Gf.Vec3f(half, half, 0.0), Gf.Vec3f(-half, half, 0.0)])
+    plane.CreateFaceVertexCountsAttr([4])
+    plane.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+
+settle_at, recover_at = press_shape.settle_frame(frames), press_shape.recovery_frame(frames)
+start_top = lowest_top = bottom_z = recovered = None
+deepest = 0.0
+for frame in range(frames):
+    plate_z = press_shape.plate_height(frame, frames, start_z, bottom_z)
+    plate_prim.set_world_poses(positions=np.array([[centre[0], centre[1], plate_z]], dtype=np.float32))
+    if plate_mesh is not None:
+        UsdGeom.XformCommonAPI(plate_mesh).SetTranslate(Gf.Vec3d(centre[0], centre[1], plate_z),
+                                                        Usd.TimeCode(frame))
+    for _ in range(args.substeps):
+        app.update()
+    q = world_nodes(prim)
+    if not np.isfinite(q).all():
+        print(f"[physx] diverged at {frame / args.fps:.2f}s")
+        break
+    if surface is not None:
+        surface.GetPointsAttr().Set([Gf.Vec3f(*p) for p in q.astype(float)], Usd.TimeCode(frame))
+    top_now = float(q[:, 2].max())
+    if frame == settle_at:
+        start_top = lowest_top = top_now
+        floor_now = float(q[:, 2].min())
+        bottom_z = floor_now + (top_now - floor_now) * press_shape.PRESS_TO + thickness / 2.0
+        print(f"[physx] settled to {top_now:.4f}; plate will go to {bottom_z:.4f}")
+    if start_top is None:
+        continue
+    lowest_top = min(lowest_top, top_now)
+    deepest = max(deepest, -float(q[:, 2].min()))
+    if frame >= recover_at:
+        recovered = top_now
+    if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
+        print(f"[physx] t={frame / args.fps:5.2f}s  plate {plate_z:7.4f}  top {top_now:7.4f}  "
+              f"floor {float(q[:, 2].min()):7.4f}", flush=True)
+
+compressed = (start_top - lowest_top) if start_top is not None else 0.0
+recovery = 0.0 if recovered is None or compressed <= 1e-9 else (recovered - lowest_top) / compressed
+# PhysX does not expose a soft-contact count, so the plate meeting the asset is asserted from the
+# geometry instead: the plate's underside got below the asset's top.
+touched = int(bottom_z is not None and bottom_z - thickness / 2.0 < start_top)
+print(press_shape.result_line("physx", start_top or 0.0, lowest_top or 0.0, compressed, height,
+                              recovery, max(0.0, deepest - offset), touched,
+                              press_shape.verdict(touched, compressed, height,
+                                                  max(0.0, deepest - offset), recovery)))
+if out_stage is not None:
+    out_stage.SetStartTimeCode(0)
+    out_stage.SetEndTimeCode(frames - 1)
+    out_stage.GetRootLayer().Save()
+    print(f"[physx] wrote {args.usd}")
+timeline.stop()
+app.close()

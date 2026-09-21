@@ -42,6 +42,11 @@ from newton_drop import (CONTACT, GROUND_CONTACT_KE, ITERATIONS, SUBSTEPS, XPBD_
                          auto_radius, relaxation_is_a_jacobi_factor, xpbd_relaxation)
 
 PLATE_BODY = 0        # the only body in the scene
+# What counts as a pass, as fractions of the asset's own settled height rather than absolute
+# millimetres, so the same thresholds mean the same thing for a grape and for a melon.
+MIN_COMPRESSION = 0.05
+MIN_RECOVERY = 0.5
+TUNNEL_DEPTH_OF_HEIGHT = 0.05
 
 
 def build(asset, solver_name, iterations, radius, press_to, margin):
@@ -70,12 +75,19 @@ def build(asset, solver_name, iterations, radius, press_to, margin):
                                               | int(newton.ShapeFlags.COLLIDE_PARTICLES)):
             builder.shape_flags[i] = 0
 
-    # The plate: wider than the asset so it cannot slide off, thin enough to see past.
-    thickness = max(0.01, height * 0.3)
+    # The plate covers the asset's own footprint with a small margin, rather than a square of
+    # its longest side: a square plate on a long thin asset is mostly plate, and it hides the
+    # thing being measured.
+    footprint = (float(q[:, 0].max() - q[:, 0].min()), float(q[:, 1].max() - q[:, 1].min()))
+    # Thicker than the contact margin, always. A plate thinner than the distance at which
+    # contacts are generated has both of its faces inside the same margin, and the asset gets
+    # pushed from underneath as hard as from above: measured, the same press went from 13.9 mm
+    # of compression to 3.1 mm when the plate was thinned below it.
+    thickness = max(4.0 * margin, height * 0.3)
     start_z = top + thickness / 2.0 + radius * 2.0
     plate = builder.add_body(xform=wp.transform(wp.vec3(centre[0], centre[1], start_z), wp.quat_identity()),
                              mass=1.0, is_kinematic=True)
-    builder.add_shape_box(plate, hx=span * 0.7, hy=span * 0.7, hz=thickness / 2.0,
+    builder.add_shape_box(plate, hx=footprint[0] * 0.6, hy=footprint[1] * 0.6, hz=thickness / 2.0,
                           cfg=newton.ModelBuilder.ShapeConfig(density=1000.0,
                                                               mu=CONTACT[solver_name]["soft_contact_mu"]),
                           color=(0.25, 0.45, 0.85))
@@ -223,10 +235,23 @@ def main():
 
     compressed = start_top - lowest_top
     recovery = 0.0 if recovered is None or compressed <= 1e-9 else (recovered - lowest_top) / compressed
+    if contact_peak == 0:
+        verdict = "no-contact"          # the plate never met the asset: not a measurement at all
+    elif compressed < MIN_COMPRESSION * height:
+        verdict = "did-not-deform"
+    elif deepest > TUNNEL_DEPTH_OF_HEIGHT * height:
+        verdict = "pushed-through-floor"
+    elif recovery < MIN_RECOVERY:
+        verdict = "did-not-spring-back"
+    else:
+        verdict = "pass"
     print(f"[press] most soft contacts in any frame: {contact_peak}")
-    print(f"[press] RESULT start_top={start_top:.4f} lowest_top={lowest_top:.4f} "
-          f"compressed={compressed * 1000:.1f}mm ({compressed / height * 100:.0f}% of height) "
-          f"recovered={recovery * 100:.0f}% below_floor={deepest * 1000:.1f}mm")
+    # One token per measurement, no spaces inside a value: the runner reads this line, and a
+    # value it has to guess the end of is a value it will read wrong.
+    print(f"[press] RESULT start_top_m={start_top:.4f} lowest_top_m={lowest_top:.4f} "
+          f"compressed_mm={compressed * 1000:.1f} compressed_frac={compressed / height:.3f} "
+          f"recovered_frac={recovery:.2f} below_floor_mm={deepest * 1000:.1f} "
+          f"soft_contacts={contact_peak} verdict={verdict}")
     if viewer is not None:
         viewer.close()
         print(f"[press] wrote {args.usd}")

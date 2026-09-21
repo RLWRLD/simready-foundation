@@ -1,20 +1,20 @@
-"""Inside Kit: drop a PhysX deformable on a ground plane and write the same animated USD Newton writes.
+"""Inside Kit: drop a PhysX deformable on a ground plane and write the animated USD Newton writes.
 
-    ./isaac-run isaac610 tools/physx_baseline.py <asset.usda> [--seconds 2] [--fps 60]
-                                                 [--drop 0.05] [--usd out.usda]
+    ./isaac-run isaac610 asset_checks/native/physx_drop.py <asset.usda>
+        [--seconds 2] [--fps 60] [--drop 0.05] [--usd out.usda]
 
 The Newton runs are read out of the solver's own particle state and written as an animated mesh;
-this does the same for PhysX, through `omni.physics.tensors`' volume deformable view, so the two
-engines produce the same artefact and `tools/render_usd.py` photographs both from the same camera.
-Comparing them then compares physics, not two different recording paths.
+this does the same for PhysX, through `DeformablePrim`'s tensor view, so the two engines produce
+the same artefact and `render_usd.py` photographs both from the same camera. Comparing them then
+compares physics, not two different recording paths.
 
-It also reads the Young's modulus PhysX ended up with and prints it beside what the asset asked
-for. A deformable whose material did not bind runs on the schema default of zero and looks like
-a very soft engine rather than a broken stage, so the number is checked rather than assumed.
+It also checks what it is comparing. PhysX does not complain about a deformable with no material
+bound -- it runs its own 5e5 Pa default, a tenth of what this banana declares, and looks like a
+softer engine rather than a broken stage. And the starting height is set through the view rather
+than assumed, because creating that view costs frames the body spends falling.
 """
 import argparse
 import pathlib
-import sys
 
 import isaacsim
 from isaacsim import SimulationApp
@@ -37,9 +37,45 @@ import omni.usd  # noqa: E402
 import warp as wp  # noqa: E402
 from isaacsim.core.experimental.prims import DeformablePrim  # noqa: E402
 from isaacsim.core.simulation_manager import SimulationManager  # noqa: E402
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics  # noqa: E402
+from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics  # noqa: E402
 
 SIM_API = "OmniPhysicsVolumeDeformableSimAPI"
+BODY_API = "OmniPhysicsDeformableBodyAPI"
+# What counts as a pass, as fractions of the asset's own size and its own drop.
+MIN_FALL_OF_DROP = 0.5
+TUNNEL_DEPTH_OF_HEIGHT = 0.05
+SETTLED_SPEED_OF_HEIGHT = 2.0   # of the asset's height per second
+# "Settled" is judged on the 99th percentile of node speed, not the maximum. A maximum over a
+# few thousand nodes is decided by whichever single node is jittering, so an asset that has not
+# moved a tenth of a millimetre in a second still reads as moving; the percentile asks whether
+# the body is at rest, which is the question.
+
+
+def simulation_mesh(result):
+    """The first of the three arrays DeformablePrim returns.
+
+    `get_nodal_positions` and `get_element_indices` each hand back (simulation, collision, rest).
+    The simulation mesh is the one the solver moves; the rest mesh never moves at all, so a video
+    made from it would show a deformable that does not deform.
+    """
+    array = result[0] if isinstance(result, tuple) else result
+    return np.asarray(array.numpy() if hasattr(array, "numpy") else array)
+
+
+def world_nodes(prim):
+    """The simulation mesh in world space: the body's pose applied to its nodes."""
+    local = simulation_mesh(prim.get_nodal_positions()).reshape(-1, 3)
+    positions, orientations = prim.get_world_poses()
+    p = np.asarray(positions.numpy() if hasattr(positions, "numpy") else positions).reshape(-1, 3)[0]
+    q = np.asarray(orientations.numpy() if hasattr(orientations, "numpy") else orientations).reshape(-1, 4)[0]
+    w, x, y, z = q[0], q[1], q[2], q[3]
+    rotation = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
+    return local @ rotation.T + p
+
 
 omni.usd.get_context().new_stage()
 stage = omni.usd.get_context().get_stage()
@@ -53,53 +89,63 @@ asset.GetReferences().AddReference(args.asset)
 scene = UsdPhysics.Scene.Define(stage, "/World/PhysicsScene")
 scene.CreateGravityDirectionAttr(Gf.Vec3f(0.0, 0.0, -1.0))
 scene.CreateGravityMagnitudeAttr(9.81)
-ground = UsdGeom.Mesh.Define(stage, "/World/Ground")
-half = 2.0
-ground.CreatePointsAttr([Gf.Vec3f(-half, -half, 0.0), Gf.Vec3f(half, -half, 0.0),
-                         Gf.Vec3f(half, half, 0.0), Gf.Vec3f(-half, half, 0.0)])
-ground.CreateFaceVertexCountsAttr([4])
-ground.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
-ground.CreateExtentAttr([Gf.Vec3f(-half, -half, 0.0), Gf.Vec3f(half, half, 0.0)])
+# A solid floor, not a sheet. Newton's `add_ground_plane` is a half-space -- infinitely thick --
+# and a zero-thickness triangle mesh is a weaker collider by construction: measured, a pressed
+# banana was squeezed 11 mm through the sheet, which says nothing about PhysX and everything
+# about the floor it was given. The box's top face is at z = 0, so the two engines' floors are
+# in the same place.
+half, depth = 2.0, 0.5
+ground = UsdGeom.Cube.Define(stage, "/World/Ground")
+ground.CreateSizeAttr(2.0)
+UsdGeom.XformCommonAPI(ground).SetScale(Gf.Vec3f(half, half, depth / 2.0))
+UsdGeom.XformCommonAPI(ground).SetTranslate(Gf.Vec3d(0.0, 0.0, -depth / 2.0))
 UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
 for _ in range(30):
     app.update()
 
-
-BODY_API = "OmniPhysicsDeformableBodyAPI"
-
-
-def deformable_body():
-    """The prim PhysX will actually simulate: the one carrying the deformable *body* schema.
-
-    Which prim that is depends on how the asset was authored -- a TetMesh can carry the body
-    itself, or a parent Xform can own a cooked simulation mesh underneath it. Looking for the
-    body schema finds both; assuming a fixed shape found neither.
-    """
-    body = target = None
-    for prim in Usd.PrimRange(asset, Usd.TraverseInstanceProxies()):
-        if body is None and BODY_API in prim.GetAppliedSchemas():
-            body = prim
-        if target is None and SIM_API in prim.GetAppliedSchemas():
-            target = prim
-    if body is None:
-        raise SystemExit(f"[physx] {args.asset} declares no {BODY_API}; PhysX has nothing to simulate")
-    return body, target or body
-
-
-body, target = deformable_body()
+body = target = None
+for prim_ in Usd.PrimRange(asset, Usd.TraverseInstanceProxies()):
+    if body is None and BODY_API in prim_.GetAppliedSchemas():
+        body = prim_
+    if target is None and SIM_API in prim_.GetAppliedSchemas():
+        target = prim_
+if body is None:
+    raise SystemExit(f"[physx] {args.asset} declares no {BODY_API}; PhysX has nothing to simulate")
+target = target or body
 print(f"[physx] simulating {target.GetPath()} as body {body.GetPath()}")
 
-# Lift the whole asset so its lowest authored point starts `drop` above the floor, the same way
-# the Newton runs do. The drop has to be measured from the geometry, not the transform, because
-# the asset's origin is wherever its author put it.
-bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
-low = bbox.ComputeWorldBound(asset).ComputeAlignedRange().GetMin()[2]
-lift = args.drop - low
-UsdGeom.XformCommonAPI(asset).SetTranslate(Gf.Vec3d(0.0, 0.0, lift))
-print(f"[physx] lifted the asset {lift * 100:.1f} cm so its lowest point starts {args.drop * 100:.1f} cm up")
+# Raise the asset by moving its points, not its transform: a deformable's rest shape is authored
+# on the prim and PhysX builds the body from that, so an ancestor Xform does not reach it. It is
+# also exactly what the Newton runner does to its particles, so both engines start from the same
+# geometry rather than from the same intention.
+points = np.asarray(UsdGeom.PointBased(body).GetPointsAttr().Get(), dtype=np.float64)
+height = float(points[:, 2].max() - points[:, 2].min())
+lift = args.drop - float(points[:, 2].min())
+points[:, 2] += lift
+raised = [Gf.Vec3f(*p) for p in points]
+UsdGeom.PointBased(body).GetPointsAttr().Set(raised)
+rest_shape = body.GetAttribute("omniphysics:restShapePoints")
+if not rest_shape or not rest_shape.HasAuthoredValue():
+    raise SystemExit(f"[physx] {body.GetPath()} authors no omniphysics:restShapePoints; PhysX would "
+                     f"build the body from a shape this script cannot place")
+rest_shape.Set(raised)
+# Size the collision offsets to the asset, the way the Newton runs size their particle radius.
+# Left alone these default to PhysX's own scale-free numbers -- measured, the banana came to rest
+# 17 mm above the floor, which is not the asset's physics, it is a 2 cm contact offset meant for
+# a scene built in metres. Half the median distance between neighbouring nodes is the asset's own
+# resolution, and it is the same quantity Newton is given.
+picked = np.random.default_rng(0).choice(len(points), size=min(512, len(points)), replace=False)
+spacing = np.sqrt(((points[picked][:, None, :] - points[None, :, :]) ** 2).sum(-1))
+spacing[spacing < 1e-9] = np.inf
+offset = float(np.median(spacing.min(axis=1)) * 0.5)
+collision = PhysxSchema.PhysxCollisionAPI.Apply(body)
+collision.CreateRestOffsetAttr(offset)
+collision.CreateContactOffsetAttr(offset * 2.0)
+for _ in range(10):
+    app.update()
+print(f"[physx] raised the asset {lift * 100:.1f} cm; it is {height * 1000:.1f} mm tall, "
+      f"rest offset {offset * 1000:.2f} mm")
 
-# Deformables run on the GPU, and the tensor views only exist once the timeline is playing.
-# This is the order `isaacsim.core.experimental.prims`' own DeformablePrim tests use.
 SimulationManager.set_physics_sim_device("cuda")
 timeline = omni.timeline.get_timeline_interface()
 timeline.set_time_codes_per_second(args.fps)
@@ -108,19 +154,24 @@ for _ in range(5):
     app.update()
 
 prim = DeformablePrim(str(body.GetPath()))
-rest = np.asarray(prim.get_nodal_positions()[0]).reshape(-1, 3)
-print(f"[physx] DeformablePrim at {body.GetPath()}: {rest.shape[0]} simulation nodes")
-
-# Read the material PhysX actually bound. With nothing bound it does not complain -- it runs
-# its own 5e5 Pa default, a tenth of what this asset declares, and the engine merely looks soft.
+elements = simulation_mesh(prim.get_element_indices()).reshape(-1, 4)
 try:
-    print(f"[physx] physics material in the solver: {prim.get_applied_physics_materials()}")
+    print(f"[physx] physics material: {prim.get_applied_physics_materials()}")
 except Exception as exc:                                  # noqa: BLE001
     print(f"[physx] could not read the bound physics material back: {exc}")
 
-elements = np.asarray(prim.get_element_indices()[0]).reshape(-1, 4)
-
-print(f"[physx] starts z [{rest[:, 2].min():.4f}, {rest[:, 2].max():.4f}] over {len(elements)} tets")
+# Put the asset where the experiment says it starts. Creating the tensor view costs a handful of
+# rendered frames and the body falls through them -- measured, a banana raised to 15 cm reported
+# 7.4 cm by the time the view existed, which is 0.125 s of free fall exactly. Reading that as the
+# starting height would let every engine's drop begin wherever its setup happened to end.
+prim.set_nodal_positions(wp.array(points.reshape(1, -1, 3).astype(np.float32), dtype=wp.float32))
+prim.set_nodal_velocities(wp.zeros((1, points.shape[0], 3), dtype=wp.float32))
+start = world_nodes(prim)
+print(f"[physx] placed at z [{start[:, 2].min():.4f}, {start[:, 2].max():.4f}] over {len(elements)} tets, "
+      f"asked for {args.drop:.4f}")
+if abs(start[:, 2].min() - args.drop) > 0.002:
+    raise SystemExit(f"[physx] the solver would not take the starting pose: asked {args.drop:.4f}, "
+                     f"it holds {start[:, 2].min():.4f}")
 
 out_stage = surface = None
 if args.usd:
@@ -131,8 +182,8 @@ if args.usd:
     out_stage.SetDefaultPrim(out_root.GetPrim())
     out_stage.SetTimeCodesPerSecond(args.fps)
     out_stage.SetFramesPerSecond(args.fps)
-    # A tet mesh's outside is every triangular face that only one tet owns. Drawing that, rather
-    # than all four faces of every tet, is what makes the render look like the object.
+    # A tet mesh's outside is every triangular face only one tet owns. Drawing that, rather than
+    # all four faces of every tet, is what makes the render look like the object.
     faces = {}
     for tet in elements:
         for tri in ((0, 1, 2), (0, 2, 3), (0, 3, 1), (1, 3, 2)):
@@ -142,27 +193,48 @@ if args.usd:
     surface = UsdGeom.Mesh.Define(out_stage, "/root/deformable")
     surface.CreateFaceVertexCountsAttr([3] * len(outside))
     surface.CreateFaceVertexIndicesAttr([i for tri in outside for i in tri])
-    surface.CreateDisplayColorAttr([Gf.Vec3f(0.85, 0.8, 0.45)])
+    surface.CreateDisplayColorAttr([Gf.Vec3f(0.92, 0.78, 0.25)])
     plane = UsdGeom.Mesh.Define(out_stage, "/root/ground")
-    plane.CreatePointsAttr(ground.GetPointsAttr().Get())
+    plane.CreatePointsAttr([Gf.Vec3f(-half, -half, 0.0), Gf.Vec3f(half, -half, 0.0),
+                            Gf.Vec3f(half, half, 0.0), Gf.Vec3f(-half, half, 0.0)])
     plane.CreateFaceVertexCountsAttr([4])
     plane.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
     print(f"[physx] writing {len(outside)} surface triangles of {len(elements)} tets")
 
 frames = int(args.seconds * args.fps)
+q = start
 for frame in range(frames):
     for _ in range(args.substeps):
         app.update()
-    q = np.asarray(prim.get_nodal_positions()[0]).reshape(-1, 3)
+    q = world_nodes(prim)
     if not np.isfinite(q).all():
         print(f"[physx] diverged at {frame / args.fps:.2f}s")
         break
     if surface is not None:
         surface.GetPointsAttr().Set([Gf.Vec3f(*p) for p in q.astype(float)], Usd.TimeCode(frame))
     if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
-        v = np.asarray(prim.get_nodal_velocities()[0]).reshape(-1, 3)
+        v = simulation_mesh(prim.get_nodal_velocities()).reshape(-1, 3)
         print(f"[physx] t={frame / args.fps:5.2f}s  z [{q[:, 2].min():8.4f}, {q[:, 2].max():8.4f}]  "
               f"max|v| {np.abs(v).max():8.3f}", flush=True)
+
+v = simulation_mesh(prim.get_nodal_velocities()).reshape(-1, 3)
+fell = float(start[:, 2].min() - q[:, 2].min())
+below = float(max(0.0, -q[:, 2].min()))   # a resting node sits one rest offset above the floor
+speed = float(np.percentile(np.abs(v), 99))
+peak = float(np.abs(v).max())
+if not np.isfinite(q).all():
+    verdict = "diverged"
+elif fell < MIN_FALL_OF_DROP * (args.drop - offset):
+    verdict = "never-fell"
+elif below > offset + TUNNEL_DEPTH_OF_HEIGHT * height:
+    verdict = "through-the-floor"
+elif speed > SETTLED_SPEED_OF_HEIGHT * height:
+    verdict = "never-settled"
+else:
+    verdict = "pass"
+print(f"[physx] RESULT fell_mm={fell * 1000:.1f} rest_low_m={q[:, 2].min():.4f} "
+      f"rest_high_m={q[:, 2].max():.4f} thickness_mm={(q[:, 2].max() - q[:, 2].min()) * 1000:.1f} "
+      f"below_floor_mm={below * 1000:.1f} p99_speed={speed:.3f} max_speed={peak:.3f} verdict={verdict}")
 
 if out_stage is not None:
     out_stage.SetStartTimeCode(0)
