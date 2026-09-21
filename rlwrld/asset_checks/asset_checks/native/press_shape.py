@@ -14,17 +14,24 @@ Nothing here imports a physics engine, so either can read it.
 MIN_COMPRESSION = 0.05       # it has to give at least this much
 MIN_RECOVERY = 0.5           # and get back at least this much of what it gave
 TUNNEL_DEPTH_OF_HEIGHT = 0.05
-def press_depth(settled_height, margin):
-    """How far into the asset the plate goes: as deep as contact can actually be felt.
+INDENT_OF_HEIGHT = 0.2       # the plate goes this far into the asset, whatever is simulating it
+FLAT_OF_HEIGHT = 0.1         # below this much of its authored height, the asset is a sheet
 
-    A fixed fraction of the asset's height was the obvious choice and it is the wrong one. A
-    penalty contact exists only while the particle is within the margin of the shape, so a plate
-    driven deeper than that meets a shell of particles and passes through the rest -- measured,
-    95 of 3074. Pressing exactly one margin deep is the deepest indentation the contact model
-    represents faithfully, and it is the same rule for any asset because the margin is already
-    derived from the asset's own size.
+
+def press_depth(height):
+    """How far into the asset the plate goes: a fifth of its height, for every engine.
+
+    This was briefly written as "one contact margin", because a penalty contact exists only
+    while the particle is inside the margin and a plate driven deeper meets a shell and sweeps
+    through the rest. That reasoning is sound and the conclusion was wrong: the margin is a
+    number each engine picks, so tying the experiment to it meant PhysX pressed 1.5 mm where
+    Newton pressed 9.5, and the two columns were never answering the same question.
+
+    The experiment says how deep. Making that depth representable -- a wide enough contact band,
+    a contact stiffer than the material -- is the engine's problem, and each runner solves it
+    from this number.
     """
-    return min(margin, settled_height)
+    return INDENT_OF_HEIGHT * height
 PLATE_THICKNESS_OF_HEIGHT = 0.3
 PLATE_THICKNESS_OF_MARGIN = 2.5   # and never thinner than this many contact margins -- see below
 PLATE_FOOTPRINT = 0.6        # half-extents, as a fraction of the asset's own footprint
@@ -78,15 +85,17 @@ def recovery_frame(frames):
     return 4 * phase + phase // 2
 
 
-def verdict(contacts, compressed, height, deepest, recovery, settled_height=None, margin=None):
+def verdict(contacts, compressed, height, deepest, recovery, settled_height=None):
     """What the run showed. `nothing-to-press` is not a physics failure -- it says the experiment
     does not apply, which is a different thing and must not be read as one.
 
-    An asset flatter than the distance at which contact is even resolved has no height to lose. A
-    sheet resting on the floor is the obvious case: reporting `did-not-deform` for it would blame
-    the solver for a question nobody could answer.
+    Whether there is anything to press is a question about the asset, so it is asked of the
+    asset: something that settles to less than a tenth of the height it was authored with -- a
+    sheet, typically -- has no height to lose, and reporting `did-not-deform` for it would blame
+    the solver for a question nobody could answer. Asking it of the engine's contact band
+    instead would make the same asset pressable in one engine and not in another.
     """
-    if settled_height is not None and margin is not None and settled_height < margin:
+    if settled_height is not None and settled_height < FLAT_OF_HEIGHT * height:
         return "nothing-to-press"
     if contacts == 0:
         return "no-contact"          # the plate never met the asset: not a measurement at all

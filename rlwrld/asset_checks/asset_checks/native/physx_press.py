@@ -134,10 +134,16 @@ if offset is None:
     chosen["rest_offset"] = (offset, "the asset declares neither a particle radius nor a shell "
                                      "thickness; half the median distance between nodes")
 chosen["contact_offset"] = (offset * 2.0, "twice the rest offset, as Newton's contact margin is")
+# PhysX derives its contact response from the bound material, so unlike Newton there is no
+# separate penalty stiffness to raise: the asset's own Young's modulus is already what the plate
+# pushes against. Recorded here so the two engines' logs can be read against each other.
+if declared.get("youngs_modulus") is not None:
+    chosen["contact_stiffness_source"] = (declared["youngs_modulus"],
+                                          "PhysX contacts run off the bound material's modulus, "
+                                          "not a separate penalty constant")
 asset_properties.report("physx", declared, chosen)
 collision = PhysxSchema.PhysxCollisionAPI.Apply(geometry)
 collision.CreateRestOffsetAttr(offset)
-collision.CreateContactOffsetAttr(offset * 2.0)
 
 # Rest on the floor rather than fall onto it: this test is about the plate.
 lift = offset - float(points[:, 2].min())
@@ -149,9 +155,12 @@ if not rest_shape or not rest_shape.HasAuthoredValue():
     raise SystemExit(f"[physx] {geometry.GetPath()} authors no omniphysics:restShapePoints")
 rest_shape.Set(raised)
 
-# The margin that matters here is PhysX's own contact offset, not a number carried over from
-# Newton: the plate has to be thicker than the distance at which *this* engine makes contacts.
-thickness = press_shape.plate_thickness(height, max(args.margin, offset * 2.0) if args.margin else offset * 2.0)
+# The experiment says how deep the plate goes; PhysX's contact band has to cover that, or the
+# nodes past it feel nothing and the plate sweeps through. Same number Newton is given.
+indent = press_shape.press_depth(height)
+margin = args.margin or max(offset * 2.0, indent)
+collision.CreateContactOffsetAttr(max(offset * 2.0, margin))
+thickness = press_shape.plate_thickness(height, margin)
 start_z = float(points[:, 2].max()) + thickness / 2.0 + offset * 2.0
 plate = UsdGeom.Cube.Define(stage, PLATE)
 plate.CreateSizeAttr(2.0)
@@ -220,10 +229,10 @@ for frame in range(frames):
         start_top = lowest_top = top_now
         floor_now = float(q[:, 2].min())
         settled_height = top_now - floor_now
-        depth = press_shape.press_depth(settled_height, offset * 2.0)
+        depth = press_shape.press_depth(settled_height)
         bottom_z = top_now - depth + thickness / 2.0
         print(f"[physx] settled to {top_now:.4f} ({settled_height * 1000:.1f} mm tall); the plate "
-              f"will indent it {depth * 1000:.1f} mm, which is one contact margin")
+              f"will indent it {depth * 1000:.1f} mm")
     if start_top is None:
         continue
     lowest_top = min(lowest_top, top_now)
@@ -236,14 +245,15 @@ for frame in range(frames):
 
 compressed = (start_top - lowest_top) if start_top is not None else 0.0
 recovery = 0.0 if recovered is None or compressed <= 1e-9 else (recovered - lowest_top) / compressed
-# PhysX does not expose a soft-contact count, so the plate meeting the asset is asserted from the
-# geometry instead: the plate's underside got below the asset's top.
-touched = int(bottom_z is not None and bottom_z - thickness / 2.0 < start_top)
+# PhysX exposes no soft-contact count, so this is not one: it records only whether the plate's
+# underside ever got below the asset's top. Reported as a plain yes/no rather than as a count,
+# which a "1" in a column of thousands would be read as.
+touched = 1 if (bottom_z is not None and bottom_z - thickness / 2.0 < start_top) else 0
 print(press_shape.result_line("physx", start_top or 0.0, lowest_top or 0.0, compressed, height,
-                              recovery, max(0.0, deepest - offset), touched,
+                              recovery, max(0.0, deepest - offset), "yes" if touched else "no",
                               press_shape.verdict(touched, compressed, height,
                                                   max(0.0, deepest - offset), recovery,
-                                                  settled_height=settled_height, margin=offset * 2.0),
+                                                  settled_height=settled_height),
                               indent=depth))
 if tape is not None:
     tape.close()
