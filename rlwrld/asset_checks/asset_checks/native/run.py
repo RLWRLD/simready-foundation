@@ -1,0 +1,175 @@
+"""Run a deformable asset through the named environments and experiments, and make the videos.
+
+    python asset_checks/native/run.py <asset.usda> --out <dir>
+        [--envs newton12_vbd,newton15_vbd,newton12_xpbd,newton15_xpbd,physx]
+        [--experiments drop,press] [--seconds 2] [--size 768] [--no-render]
+
+One asset, one experiment, one engine, one solver -- the four things the user names -- and this
+turns them into a measured run and a video. It is the deformable counterpart of the Kit runner:
+NVIDIA's three tests read rigid-body transforms and refuse an asset without RigidBodyAPI, and
+Isaac's Fabric sync carries rigid-body transforms only, so a deformable simulated through that
+path is both unmeasurable and invisible. Here each engine is driven directly, the solver's own
+state is what gets measured, and the animated USD each run writes is what gets photographed.
+
+Every cell is a separate process in its own virtual environment, because the two Newton versions
+cannot share one: isaacsim-core pins `newton[sim]==1.2.1` against Isaac 6.0.1 and `==1.5.0`
+against 6.1.0. That is also why a result is only meaningful with all four names attached.
+"""
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+import time
+
+HERE = pathlib.Path(__file__).resolve().parent
+BENCH = pathlib.Path("/home/wongyun/Workspace/Research/Robotics/simready-bench")
+
+# Environment name -> (venv tag, engine, solver). The names are the ones in asset_checks.envs;
+# what changes here is only how a deformable is driven in each.
+ENVIRONMENTS = {
+    "physx": ("isaac610", "physx", "physx"),
+    "physx601": ("isaac601", "physx", "physx"),
+    "newton12_vbd": ("isaac601", "newton", "vbd"),
+    "newton12_xpbd": ("isaac601", "newton", "xpbd"),
+    "newton15_vbd": ("isaac610", "newton", "vbd"),
+    "newton15_xpbd": ("isaac610", "newton", "xpbd"),
+}
+EXPERIMENTS = ("drop", "press")
+# PhysX is driven from inside Kit, so it needs the isaac-run launcher; Newton is a plain import.
+SCRIPTS = {("newton", "drop"): "newton_drop.py", ("newton", "press"): "newton_press.py",
+           ("physx", "drop"): "physx_drop.py", ("physx", "press"): "physx_press.py"}
+
+
+# PhysX and Newton do not read the same schemas -- Newton reads the AOUSD public `Physics*`
+# names, PhysX reads the same physics under an `OmniPhysics` prefix and translates neither -- so
+# a PhysX cell runs a converted copy of the asset. `to_physx.py` makes it from the same
+# tetrahedra and the same declared material; anything else would compare the conversion.
+def physx_asset(asset):
+    converted = pathlib.Path(asset).with_name(pathlib.Path(asset).stem + "_physx.usda")
+    if not converted.exists():
+        raise SystemExit(f"{asset} has no PhysX counterpart at {converted}. Make one with:\n"
+                         f"  {BENCH}/isaac-run isaac610 {HERE / 'to_physx.py'} {asset} {converted}")
+    return str(converted)
+
+
+def cell_command(env, experiment, asset, usd, seconds):
+    venv, engine, solver = ENVIRONMENTS[env]
+    script = SCRIPTS.get((engine, experiment))
+    if script is None:
+        return None, f"{engine} has no {experiment} experiment yet"
+    if engine == "physx":
+        return [str(BENCH / "isaac-run"), venv, str(HERE / script), physx_asset(asset),
+                "--seconds", str(seconds), "--usd", str(usd)], None
+    return [str(BENCH / f".venv-{venv}" / "bin" / "python"), str(HERE / script), asset,
+            "--solver", solver, "--seconds", str(seconds), "--usd", str(usd)], None
+
+
+def read_result(log):
+    """Pull the numbers each experiment prints, without teaching this file what they mean.
+
+    The experiment owns its verdict; the runner only collects it. A line that starts RESULT is
+    a run of `name=value`, and everything else in the log is there for a person to read.
+    """
+    found = {}
+    for line in log.splitlines():
+        marker = line.partition("] ")[2]
+        if marker.startswith("RESULT "):
+            for token in marker[len("RESULT "):].split():
+                name, _, value = token.partition("=")
+                found[name] = value
+        elif marker.startswith("t="):
+            found["last_frame"] = marker
+        elif "diverged" in marker:
+            found["diverged"] = marker
+        elif marker.startswith("most soft contacts"):
+            found["soft_contacts"] = marker.rsplit(": ", 1)[-1]
+    return found
+
+
+def run(command, log_path, timeout):
+    started = time.time()
+    with open(log_path, "w") as log:
+        code = subprocess.call(command, stdout=log, stderr=subprocess.STDOUT, timeout=timeout)
+    return code, round(time.time() - started, 1)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("asset")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--envs", default="newton12_vbd,newton12_xpbd,newton15_vbd,newton15_xpbd,physx")
+    ap.add_argument("--experiments", default=",".join(EXPERIMENTS))
+    ap.add_argument("--seconds", type=float, default=2.0)
+    ap.add_argument("--press-seconds", type=float, default=4.0)
+    ap.add_argument("--size", type=int, default=768)
+    ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--timeout", type=int, default=1200)
+    ap.add_argument("--no-render", action="store_true")
+    args = ap.parse_args()
+
+    asset = str(pathlib.Path(args.asset).resolve())
+    out = pathlib.Path(args.out).resolve()
+    for folder in ("logs", "usd", "frames", "videos"):
+        (out / folder).mkdir(parents=True, exist_ok=True)
+    envs = [e.strip() for e in args.envs.split(",") if e.strip()]
+    unknown = [e for e in envs if e not in ENVIRONMENTS]
+    if unknown:
+        raise SystemExit(f"unknown environment(s): {', '.join(unknown)}. "
+                         f"Known: {', '.join(ENVIRONMENTS)}")
+    experiments = [e.strip() for e in args.experiments.split(",") if e.strip()]
+
+    results = {}
+    for env in envs:
+        for experiment in experiments:
+            cell = f"{pathlib.Path(asset).stem}__{env}__{experiment}"
+            usd = out / "usd" / f"{cell}.usda"
+            seconds = args.press_seconds if experiment == "press" else args.seconds
+            command, refusal = cell_command(env, experiment, asset, usd, seconds)
+            if refusal:
+                print(f"[run] {cell}: skipped -- {refusal}", flush=True)
+                results[cell] = {"env": env, "experiment": experiment, "skipped": refusal}
+                continue
+            print(f"[run] {cell}", flush=True)
+            log_path = out / "logs" / f"{cell}.log"
+            try:
+                code, seconds_taken = run(command, log_path, args.timeout)
+            except subprocess.TimeoutExpired:
+                results[cell] = {"env": env, "experiment": experiment, "error": "timed out"}
+                print(f"[run] {cell}: TIMED OUT", flush=True)
+                continue
+            found = read_result(log_path.read_text(errors="replace"))
+            results[cell] = {"env": env, "experiment": experiment, "exit": code,
+                             "seconds": seconds_taken, "usd": usd.name if usd.exists() else None,
+                             **found}
+            print(f"[run] {cell}: exit {code} in {seconds_taken}s -- "
+                  f"{found or 'nothing reported'}", flush=True)
+
+            if args.no_render or not usd.exists():
+                continue
+            frames = out / "frames" / cell
+            render = [str(BENCH / "isaac-run"), "isaac610", str(HERE / "render_usd.py"), str(usd),
+                      str(frames), "--fps", str(args.fps), "--size", str(args.size)]
+            try:
+                code, _ = run(render, out / "logs" / f"{cell}.render.log", args.timeout)
+            except subprocess.TimeoutExpired:
+                code = -1
+            written = sorted(frames.glob("frame_*.png"))
+            results[cell]["frames"] = len(written)
+            if written:
+                video = out / "videos" / f"{cell}.mp4"
+                subprocess.call(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(args.fps),
+                                 "-i", str(frames / "frame_%05d.png"), "-c:v", "libx264",
+                                 "-pix_fmt", "yuv420p", "-crf", "20", str(video)])
+                results[cell]["video"] = video.name if video.exists() else None
+            print(f"[run] {cell}: {len(written)} frames -> {results[cell].get('video')}", flush=True)
+
+    (out / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
+    print(f"\n[run] wrote {out / 'results.json'}")
+    for cell, row in sorted(results.items()):
+        state = row.get("skipped") or row.get("error") or row.get("diverged") or "ok"
+        print(f"[run] {cell:<46} {state:<24} {row.get('video') or '-'}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

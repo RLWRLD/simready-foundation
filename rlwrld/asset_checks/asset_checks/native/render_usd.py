@@ -104,7 +104,8 @@ def world_bounds(prims, times):
 
 
 samples = [start + (end - start) * f for f in (0.0, 0.25, 0.5, 0.75, 1.0)]
-bounds = world_bounds(moving_prims(samples), samples)
+moving = moving_prims(samples)
+bounds = world_bounds(moving, samples)
 if bounds.IsEmpty():
     print("[render] FAIL: nothing with bounds in this stage")
     app.close()
@@ -114,10 +115,12 @@ size = bounds.GetSize()
 span = max(size[0], size[1], size[2])
 print(f"[render] bounds centre {tuple(round(c, 4) for c in centre)} size {tuple(round(s, 4) for s in size)}")
 
-# A three-quarter view from slightly above: a drop reads as vertical motion and a press as a shape
-# change, and neither is hidden by the other.
-distance = max(span * 2.6, 0.35)
-eye = Gf.Vec3d(centre[0] + distance * 0.75, centre[1] - distance * 0.95, centre[2] + distance * 0.55)
+# A three-quarter view from just above the floor. The obvious camera -- up high, looking down --
+# is the wrong one here: a press puts an opaque plate directly between it and the asset, and the
+# whole video is a picture of the plate. Low and to the side, you see the gap the plate is
+# closing and the asset squeezing out into it, and a drop still reads as plain vertical motion.
+distance = max(span * 2.0, 0.30)
+eye = Gf.Vec3d(centre[0] + distance * 0.75, centre[1] - distance * 0.95, centre[2] + distance * 0.22)
 camera = UsdGeom.Camera.Define(stage, "/RenderCamera")
 camera.CreateFocalLengthAttr(28.0)
 camera.CreateClippingRangeAttr(Gf.Vec2f(max(1e-3, distance * 0.01), distance * 20.0))
@@ -140,6 +143,14 @@ if not any(prim.IsA(UsdLux.BoundableLightBase) or prim.IsA(UsdLux.NonboundableLi
     key.CreateAngleAttr(1.0)
     UsdGeom.Xformable(key).AddRotateXYZOp().Set(Gf.Vec3f(-40.0, 0.0, 35.0))
     print("[render] the stage had no lights; added a dome and a key")
+
+# Anything that moves and was not given a colour gets one. Newton writes the simulated surface
+# as a plain mesh with no displayColor, so the asset came out the same grey as the floor and the
+# same grey as the plate's shadow -- a correct simulation that reads as nothing happening.
+for prim in moving:
+    gprim = UsdGeom.Gprim(prim)
+    if gprim and not (gprim.GetDisplayColorAttr().HasAuthoredValue() or prim.GetChildren()):
+        gprim.CreateDisplayColorAttr([Gf.Vec3f(0.92, 0.78, 0.25)])
 
 viewport = omni.kit.viewport.utility.get_active_viewport()
 viewport.set_active_camera("/RenderCamera")

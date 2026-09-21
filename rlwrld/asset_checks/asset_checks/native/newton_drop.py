@@ -36,6 +36,14 @@ GROUND_CONTACT_KE = 2.0e5   # example_rigid_soft_contact.GROUND_CONTACT_KE
 SUBSTEPS = {"xpbd": 32, "vbd": 10}   # rigid_soft_contact uses 32; the softbody examples use 10
 ITERATIONS = 10             # every official soft-body example is 5-10
 XPBD_MAX_RELAXATION = 0.9   # SolverXPBD's own default; never raise it, only lower it
+# What counts as a pass, as fractions of the asset's own size and its own drop.
+MIN_FALL_OF_DROP = 0.5
+TUNNEL_DEPTH_OF_HEIGHT = 0.05
+SETTLED_SPEED_OF_HEIGHT = 2.0   # of the asset's height per second
+# "Settled" is judged on the 99th percentile of node speed, not the maximum. A maximum over a
+# few thousand nodes is decided by whichever single node is jittering, so an asset that has not
+# moved a tenth of a millimetre in a second still reads as moving; the percentile asks whether
+# the body is at rest, which is the question.
 
 
 def relaxation_is_a_jacobi_factor():
@@ -220,6 +228,29 @@ def main():
             speed = float(np.abs(np.asarray(state_0.particle_qd.numpy())).max())
             print(f"[baseline] t={frame / args.fps:5.2f}s  z [{q[:, 2].min():8.4f}, {q[:, 2].max():8.4f}]  "
                   f"max|v| {speed:8.3f}")
+    q = np.asarray(state_0.particle_q.numpy())
+    qd = np.asarray(state_0.particle_qd.numpy())
+    fell = float(start[:, 2].min() - q[:, 2].min())
+    below = float(max(0.0, -q[:, 2].min() - radius))
+    speed = float(np.percentile(np.abs(qd), 99))
+    peak = float(np.abs(qd).max())
+    height = float(start[:, 2].max() - start[:, 2].min())
+    # Thresholds as fractions of the asset's own size and its own drop, so they mean the same
+    # thing for any asset. `below` allows for the radius because a particle centre is what is
+    # measured and a resting particle sits one radius above the floor.
+    if not np.isfinite(q).all():
+        verdict = "diverged"
+    elif fell < MIN_FALL_OF_DROP * lift:
+        verdict = "never-fell"
+    elif below > TUNNEL_DEPTH_OF_HEIGHT * height:
+        verdict = "through-the-floor"
+    elif speed > SETTLED_SPEED_OF_HEIGHT * height:
+        verdict = "never-settled"
+    else:
+        verdict = "pass"
+    print(f"[baseline] RESULT fell_mm={fell * 1000:.1f} rest_low_m={q[:, 2].min():.4f} "
+          f"rest_high_m={q[:, 2].max():.4f} thickness_mm={(q[:, 2].max() - q[:, 2].min()) * 1000:.1f} "
+          f"below_floor_mm={below * 1000:.1f} p99_speed={speed:.3f} max_speed={peak:.3f} verdict={verdict}")
     if viewer is not None:
         viewer.close()
         print(f"[baseline] wrote {args.usd}")
