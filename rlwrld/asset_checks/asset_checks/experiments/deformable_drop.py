@@ -164,23 +164,60 @@ def deformable_state(ctx, previous, dt):
     return positions, float(speeds), source
 
 
+def particle_radius_now():
+    """The radius the engine gave the asset's particles, or 0 where there are none (PhysX)."""
+    try:
+        import isaacsim.physics.newton as isaac_newton
+    except ImportError:
+        return 0.0
+    model = getattr(isaac_newton.acquire_stage(), "model", None)
+    if model is None or not getattr(model, "particle_count", 0):
+        return 0.0
+    import numpy as np
+
+    return float(np.asarray(model.particle_radius.numpy()).max())
+
+
+def asset_height(ctx):
+    """How tall the asset is, from its own geometry: every length in these tests is a fraction of it."""
+    from pxr import Usd, UsdGeom
+
+    from asset_checks.kit.scene import ASSET_PRIM
+
+    box = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render", "proxy"]).ComputeWorldBound(
+        ctx.scene._stage.GetPrimAtPath(ASSET_PRIM)).ComputeAlignedRange()
+    return float(box.GetMax()[2] - box.GetMin()[2])
+
+
 def lift_to(ctx, target_z):
-    """Put the asset's lowest point at target_z. NVIDIA's room helper places a rigid body by its
-    bounding box; a deformable's box is the same USD geometry, but the helper refuses an asset with
-    no rigid body, so this moves the asset's own transform. Newton and PhysX both read the geometry
-    in world space when the timeline starts, so a transform authored now is where it begins."""
-    from pxr import Gf, Usd, UsdGeom
+    """Put the asset's lowest point at target_z by moving its points, not its transform.
+
+    NVIDIA's room helper places a rigid body by its bounding box and refuses an asset with no rigid
+    body, so a deformable has to be placed here. It is placed by editing the geometry rather than by
+    authoring a transform because the two do not agree: with a transform, Newton's particles came up
+    6 cm from where the same prim sits in USD, and every measurement against the floor was wrong by
+    that much. The points are what both Newton and PhysX read, so moving them leaves one frame.
+    """
+    from pxr import Gf, Usd, UsdGeom, Vt
 
     from asset_checks.kit.scene import ASSET_PRIM
 
     prim = ctx.scene._stage.GetPrimAtPath(ASSET_PRIM)
     box = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render", "proxy"]).ComputeWorldBound(prim)
-    low = box.ComputeAlignedRange().GetMin()[2]
-    api = UsdGeom.XformCommonAPI(prim)
-    translate = api.GetXformVectors(Usd.TimeCode.Default())[0]  # the move is relative to where it is
-    api.SetTranslate(Gf.Vec3d(translate[0], translate[1], float(translate[2] + target_z - low)))
     span = box.ComputeAlignedRange()
-    return target_z - low, float(span.GetMax()[2] - span.GetMin()[2])
+    shift = float(target_z - span.GetMin()[2])
+    for child in Usd.PrimRange(prim, Usd.TraverseInstanceProxies()):
+        if not child.IsA(UsdGeom.PointBased):
+            continue
+        attr = UsdGeom.PointBased(child).GetPointsAttr()
+        points = attr.Get() if attr else None
+        if not points:
+            continue
+        to_world = UsdGeom.Xformable(child).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        to_local = to_world.GetInverse()
+        moved = [to_local.Transform(to_world.Transform(point) + Gf.Vec3d(0.0, 0.0, shift)) for point in points]
+        attr.Set(Vt.Vec3fArray([Gf.Vec3f(float(v[0]), float(v[1]), float(v[2])) for v in moved]))
+    return shift, float(span.GetMax()[2] - span.GetMin()[2])
 
 
 @test(
@@ -205,11 +242,16 @@ def lift_to(ctx, target_z):
         "settle_frames": 5,
         "asset_load_timeout": 30,
         "floor_level": 0.0,
-        "floor_margin": 0.02,      # how close the lowest particle must come to the floor
-        "tunnel_depth": 0.01,      # how far below the floor a particle may sit
-        "min_fall": 0.01,          # how far the lowest particle must drop to count as falling
-        "drop_height": 0.05,       # where the asset's lowest point starts above the floor
-        "floor_margin_of_height": 0.5,  # or this much of the asset's own height, whichever is larger
+        # Lengths are fractions of the asset's own height, so the same test suits a 2 cm bead and a
+        # 2 m sheet. Each has an absolute floor for a degenerate asset -- a flat cloth has no height.
+        "drop_height_of_height": 1.0,   # the asset starts this much of its own height above the floor
+        "drop_height_min": 0.02,
+        "floor_margin_of_height": 0.5,  # how close its lowest point must come to count as landed
+        "floor_margin_min": 0.005,
+        "tunnel_depth_of_height": 0.2,  # how far below the floor it may sit
+        "tunnel_depth_min": 0.005,
+        "min_fall_of_height": 0.2,      # how far it must drop to count as having fallen
+        "min_fall_min": 0.005,
         "rest_speed": 0.05,        # m/s, under which the asset counts as still
         "rest_hold_seconds": 0.5,
         "import_grace_seconds": 1.0,   # how long an engine may take to build its model before this gives up
@@ -219,7 +261,7 @@ def lift_to(ctx, target_z):
 async def deformable_drop(ctx):
     config = ctx.config
     physics_fps = int(config["physics_fps"])
-    floor, margin = float(config["floor_level"]), float(config["floor_margin"])
+    floor = float(config["floor_level"])
     capture_interval = max(1, physics_fps // int(config["capture_fps"]))
     total_frames = int(float(config["simulation_seconds"]) * physics_fps)
     rest_frames = max(1, int(float(config["rest_hold_seconds"]) * physics_fps))
@@ -230,12 +272,17 @@ async def deformable_drop(ctx):
     room = ctx.scene.add_room()
     room.auto_size(ctx.scene.asset)
     room.show_ground()
-    lifted, height = lift_to(ctx, floor + float(config["drop_height"]))
-    # "Reached the floor" has to scale with the asset: a deformable rests on its own thickness, and
-    # a 2 cm allowance that fits a sheet of cloth fails a banana lying on its side.
-    margin = max(margin, float(config["floor_margin_of_height"]) * height)
     ctx.scene.setup_camera_follow()  # where the runner places its camera and floor cues
 
+    # Placed before physics is set up: the engine reads the geometry when it builds its model, and
+    # anything moved after that is moved only in USD.
+    height = asset_height(ctx)
+    scaled = {name: max(float(config[f"{name}_min"]), float(config[f"{name}_of_height"]) * height)
+              for name in ("drop_height", "floor_margin", "tunnel_depth", "min_fall")}
+    lifted, height = lift_to(ctx, floor + scaled["drop_height"])
+    margin = scaled["floor_margin"]
+    ctx.log(f"[deformable] the asset is {height * 100:.1f} cm tall, so it drops from "
+            f"{scaled['drop_height'] * 100:.1f} cm and has to land within {margin * 1000:.1f} mm")
     physics = ctx.scene.add_physics(fps=physics_fps)
 
     # Where it starts, and a picture of it, both taken before the timeline runs: a capture costs app
@@ -279,11 +326,21 @@ async def deformable_drop(ctx):
             # 5 cm at 75 cm. One step of falling apart, the first reading is the start, so the offset
             # between the two frames is constant and the floor moves with it. Measured, not assumed:
             # under XPBD it comes out at zero and nothing shifts.
-            offset = 0.0 if start_z is None else low - start_z
+            # Compare the two frames at the same instant: the geometry as it stands on this step,
+            # not as it stood before play, because the engine may have moved the asset when the
+            # timeline started. Under XPBD this comes out at zero.
+            here = mesh_points(ctx.scene._stage, ASSET_PRIM)
+            offset = 0.0 if here is None else low - float(here[:, 2].min())
             floor += offset
             start_z, lowest_seen = low, low
-            ctx.log(f"[deformable] starts at {low:.4f} in {source}; the asset's own geometry says "
-                    f"{low - offset:.4f}, so the floor is taken as {floor:.4f} here")
+            # What is measured is particle centres, and a particle at rest sits one radius above
+            # the surface, so "reached the floor" has to allow for that however big the particles are.
+            radius = particle_radius_now()
+            margin += radius
+            ctx.log(f"[deformable] first step: {source} lowest {low:.4f}, the same geometry in USD "
+                    f"{'?' if here is None else round(float(here[:, 2].min()), 4)}, so the floor is "
+                    f"{floor:.4f} here; particles are {radius * 1000:.2f} mm, so landing means within "
+                    f"{margin * 1000:.1f} mm")
         lowest_seen = min(lowest_seen, low)
         deepest_below = max(deepest_below, floor - low)
         previous = positions
@@ -315,9 +372,9 @@ async def deformable_drop(ctx):
     ctx.add_metric("deformable_drop_settled_s", -1.0 if settled_at is None else round(settled_at, 3))
     ctx.add_metric("deformable_drop_seconds", round(frames / physics_fps, 3))
 
-    if fell < float(config["min_fall"]):
+    if fell < scaled["min_fall"]:
         failure = f"never fell: its lowest point moved {fell * 1000:.1f} mm"
-    elif deepest_below > float(config["tunnel_depth"]):
+    elif deepest_below > scaled["tunnel_depth"]:
         failure = f"went through the floor: {deepest_below * 1000:.1f} mm below it"
     elif lowest_seen > floor + margin:
         failure = f"never reached the floor: stopped {(lowest_seen - floor) * 1000:.1f} mm above it"

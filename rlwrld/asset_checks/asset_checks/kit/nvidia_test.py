@@ -86,7 +86,7 @@ class Recorder:
 
 
 def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace=None, test_config=None, camera_mode="fixed",
-             visual_cues=True, solver="physx", solver_settings=None):
+             visual_cues=True, solver="physx", solver_settings=None, particle_radius=None):
     from simready_benchmark_engine_kit.kit_engine_proxy import BoundsResult, KitEngineProxy
     from simready_benchmark_engine_kit.scene_handle import KitSceneHandle
 
@@ -106,7 +106,8 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
 
             def play_counted():  # the profile is authored before every play, so a rebuilt gripper gets it too
                 if Scene.solver is None:  # the scene exists by the first play; a rebuild keeps the schema
-                    Scene.solver = scene_mod.select_solver(self._stage, engine, solver, solver_settings)
+                    Scene.solver = scene_mod.select_solver(self._stage, engine, solver, solver_settings,
+                                                          particle_radius)
                 if contact_profile is not None:
                     Scene.contact_applied.append(contact.apply(self._stage, contact_profile))
                 Scene.plays += 1
@@ -215,6 +216,7 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
 
         solver_seen = []  # what MuJoCo compiled, read on the first step after each play (Newton)
         notes = []  # what this engine did to the asset that its USD did not ask for
+        particles = None  # the radius the asset's particles were given, if it has any
         stepped_plays = 0  # plays whose first step re-armed engine-kit's pause
         physics_dumps = []  # contact.dump() of the same moment, when the run asks for it
         measured_plays = 0
@@ -239,6 +241,7 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
                 Proxy.solver_seen.append(contact.measure())
                 if not Proxy.notes:  # the model exists once the first play has built it
                     Proxy.notes = reading.stack_notes(self._scene_handle._stage, engine, scene_mod.ASSET_PRIM)
+                    Proxy.particles = scene_mod.size_particles(particle_radius)  # soft contacts, and a check
                 if dump_dir is not None:
                     Proxy.physics_dumps.append(contact.dump(f"{dump_dir}/physics_play{Scene.plays}.npz"))
 
@@ -277,7 +280,7 @@ async def run(req):
     trace = contact.Trace(req["trace_contacts"]) if engine == "newton" and req.get("trace_contacts") else None
     Scene, Proxy = _classes(engine, asset, recorder, profile, out if req.get("dump_physics") else None, trace,
                             config, req.get("camera", "fixed"), req.get("visual_cues", True), req["solver"],
-                            req.get("solver_settings"))
+                            req.get("solver_settings"), req.get("particle_radius"))
 
     stage = await scene_mod.new_stage()
     handle = Scene(stage)
@@ -312,6 +315,7 @@ async def run(req):
         "camera": Scene.camera,
         "solver": Scene.solver,
         "notes": Proxy.notes,
+        "particles": Proxy.particles,
         "look": Scene.look,
         "contact_trace": trace.rows if trace is not None else None,
         "engine_observed": recorder.engine_observed, "pose_source": sorted(set(recorder.traj["source"])),
