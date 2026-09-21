@@ -204,7 +204,8 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
         solver = newton.solvers.SolverXPBD(model, iterations=iterations, soft_body_relaxation=relaxation)
     return (model, solver, pipeline, radius, height, start_z, thickness, sim_path,
             (footprint[0] * press_shape.PLATE_FOOTPRINT,
-             footprint[1] * press_shape.PLATE_FOOTPRINT, thickness / 2.0), margin, plate_shape)
+             footprint[1] * press_shape.PLATE_FOOTPRINT, thickness / 2.0), margin, plate_shape,
+            centre)
 
 
 def main():
@@ -225,7 +226,7 @@ def main():
 
     substeps = args.substeps or SUBSTEPS[args.solver]
     (model, solver, pipeline, radius, height, start_z, thickness, sim_path, plate_half,
-     margin, plate_shape) = build(
+     margin, plate_shape, plate_centre) = build(
         args.asset, args.solver, args.iterations, args.radius, args.margin,
         not args.no_full_surface, substeps, args.fps)
     frames = int(args.seconds * args.fps)
@@ -235,12 +236,13 @@ def main():
     if args.usd:
         tape = recording.Recording(args.usd, int(args.fps), frames,
                                    np.asarray(model.particle_q.numpy()), solver_elements(model),
-                                   asset=args.asset, sim_prim_path=sim_path, plate=plate_half)
+                                   asset=args.asset, sim_prim_path=sim_path, plate=plate_half,
+                                   plate_centre=plate_centre)
 
     state_0, state_1, control = model.state(), model.state(), model.control()
     contacts = pipeline.contacts()
     dt = 1.0 / (args.fps * substeps)
-    plate_xy = np.asarray(state_0.body_q.numpy())[PLATE_BODY][:2]
+    plate_xy = np.asarray(state_0.body_q.numpy())[PLATE_BODY][:2]   # until the asset settles
 
     def place_plate(state, z, speed):
         """Put the kinematic plate where the script says it is, and tell the solver how fast it
@@ -311,6 +313,10 @@ def main():
             start_top = lowest_top = top_now
             floor_now = float(q[:, 2].min())
             settled_height = top_now - floor_now
+            # The asset has stopped moving; press where it actually is.
+            plate_xy = np.asarray(press_shape.plate_over(q))
+            if tape is not None:
+                tape.plate_centre = (float(plate_xy[0]), float(plate_xy[1]))
             depth = press_shape.press_depth(settled_height)
             bottom_z = top_now - depth + thickness / 2.0
             print(f"[press] settled to {top_now:.4f} ({settled_height * 1000:.1f} mm tall); the "

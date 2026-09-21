@@ -207,6 +207,7 @@ if args.usd:
     import recording
     tape = recording.Recording(args.usd, int(args.fps), frames, points, elements,
                                asset=args.visual_asset, sim_prim_path=str(body.GetPath()),
+                               plate_centre=centre,
                                plate=(footprint[0] * press_shape.PLATE_FOOTPRINT,
                                       footprint[1] * press_shape.PLATE_FOOTPRINT, thickness / 2.0))
 
@@ -229,6 +230,9 @@ for frame in range(frames):
         start_top = lowest_top = top_now
         floor_now = float(q[:, 2].min())
         settled_height = top_now - floor_now
+        centre = press_shape.plate_over(q)      # press where the asset now lies, not where it was
+        if tape is not None:
+            tape.plate_centre = (float(centre[0]), float(centre[1]))
         depth = press_shape.press_depth(settled_height)
         bottom_z = top_now - depth + thickness / 2.0
         print(f"[physx] settled to {top_now:.4f} ({settled_height * 1000:.1f} mm tall); the plate "
