@@ -53,6 +53,9 @@ settings.set("/rtx/pathtracing/spp", 1)
 # so it follows whichever is left visible.
 HIDDEN = {"sim": "/root/visual", "visual": "/root/sim"}
 
+GROUND_SPAN = 50.0   # a prim wider than this is scenery, not the subject
+ASSET_GROUND = "/root/ground"     # the recording's own floor; the room replaces it
+
 out = pathlib.Path(args.out_dir)
 out.mkdir(parents=True, exist_ok=True)
 omni.usd.get_context().open_stage(args.stage)
@@ -80,8 +83,6 @@ stage_fps = stage.GetTimeCodesPerSecond() or 60.0
 print(f"[render] {args.stage}: time {start}..{end} at {stage_fps} tcps")
 
 
-GROUND_SPAN = 50.0   # a prim wider than this is scenery, not the subject
-ASSET_GROUND = "/root/ground"     # the recording's own floor; the room replaces it
 
 
 def moving_prims(times):
