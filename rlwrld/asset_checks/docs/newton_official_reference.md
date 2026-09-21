@@ -127,3 +127,56 @@ of height before any plate moves. A press that takes its "start height" from fra
 that settling as compression it never caused -- and worse, it aims the plate at a height the
 asset no longer has, so the plate stops in the air and presses nothing. The press now measures
 at the end of its settle phase and derives the plate's depth from that.
+
+
+## A correction: Newton 1.2.1 does simulate cloth
+
+An earlier version of this document, and of the code, treated "Newton 1.2.1 imports no particles
+from a `PhysicsSurfaceDeformableSimAPI` mesh" as an engine limit. That was a guess and it was
+wrong. Newton 1.2.1 ships **eight** cloth examples and has `ModelBuilder.add_cloth_mesh`; two of
+those examples (`example_cloth_bending.py`, `example_cloth_franka.py`) open a USD stage and hand
+the mesh's points and indices straight to it. What 1.2.1 lacks is one importer path -- its
+`import_usd.py` contains no reference to a surface deformable at all -- and an importer gap is not
+a capability boundary.
+
+`asset_checks/native/usd_deformable.py` does what those examples do, with the conversion taken
+verbatim from Newton 1.5.0's own `import_usd_deformable_cloth.py`:
+
+    tri_ke  = stretchStiffness * thickness       # membrane stiffness ~ E*h
+    edge_ke = bendStiffness * thickness**3       # bending ~ E*h^3
+    tri_ka  = 0                                  # the proposal authors no Poisson term
+    density = volumetric density * thickness     # Newton's cloth density is areal
+    particle_radius = 0.5 * thickness            # the shell's physical half-thickness
+    shearStiffness: dropped -- Newton's isotropic membrane shares one modulus with stretch
+
+Verified by running both paths under 1.5.0 on the same asset:
+
+| | 1.5.0's importer | ours |
+|---|---|---|
+| particles / triangles / edges | 441 / 800 / 1240 | 441 / 800 / 1240 |
+| `tri_materials[0]` | [10, 0, 10, 0, 0] | [10, 0, 10, 0, 0] |
+| bending stiffness | 1.0000002e-12 | 1.0000002e-12 |
+| particle radius / total mass | 0.000500 / 0.008000 | 0.000500 / 0.008000 |
+
+It runs only where the importer produced nothing, so an importer that works always wins.
+
+**PhysX takes the surface quantities one for one** (`omniphysics:surfaceStretchStiffness`,
+`surfaceShearStiffness`, `surfaceBendStiffness`, `surfaceThickness`) and therefore honours the
+shearStiffness Newton drops. That is a real difference between the engines on this asset, and it
+belongs in the results rather than in a footnote.
+
+## What comes from the asset, and what does not
+
+An audit of what actually reached the solver found four places where it was not the asset:
+
+| | was | now |
+|---|---|---|
+| particle radius | Newton's importer ignores `newton:particleRadius`; we derived 1.39 mm | the asset's 0.76 mm, read back from the builder after the geometry is in |
+| friction | per solver, from two examples: VBD 0.3, XPBD 1.0 | the asset's if declared, else one value for every engine and solver |
+| shape materials | `fill_()` across every shape | only the fixtures the experiment adds |
+| PhysX friction | `deformableUtils`' own default, 0.25, against Newton's 0.5 | the same single fallback both read |
+
+Every run now prints which numbers came from the asset, with the prim and attribute that carried
+each, and which are ours with the reason. What is legitimately ours is only what the USD has no
+way to express: the experiment's fixtures, the solver's numerics, and a stated fallback where the
+asset is silent.
