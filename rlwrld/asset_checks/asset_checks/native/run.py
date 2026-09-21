@@ -17,12 +17,14 @@ against 6.1.0. That is also why a result is only meaningful with all four names 
 """
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 import sys
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 BENCH = pathlib.Path("/home/wongyun/Workspace/Research/Robotics/simready-bench")
 
 # Environment name -> (venv tag, engine, solver). The names are the ones in asset_checks.envs;
@@ -46,11 +48,36 @@ SCRIPTS = {("newton", "drop"): "newton_drop.py", ("newton", "press"): "newton_pr
 # a PhysX cell runs a converted copy of the asset. `to_physx.py` makes it from the same
 # tetrahedra and the same declared material; anything else would compare the conversion.
 def physx_asset(asset):
+    """The PhysX copy of the asset, but only once it has been shown to still be the asset.
+
+    Every error in the conversion arrives disguised as an engine difference -- a wrong modulus or
+    a dropped tetrahedron would read as "PhysX behaves differently" and nothing downstream could
+    tell. `physx_parity` re-derives from both USDs what the conversion claims to have carried, and
+    it shares no code with the conversion, so it is a measurement against a statement rather than
+    a second copy of the same statement. A cell whose asset failed it must not run at all: a
+    number from it would look exactly like a number from a good one.
+    """
     converted = pathlib.Path(asset).with_name(pathlib.Path(asset).stem + "_physx.usda")
     if not converted.exists():
         raise SystemExit(f"{asset} has no PhysX counterpart at {converted}. Make one with:\n"
                          f"  {BENCH}/isaac-run isaac610 {HERE / 'to_physx.py'} {asset} {converted}")
+    # Run in a venv rather than imported: this runner is plain Python and `pxr` lives in the
+    # Isaac environments, the same reason every cell is a subprocess.
+    check = subprocess.run([str(BENCH / ".venv-isaac610" / "bin" / "python"),
+                            str(HERE / "physx_parity.py"), str(asset), str(converted)],
+                           capture_output=True, text=True, env=dict(os.environ, PYTHONNOUSERSITE="1"))
+    for line in check.stdout.splitlines():
+        if line.startswith("[parity]"):
+            print(f"[run] {line}", flush=True)
+    if check.returncode != 0:
+        said = [l for l in check.stdout.splitlines() if "MISMATCH" in l] or [check.stderr.strip()[-400:]]
+        raise ParityFailure("the PhysX copy is not the same asset as the one being evaluated: "
+                            + "; ".join(s.partition("MISMATCH: ")[2] or s for s in said))
     return str(converted)
+
+
+class ParityFailure(RuntimeError):
+    """The PhysX copy differs from the asset, so its results would not be about the asset."""
 
 
 def cell_command(env, experiment, asset, usd, seconds):
@@ -99,6 +126,12 @@ def run(command, log_path, timeout):
 # What each experiment is worth reading, and in what order. The runner does not know what these
 # mean -- the experiment prints them and this only lays them out -- but a table nobody can read
 # is a table nobody checks.
+# A 5 cm drop takes 0.101 s. At real speed that is three frames and nobody sees it happen, which
+# is why the videos looked fast-forwarded: they were not, the event is simply that short. Every
+# simulated frame is captured and played back this many times slower, and the factor is burned
+# into the file name so no one has to remember it.
+PLAYBACK_SLOWDOWN = 4.0
+
 COLUMNS = {
     "drop": [("verdict", "verdict"), ("fell_mm", "fell (mm)"), ("thickness_mm", "settled (mm)"),
              ("height_kept", "height kept"),
@@ -143,7 +176,9 @@ def main():
     ap.add_argument("--seconds", type=float, default=2.0)
     ap.add_argument("--press-seconds", type=float, default=4.0)
     ap.add_argument("--size", type=int, default=768)
-    ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--fps", type=int, default=60, help="frames captured per simulated second")
+    ap.add_argument("--slowdown", type=float, default=PLAYBACK_SLOWDOWN,
+                    help="how many times slower than real time the videos play")
     ap.add_argument("--timeout", type=int, default=1200)
     ap.add_argument("--no-render", action="store_true")
     args = ap.parse_args()
@@ -165,7 +200,12 @@ def main():
             cell = f"{pathlib.Path(asset).stem}__{env}__{experiment}"
             usd = out / "usd" / f"{cell}.usda"
             seconds = args.press_seconds if experiment == "press" else args.seconds
-            command, refusal = cell_command(env, experiment, asset, usd, seconds)
+            try:
+                command, refusal = cell_command(env, experiment, asset, usd, seconds)
+            except ParityFailure as failure:
+                print(f"[run] {cell}: REFUSED -- {failure}", flush=True)
+                results[cell] = {"env": env, "experiment": experiment, "error": str(failure)}
+                continue
             if refusal:
                 print(f"[run] {cell}: skipped -- {refusal}", flush=True)
                 results[cell] = {"env": env, "experiment": experiment, "skipped": refusal}
@@ -205,8 +245,10 @@ def main():
                 if not written:
                     print(f"[run] {cell}: no {mesh} frames (exit {code})", flush=True)
                     continue
-                video = out / "videos" / f"{cell}__{mesh}.mp4"
-                subprocess.call(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(args.fps),
+                slow = f"{args.slowdown:g}x" if args.slowdown != 1.0 else "realtime"
+                video = out / "videos" / f"{cell}__{mesh}__{slow}slower.mp4"
+                subprocess.call(["ffmpeg", "-y", "-loglevel", "error",
+                                 "-framerate", str(args.fps / args.slowdown),
                                  "-i", str(frames / "frame_%05d.png"), "-c:v", "libx264",
                                  "-pix_fmt", "yuv420p", "-crf", "20", str(video)])
                 if video.exists():

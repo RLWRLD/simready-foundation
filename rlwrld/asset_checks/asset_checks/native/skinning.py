@@ -16,6 +16,10 @@ description against wherever its element is now. Nothing here knows what the ass
 import numpy as np
 
 TET, TRI = 4, 3
+# How far a barycentric weight may go negative and still count as on the element rather than off
+# it. Barycentric weights are dimensionless and sum to one, so this is a fraction of the element
+# itself and needs no length scale.
+INSIDE_TOLERANCE = 1e-6
 
 
 def _as_elements(elements):
@@ -125,16 +129,21 @@ def bind(render_points, node_points, elements, candidates=32):
             w, off = _tri_weights(render_points[pending], corners)
         # How well the vertex sits in this element: inside means every weight is 0 or more. For a
         # triangle the offset is expected, so only the in-plane weights decide.
+        # A render vertex usually sits *on* the simulated surface, where one barycentric weight
+        # is zero and floating point puts it a hair below. Counting those as outside made 12118
+        # of 17186 look misplaced on two meshes whose bounding boxes agree to a hundredth of a
+        # millimetre. The tolerance is relative to the element, so it means the same thing at any
+        # scale.
         score = w.min(axis=1)
         better = score > best[pending]
         chosen[rows[better]] = candidate[better]
         weights[rows[better]] = w[better]
         offsets[rows[better]] = off[better]
         best[rows[better]] = score[better]
-        settled[rows[score >= 0.0]] = True
+        settled[rows[score >= -INSIDE_TOLERANCE]] = True
 
     # Whatever stayed outside every candidate rides its nearest element instead of being dropped.
-    outside = best < 0.0
+    outside = best < -INSIDE_TOLERANCE
     if outside.any():
         clamped = np.clip(weights[outside], 0.0, None)
         weights[outside] = clamped / np.maximum(clamped.sum(axis=1, keepdims=True), 1e-12)
