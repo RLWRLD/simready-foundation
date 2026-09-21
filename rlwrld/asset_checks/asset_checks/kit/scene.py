@@ -196,6 +196,23 @@ def _schema_registered(identifier) -> bool:
 
 
 DEFORMABLE_SUBSTEPS = 5  # what Newton's own deformable examples use; Isaac's default is 1
+CONTACT_MARGIN_OF_RADIUS = 4.0  # Newton's soft-rigid example creates contacts this far out
+
+
+def _set_contact_margin(margin):
+    """How far out the collision pipeline looks for a particle-surface contact.
+
+    Isaac fixes it at 1 cm. A particle larger than that -- a 2 m cloth's vertices are 4 cm -- is
+    already through the surface by the time a contact would be created, and the asset falls through
+    a floor it should rest on. Newton's own example scales it with the radius, which is what this
+    does; the pipeline is built from this config during initialisation."""
+    import isaacsim.physics.newton as isaac_newton
+
+    cfg = isaac_newton.acquire_stage().cfg
+    was = getattr(cfg, "soft_contact_margin", None)
+    cfg.soft_contact_margin = float(margin)
+    PARTICLE_SIZING["soft_contact_margin"] = {"margin_m": round(float(margin), 6), "was_m": was}
+    return float(margin)
 
 
 def _set_substeps(substeps):
@@ -242,7 +259,9 @@ def _register_mujoco_attributes_too():
         except Exception:  # noqa: BLE001 - already registered, which is what we want
             pass
         out = original(self, *args, **kwargs)
-        size_particles_on(self, _RADIUS["value"])
+        radius = size_particles_on(self, _RADIUS["value"])
+        if radius:
+            _set_contact_margin(radius * CONTACT_MARGIN_OF_RADIUS)
         return out
 
     newton.ModelBuilder.add_usd = add_usd
