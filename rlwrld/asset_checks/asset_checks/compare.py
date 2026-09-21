@@ -47,9 +47,11 @@ def label(path, width, env, result):
     return img.size[1]
 
 
-def video_of(ffmpeg, run_dir, result):
-    """The run's video, or one encoded here from its captured frames when the test never wrote one."""
-    videos = [m["filename"] for m in (result or {}).get("media") or [] if m.get("kind") == "video"]
+def video_of(ffmpeg, run_dir, result, role=None):
+    """The run's video -- the one with `role` when asked, else the first -- or one encoded here
+    from its captured frames when the test never wrote one."""
+    videos = [m["filename"] for m in (result or {}).get("media") or []
+              if m.get("kind") == "video" and (role is None or m.get("role") == role)]
     if videos:
         return run_dir / videos[0]
     frames = sorted(run_dir / m["filename"] for m in (result or {}).get("media") or [] if m.get("kind") == "image")
@@ -79,6 +81,9 @@ def main():
     ap.add_argument("--panel-px", type=int, default=640)
     ap.add_argument("--envs", default=",".join(envs.ENVIRONMENTS),
                     help="which environments get a panel, in order (default: all of them)")
+    ap.add_argument("--role", default=None,
+                    help="which of a cell's videos to put in its panel, by media role, e.g. visual or collision "
+                         "(default: the first video the cell lists); the strip is named after it")
     args = ap.parse_args()
     ffmpeg, root, px = imageio_ffmpeg.get_ffmpeg_exe(), pathlib.Path(args.run_dir), args.panel_px
     wanted = [e.strip() for e in args.envs.split(",") if e.strip()]
@@ -96,7 +101,7 @@ def main():
         panels = []
         for env in wanted:
             result = json.loads(by_env[env].read_text()) if env in by_env else None
-            panels.append((env, result, video_of(ffmpeg, by_env[env].parent, result) if env in by_env else None))
+            panels.append((env, result, video_of(ffmpeg, by_env[env].parent, result, args.role) if env in by_env else None))
         length = max([duration(ffmpeg, v) for _, _, v in panels if v] or [2.0])
         with tempfile.TemporaryDirectory() as tmp:
             inputs, chains = [], []
@@ -115,7 +120,7 @@ def main():
             joined = (f"[p0]null[out]" if len(panels) == 1 else
                       "".join(f"[p{i}]" for i in range(len(panels))) + f"hstack={len(panels)}[out]")
             graph = ";".join(chains) + ";" + joined
-            target = out_dir / f"{asset}__{test}.mp4"
+            target = out_dir / (f"{asset}__{test}__{args.role}.mp4" if args.role else f"{asset}__{test}.mp4")
             subprocess.run([ffmpeg, "-v", "error", "-y", *inputs, "-filter_complex", graph, "-map", "[out]",
                             "-t", f"{length:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", str(target)], check=True)
             written += 1

@@ -14,14 +14,12 @@ subclasses:
     one records which simulation actually runs.
 """
 import math
+import pathlib
 
 TESTS = {
     "drop": ("simready_benchmark_kit_suite.fet003_physics.ground_drop", "ground_drop"),
     "slope": ("simready_benchmark_kit_suite.fet003_physics.slope_drop", "slope_drop"),
     "grasp": ("simready_benchmark_kit_suite.fet005_grasp.grasp_and_lift", "grasp_and_lift"),
-    # ours, because NVIDIA's tests all refuse an asset without UsdPhysics.RigidBodyAPI
-    "deformable_drop": ("asset_checks.experiments.deformable_drop", "deformable_drop"),
-    "deformable_press": ("asset_checks.experiments.deformable_press", "deformable_press"),
 }
 
 
@@ -49,7 +47,8 @@ class Recorder:
         self.engine_observed = None
         self.bodies = None
         self.traj = {"t": [], "timeline_t": [], "sim_t": [], "z_min": [], "lowest_vertex_z": [], "lin": [], "ang": [],
-                     "tilt_deg": [], "source": []}
+                     "tilt_deg": [], "source": [], "pose": {}, "pose_from": {}}
+        self.fixtures = []
 
     def sample(self, stage):
         from asset_checks.kit import reading
@@ -82,6 +81,27 @@ class Recorder:
         t["ang"].append(round(max(reading.rotation_angle(self.prev[b], mats[b]) for b in self.bodies) / self.dt, 5))
         t["tilt_deg"].append(round(max(reading.rotation_angle(self.init[b], mats[b]) for b in self.bodies) * 180.0 / math.pi, 2))
         t["source"].append(source)
+        # The bodies' world matrices themselves, one row-major 4x4 per body per step. Everything
+        # above is a reading taken from these; keeping them is what lets the run be drawn again
+        # afterwards -- the asset's own textured mesh and its declared collider, placed where the
+        # engine put them -- by the same renderer a deformable's recording goes through.
+        # The asset's root comes too (a test may load the asset lifted or turned), and every fixture
+        # the test built around it -- a slope, a gripper's pads -- read from USD where it is not a
+        # rigid body. Bodies are `mats`, already read the right way for this engine.
+        # Fixtures are looked for every step: a grasp builds its gripper after the asset has
+        # settled, and a series that starts late says at which step it did.
+        from asset_checks.kit.scene import SCENERY
+
+        for path in reading.fixture_gprims(stage, ASSET_PRIM, SCENERY):
+            if path not in self.fixtures:
+                self.fixtures.append(path)
+        placed = dict(mats)
+        placed.update(reading.matrices(stage, [ASSET_PRIM] + self.fixtures, self.engine))
+        step = len(t["t"]) - 1
+        for path, rows in placed.items():
+            if path not in t["pose"]:
+                t["pose_from"][path] = step
+            t["pose"].setdefault(path, []).append([round(float(v), 6) for row in rows for v in row])
         self.prev = mats
 
 
@@ -320,7 +340,20 @@ async def run(req):
         "contact_trace": trace.rows if trace is not None else None,
         "engine_observed": recorder.engine_observed, "pose_source": sorted(set(recorder.traj["source"])),
         "rigid_bodies": recorder.bodies, "trajectory": recorder.traj,
+        "asset_prim": scene_mod.ASSET_PRIM,
     }
+    fixtures = getattr(recorder, "fixtures", None) or []
+    if fixtures:
+        # Their geometry, so the run can be drawn again with the slope and the gripper in it. The
+        # test has already run and been judged by here; a failure to save its furniture is recorded
+        # as the reason the run cannot be drawn, never as a failure of the test.
+        try:
+            from asset_checks.kit import reading
+
+            layer = pathlib.Path(out) / "fixtures.usda"
+            result["fixtures"] = {"layer": layer.name, "prims": reading.export_fixtures(handle._stage, fixtures, layer)}
+        except Exception:  # noqa: BLE001
+            result["fixtures"] = {"error": traceback.format_exc()}
     if req["experiment"] in ("drop", "slope") and recorder.traj["t"]:
         # NVIDIA's slope (45 deg) expects the asset to keep sliding: PR #2's rest criterion belongs to its
         # own walled 15 deg slope, so on this slope only its tunnel / explode checks apply

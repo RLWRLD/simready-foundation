@@ -27,7 +27,7 @@ import time
 import agreement
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from asset_checks import envs as rigid_envs  # noqa: E402
+from asset_checks import envs as rigid_envs, video  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -133,8 +133,6 @@ def run(command, log_path, timeout):
 # is why the videos looked fast-forwarded: they were not, the event is simply that short. Every
 # simulated frame is captured and played back this many times slower, and the factor is burned
 # into the file name so no one has to remember it.
-PLAYBACK_SLOWDOWN = 4.0
-
 COLUMNS = {
     "drop": [("verdict", "verdict"), ("fell_mm", "fell (mm)"), ("thickness_mm", "settled (mm)"),
              ("height_kept", "height kept"),
@@ -149,8 +147,9 @@ COLUMNS = {
 def summary(asset, results):
     """One table per experiment, plus where each video is."""
     lines = [f"# {pathlib.Path(asset).name}", "",
-             "Two videos per cell, from one run: `__sim` is the tetrahedral surface the solver",
-             "moved, `__visual` is the asset's own textured mesh carried along by it.", ""]
+             "Two videos per cell, from one run: `__collision` is the geometry the solver moved and",
+             "collided with, `__visual` is the asset's own textured mesh carried along by it. The",
+             "side-by-side strips are in `compare/`.", ""]
     for experiment, columns in COLUMNS.items():
         rows = {c: r for c, r in results.items() if r.get("experiment") == experiment}
         if not rows:
@@ -173,52 +172,6 @@ def summary(asset, results):
     return "\n".join(lines)
 
 
-def comparison_videos(out, asset, results, wanted, panel_px):
-    """The rigid runs' own side-by-side strip, made by the rigid runs' own compositor.
-
-    `asset_checks.compare` reads `<root>/<asset>/<env>/<test>/result.json` and writes one video per
-    asset and test with a panel per environment, each under a dark band naming the environment and
-    its verdict. It is the same code and the same layout that made the 2026-09-19 rigid videos, so
-    a deformable strip sits beside a rigid one without the eye having to re-orient. All this does
-    is lay out what it expects: a directory per cell, the cell's video in it, and the verdict in
-    the shape it reads. One strip for the solver's own surface and one for the asset's render mesh.
-    """
-    stem = pathlib.Path(asset).stem
-    made = []
-    for mesh in ("sim", "visual"):
-        root = out / f"panels_{mesh}"
-        cells = 0
-        for row in results.values():
-            cell_dir = root / f"{stem}_{mesh}" / row["env"] / row["experiment"]
-            cell_dir.mkdir(parents=True, exist_ok=True)
-            name = (row.get("videos") or {}).get(mesh)
-            media = []
-            if name:
-                link = cell_dir / name
-                if not link.exists():
-                    link.symlink_to(os.path.relpath(out / "videos" / name, cell_dir))
-                media = [{"kind": "video", "filename": name}]
-                cells += 1
-            # `compare.label` colours on "pass"/"fail" and prints the message after FAIL, so the
-            # experiment's own word for what happened is what a viewer reads.
-            said = row.get("verdict") or row.get("skipped") or row.get("error") or row.get("diverged")
-            (cell_dir / "result.json").write_text(json.dumps(
-                {"verdict": "pass" if row.get("verdict") == "pass" else "fail",
-                 "message": said or "no result", "media": media}, indent=2))
-        if not cells:
-            continue
-        code = subprocess.call([str(BENCH / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare",
-                                str(root), "--envs", ",".join(wanted), "--panel-px", str(panel_px)],
-                               env={**os.environ, "PYTHONPATH": str(HERE.parents[1])})
-        strips = sorted((root / "compare").glob("*.mp4"))
-        for video in strips:
-            target = out / "videos" / f"{video.stem.replace(f'{stem}_{mesh}__', f'{stem}__')}__{mesh}__compare.mp4"
-            shutil.copyfile(video, target)
-            made.append(target.name)
-        print(f"[run] compare({mesh}): exit {code}, {len(strips)} strip(s)", flush=True)
-    return made
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("asset")
@@ -227,18 +180,13 @@ def main():
     ap.add_argument("--experiments", default=",".join(EXPERIMENTS))
     ap.add_argument("--seconds", type=float, default=2.0)
     ap.add_argument("--press-seconds", type=float, default=4.0)
-    ap.add_argument("--size", type=int, default=768)
-    ap.add_argument("--fps", type=int, default=60, help="frames captured per simulated second")
-    ap.add_argument("--slowdown", type=float, default=PLAYBACK_SLOWDOWN,
-                    help="how many times slower than real time the videos play")
     ap.add_argument("--timeout", type=int, default=1200)
     ap.add_argument("--no-render", action="store_true")
     args = ap.parse_args()
 
     asset = str(pathlib.Path(args.asset).resolve())
     out = pathlib.Path(args.out).resolve()
-    for folder in ("logs", "usd", "frames", "videos"):
-        (out / folder).mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
     envs = [e.strip() for e in args.envs.split(",") if e.strip()]
     unknown = [e for e in envs if e not in ENVIRONMENTS]
     if unknown:
@@ -247,69 +195,63 @@ def main():
     experiments = [e.strip() for e in args.experiments.split(",") if e.strip()]
 
     results = {}
+    stem = pathlib.Path(asset).stem
     for env in envs:
         for experiment in experiments:
-            cell = f"{pathlib.Path(asset).stem}__{env}__{experiment}"
-            usd = out / "usd" / f"{cell}.usda"
+            cell = f"{stem}__{env}__{experiment}"
+            # One directory per cell -- <out>/<asset>/<env>/<experiment>/ -- the shape the rigid
+            # runs write and `asset_checks.compare` reads. The recording, the logs, the two videos
+            # and a result.json all live in it.
+            cell_dir = out / stem / env / experiment
+            cell_dir.mkdir(parents=True, exist_ok=True)
+            usd = cell_dir / "recording.usda"
             seconds = args.press_seconds if experiment == "press" else args.seconds
+            row = {"env": env, "experiment": experiment}
             try:
                 command, refusal = cell_command(env, experiment, asset, usd, seconds)
             except ParityFailure as failure:
                 print(f"[run] {cell}: REFUSED -- {failure}", flush=True)
-                results[cell] = {"env": env, "experiment": experiment, "error": str(failure)}
-                continue
-            if refusal:
-                print(f"[run] {cell}: skipped -- {refusal}", flush=True)
-                results[cell] = {"env": env, "experiment": experiment, "skipped": refusal}
-                continue
-            print(f"[run] {cell}", flush=True)
-            log_path = out / "logs" / f"{cell}.log"
-            try:
-                code, seconds_taken = run(command, log_path, args.timeout)
-            except subprocess.TimeoutExpired:
-                results[cell] = {"env": env, "experiment": experiment, "error": "timed out"}
-                print(f"[run] {cell}: TIMED OUT", flush=True)
-                continue
-            found = read_result(log_path.read_text(errors="replace"))
-            results[cell] = {"env": env, "experiment": experiment, "exit": code,
-                             "seconds": seconds_taken, "usd": usd.name if usd.exists() else None,
-                             **found}
-            print(f"[run] {cell}: exit {code} in {seconds_taken}s -- "
-                  f"{found or 'nothing reported'}", flush=True)
-
-            if args.no_render or not usd.exists():
-                continue
-            # One run, two videos. The recording holds both meshes, so these are the same physics
-            # photographed twice: `sim` is the tetrahedral surface the solver actually moved, and
-            # `visual` is the asset's own textured mesh carried along by it. They line up frame
-            # for frame, because they came out of the same numbers.
-            results[cell]["videos"] = {}
-            for mesh in ("sim", "visual"):
-                frames = out / "frames" / f"{cell}__{mesh}"
-                render = [str(BENCH / "isaac-run"), "isaac610", str(HERE / "render_usd.py"), str(usd),
-                          str(frames), "--fps", str(args.fps), "--size", str(args.size),
-                          "--show", mesh]
-                try:
-                    code, _ = run(render, out / "logs" / f"{cell}.{mesh}.render.log", args.timeout)
-                except subprocess.TimeoutExpired:
-                    code = -1
-                written = sorted(frames.glob("frame_*.png"))
-                if not written:
-                    print(f"[run] {cell}: no {mesh} frames (exit {code})", flush=True)
-                    continue
-                slow = f"{args.slowdown:g}x" if args.slowdown != 1.0 else "realtime"
-                video = out / "videos" / f"{cell}__{mesh}__{slow}slower.mp4"
-                subprocess.call(["ffmpeg", "-y", "-loglevel", "error",
-                                 "-framerate", str(args.fps / args.slowdown),
-                                 "-i", str(frames / "frame_%05d.png"), "-c:v", "libx264",
-                                 "-pix_fmt", "yuv420p", "-crf", "20", str(video)])
-                if video.exists():
-                    results[cell]["videos"][mesh] = video.name
-                print(f"[run] {cell}: {len(written)} {mesh} frames -> {video.name}", flush=True)
+                row["error"] = str(failure)
+            else:
+                if refusal:
+                    print(f"[run] {cell}: skipped -- {refusal}", flush=True)
+                    row["skipped"] = refusal
+                else:
+                    print(f"[run] {cell}", flush=True)
+                    log_path = cell_dir / "run.log"
+                    try:
+                        code, seconds_taken = run(command, log_path, args.timeout)
+                    except subprocess.TimeoutExpired:
+                        row["error"] = "timed out"
+                        print(f"[run] {cell}: TIMED OUT", flush=True)
+                    else:
+                        found = read_result(log_path.read_text(errors="replace"))
+                        row.update({"exit": code, "seconds": seconds_taken,
+                                    "usd": usd.name if usd.exists() else None, **found})
+                        print(f"[run] {cell}: exit {code} in {seconds_taken}s -- "
+                              f"{found or 'nothing reported'}", flush=True)
+            results[cell] = row
+            row["videos"] = {}
+            if not args.no_render and usd.exists():
+                # One run, two videos: the geometry the solver moved and collided with, and the
+                # asset's own textured mesh carried along by it. Frame for frame the same numbers.
+                for view, name, frames in video.draw(BENCH, cell_dir, usd, experiment, args.timeout, ""):
+                    row["videos"][view] = name
+                    print(f"[run] {cell}: {frames} {view} frames -> {name}", flush=True)
+            # What `asset_checks.compare` reads: a verdict it can colour, the experiment's own word
+            # for what happened after FAIL, and the videos by role.
+            said = row.get("verdict") or row.get("skipped") or row.get("error") or row.get("diverged")
+            (cell_dir / "result.json").write_text(json.dumps(
+                {**row, "verdict": "pass" if row.get("verdict") == "pass" else "fail",
+                 "message": said or "no result",
+                 "media": [{"filename": name, "kind": "video", "role": view}
+                           for view, name in row["videos"].items()]}, indent=1))
 
     if not args.no_render:
-        for name in comparison_videos(out, asset, results, envs, args.size):
-            print(f"[run] side by side: {name}", flush=True)
+        for view in video.VIEWS:
+            subprocess.call([str(BENCH / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare",
+                             str(out), "--role", view, "--envs", ",".join(envs)],
+                            env={**os.environ, "PYTHONPATH": str(HERE.parents[1])})
     (out / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
     (out / "summary.md").write_text(summary(asset, results))
     print(f"\n[run] wrote {out / 'results.json'}")

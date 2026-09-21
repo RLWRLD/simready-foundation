@@ -1,6 +1,6 @@
 """Inside Kit: re-author a Newton-flavour deformable USD so PhysX simulates the same thing.
 
-    ./isaac-run isaac610 tools/to_physx_deformable.py <source.usda> <out.usda>
+    ./isaac-run isaac610 native/to_physx.py <source.usda> <out.usda>
 
 Newton reads the AOUSD proposal's public schema names; PhysX reads the same physics under an
 `OmniPhysics` prefix and will not translate the other family. So the asset has to be written

@@ -19,7 +19,7 @@ import signal
 import subprocess
 import sys
 
-from asset_checks import envs
+from asset_checks import envs, video
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1]  # rlwrld/asset_checks: goes on Kit's PYTHONPATH
 ENTRY = pathlib.Path(__file__).resolve().parent / "kit" / "entry.py"
@@ -307,6 +307,26 @@ def summarize(rows, out):
     print("\n".join(lines[:lines.index("Legend: O pass, X fail, - skipped by the test, ! the run did not count, blank not run.") + 1]))
 
 
+def draw(bench, cell, asset, result, experiment, timeout):
+    """The cell drawn again from what it recorded: the asset's textured mesh and its declared
+    colliders placed by the engine's own poses, each as a video beside NVIDIA's own capture.
+
+    Nothing about the experiment changes here -- the test ran and wrote its result already. This
+    reads the poses it recorded, writes them as an animated USD, and photographs that file the way
+    a deformable run's is photographed, so a rigid strip and a deformable strip are the same picture
+    of the same kind of thing.
+    """
+    usda = cell / "recording.usda"
+    code = video.record_rigid(bench, cell / "result.json", asset, usda, cell / "recording.log")
+    if code != 0 or not usda.exists():
+        print(f"[asset_checks]   no recording written (exit {code}, see recording.log)", flush=True)
+        return
+    for view, name, frames in video.draw(bench, cell, usda, experiment, timeout, ""):
+        result.setdefault("media", []).append({"filename": name, "kind": "video", "role": view})
+        print(f"[asset_checks]   {view}: {frames} frames -> {name}", flush=True)
+    (cell / "result.json").write_text(json.dumps(result, indent=1))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--bench", default=os.environ.get("SIMREADY_BENCH"), help="simready-bench directory (isaac-run, venvs, GPU)")
@@ -336,6 +356,8 @@ def main():
                     help="a setting for the environment's Newton solver, e.g. iterations=30 (repeatable)")
     ap.add_argument("--keep-going", action="store_true",
                     help="finish the matrix even when an environment's first cell does not count (default: stop)")
+    ap.add_argument("--no-video", action="store_true",
+                    help="skip drawing each run again from its recorded poses (the visual and collision videos and their side-by-side strips)")
     ap.add_argument("assets", nargs="+")
     args = ap.parse_args()
     if not args.bench:
@@ -381,6 +403,8 @@ def main():
                 result = run_one(bench, gpu, env, experiment, asset, cell, args.timeout, args.capture_px, validated, args.newton_contact, args.dump_physics, args.trace_contacts, args.camera, not args.plain_scene,
                                  solver_settings=solver_settings, particle_radius=args.particle_radius)
                 rows.append((asset.stem, env.name, result))
+                if not args.no_video and (result.get("trajectory") or {}).get("pose"):
+                    draw(bench, cell, asset, result, experiment, args.timeout)
                 first = ((result.get("message") or "").strip().splitlines() or [""])[0][:120]
                 print(f"[asset_checks]   {'INVALID: ' + '; '.join(result['invalid']) if result['invalid'] else (result['verdict'] + ' ' + first).strip()}", flush=True)
                 # An environment whose very first cell does not count is broken for every cell in it
@@ -393,6 +417,12 @@ def main():
                         sys.exit(f"[asset_checks] {env.name}'s first cell did not count: {'; '.join(result['invalid'])}\n"
                                  f"[asset_checks] stopping before the rest of the matrix; fix it and re-run with --resume, "
                                  f"or pass --keep-going to run it anyway")
+    if not args.no_video:
+        for view in video.VIEWS:
+            # `asset_checks.compare`, the compositor that made the 2026-09-19 strips, on the videos
+            # drawn from the recordings: one strip per asset and experiment per view.
+            subprocess.call([str(bench / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare", str(out),
+                             "--role", view, "--envs", args.envs], env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT)})
     summarize(rows, out)
     sys.exit(1 if any(r["invalid"] for _, _, r in rows) else 0)
 
