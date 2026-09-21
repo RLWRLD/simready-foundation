@@ -78,6 +78,17 @@ def plate_height(frame, frames, start_z, bottom_z):
     return start_z
 
 
+def plate_over(points):
+    """Where the plate belongs in x-y: over the asset as it now lies.
+
+    Taken from the authored pose it misses, because an asset put down on a floor rolls: this
+    banana's centre moves 36 mm in y while it settles, and a plate fixed at the authored centre
+    came down beside it and pressed nothing. The measurement said 2.5 mm of compression from
+    1970 contacts -- the contacts were the floor's.
+    """
+    return float(points[:, 0].mean()), float(points[:, 1].mean())
+
+
 def settle_frame(frames):
     """The frame at which the asset is measured: the end of the settle phase.
 

@@ -15,7 +15,7 @@ Nothing here knows which engine is calling. That is the point: a difference betw
 has to be a difference between two solvers, not between two recorders.
 """
 import numpy as np
-from pxr import Gf, Sdf, Usd, UsdGeom, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
 
 import skinning
 import usd_deformable
@@ -25,6 +25,7 @@ VISUAL = "/root/visual"
 GROUND = "/root/ground"
 PLATE = "/root/plate"
 SIM_COLOUR = (0.92, 0.78, 0.25)
+PLATE_OPACITY = 0.18
 
 
 class Recording:
@@ -37,7 +38,7 @@ class Recording:
     """
 
     def __init__(self, path, fps, frames, node_points, elements, asset=None,
-                 sim_prim_path=None, ground_half=2.0, plate=None):
+                 sim_prim_path=None, ground_half=2.0, plate=None, plate_centre=(0.0, 0.0)):
         self.stage = Usd.Stage.CreateNew(str(path))
         UsdGeom.SetStageUpAxis(self.stage, UsdGeom.Tokens.z)
         UsdGeom.SetStageMetersPerUnit(self.stage, 1.0)
@@ -70,6 +71,10 @@ class Recording:
         plane.CreateFaceVertexIndicesAttr(Vt.IntArray([0, 1, 2, 3]))
 
         self.plate = None
+        # Where the simulation puts the plate, not the origin. The runner centres it on the
+        # asset -- which for a curved banana is not (0, 0) -- and drawing it at the origin put
+        # the plate beside the thing it was pressing in every video.
+        self.plate_centre = (float(plate_centre[0]), float(plate_centre[1]))
         if plate:
             half_x, half_y, half_z = plate
             self.plate = UsdGeom.Cube.Define(self.stage, PLATE)
@@ -78,7 +83,19 @@ class Recording:
             # See-through, because a solid plate hides the thing being measured, with its edges
             # drawn so its position is still readable against the asset.
             self.plate.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.30, 0.50, 0.90)]))
-            self.plate.CreateDisplayOpacityAttr(Vt.FloatArray([0.18]))
+            self.plate.CreateDisplayOpacityAttr(Vt.FloatArray([PLATE_OPACITY]))
+            # RTX does not read displayOpacity on its own -- a surface is opaque unless a
+            # material says otherwise, which is why the plate stayed solid with the opacity
+            # attribute already written. A UsdPreviewSurface carries it.
+            glass = UsdShade.Material.Define(self.stage, PLATE + "_material")
+            shader = UsdShade.Shader.Define(self.stage, PLATE + "_material/surface")
+            shader.CreateIdAttr("UsdPreviewSurface")
+            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.35, 0.55, 0.95))
+            shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(PLATE_OPACITY)
+            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.25)
+            shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+            glass.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+            UsdShade.MaterialBindingAPI.Apply(self.plate.GetPrim()).Bind(glass)
             self.plate_edges = UsdGeom.BasisCurves.Define(self.stage, PLATE + "_edges")
             self.plate_edges.CreateTypeAttr(UsdGeom.Tokens.linear)
             self.plate_edges.CreateCurveVertexCountsAttr(Vt.IntArray([2] * 12))
@@ -192,8 +209,9 @@ class Recording:
             moved = nodes if self.binding is None else skinning.deform(self.binding, self.elements, nodes)
             self.visual.GetPointsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*p) for p in moved]), time)
         if self.plate is not None and plate_z is not None:
-            self.plate_api.SetTranslate(Gf.Vec3d(0.0, 0.0, float(plate_z)), time)
-            self.plate_edges_api.SetTranslate(Gf.Vec3d(0.0, 0.0, float(plate_z)), time)
+            where = Gf.Vec3d(self.plate_centre[0], self.plate_centre[1], float(plate_z))
+            self.plate_api.SetTranslate(where, time)
+            self.plate_edges_api.SetTranslate(where, time)
 
     def close(self):
         self.stage.GetRootLayer().Save()
