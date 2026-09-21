@@ -16,8 +16,6 @@ import isaacsim
 from isaacsim import SimulationApp
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import asset_properties  # noqa: E402
-import press_shape  # noqa: E402
 
 ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 ap.add_argument("asset")
@@ -33,6 +31,12 @@ args = ap.parse_args()
 
 EXPERIENCE = str(pathlib.Path(isaacsim.__file__).parent / "apps" / "isaacsim.exp.full.kit")
 app = SimulationApp({"headless": True}, experience=EXPERIENCE)
+
+# Everything below is imported only now, on purpose. Anything that pulls in `pxr` before the app
+# exists initialises USD outside Kit, and Kit can then no longer register its own schema wrappers:
+# the run dies during startup with "extension class wrapper ... has not been created yet".
+import asset_properties  # noqa: E402
+import press_shape  # noqa: E402
 
 import numpy as np  # noqa: E402
 import omni.timeline  # noqa: E402
