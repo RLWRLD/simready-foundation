@@ -26,6 +26,10 @@ ap.add_argument("stage")
 ap.add_argument("out_dir")
 ap.add_argument("--fps", type=float, default=30.0)
 ap.add_argument("--size", type=int, default=1024)
+ap.add_argument("--show", default="both", choices=("both", "sim", "visual"),
+                help="which of the two meshes a recording holds to photograph: the tetrahedral "
+                     "surface the solver moved, the asset's textured render mesh carried along "
+                     "by it, or whatever the file has")
 args = ap.parse_args()
 
 EXPERIENCE = str(pathlib.Path(isaacsim.__file__).parent / "apps" / "isaacsim.exp.full.kit")
@@ -43,11 +47,27 @@ settings.set("/app/asyncRendering", False)          # so a grab cannot race the 
 settings.set("/app/asyncRenderingLowLatency", False)
 settings.set("/rtx/pathtracing/spp", 1)
 
+# A recording holds both meshes so the two videos come from one run and line up frame for
+# frame. Hiding one is how a camera is pointed at the other; the framing is computed afterwards,
+# so it follows whichever is left visible.
+HIDDEN = {"sim": "/root/visual", "visual": "/root/sim"}
+
 out = pathlib.Path(args.out_dir)
 out.mkdir(parents=True, exist_ok=True)
 omni.usd.get_context().open_stage(args.stage)
 stage = omni.usd.get_context().get_stage()
 UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+
+if args.show != "both":
+    hide = stage.GetPrimAtPath(HIDDEN[args.show])
+    keep = stage.GetPrimAtPath(HIDDEN["sim" if args.show == "visual" else "visual"])
+    if not keep or not keep.IsValid():
+        print(f"[render] FAIL: this recording has no {args.show} mesh to photograph")
+        app.close()
+        sys.exit(4)
+    if hide and hide.IsValid():
+        UsdGeom.Imageable(hide).MakeInvisible()
+        print(f"[render] showing the {args.show} mesh; {HIDDEN[args.show]} hidden")
 
 start, end = stage.GetStartTimeCode(), stage.GetEndTimeCode()
 stage_fps = stage.GetTimeCodesPerSecond() or 60.0
@@ -79,6 +99,9 @@ def moving_prims(times):
         size = ranges[0].GetSize()
         if max(size[0], size[1], size[2]) > GROUND_SPAN:
             still.append(prim)
+            continue
+        if not UsdGeom.Imageable(prim).ComputeVisibility() == UsdGeom.Tokens.inherited:
+            still.append(prim)     # a hidden mesh must not pull the camera towards itself
             continue
         travel = max(Gf.Vec3d(a.GetMidpoint() - b.GetMidpoint()).GetLength()
                      for a in ranges for b in ranges)

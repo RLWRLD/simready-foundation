@@ -15,6 +15,7 @@ than assumed, because creating that view costs frames the body spends falling.
 """
 import argparse
 import pathlib
+import sys
 
 import isaacsim
 from isaacsim import SimulationApp
@@ -26,7 +27,12 @@ ap.add_argument("--fps", type=float, default=60.0)
 ap.add_argument("--substeps", type=int, default=4)
 ap.add_argument("--drop", type=float, default=0.05)
 ap.add_argument("--usd", default=None)
+ap.add_argument("--visual-asset", default=None,
+                help="the original (Newton-flavour) asset to take the textured render mesh from; "
+                     "the PhysX copy this runs has its source subtree deactivated")
 args = ap.parse_args()
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 EXPERIENCE = str(pathlib.Path(isaacsim.__file__).parent / "apps" / "isaacsim.exp.full.kit")
 app = SimulationApp({"headless": True}, experience=EXPERIENCE)
@@ -173,35 +179,17 @@ if abs(start[:, 2].min() - args.drop) > 0.002:
     raise SystemExit(f"[physx] the solver would not take the starting pose: asked {args.drop:.4f}, "
                      f"it holds {start[:, 2].min():.4f}")
 
-out_stage = surface = None
-if args.usd:
-    out_stage = Usd.Stage.CreateNew(args.usd)
-    UsdGeom.SetStageUpAxis(out_stage, UsdGeom.Tokens.z)
-    UsdGeom.SetStageMetersPerUnit(out_stage, 1.0)
-    out_root = UsdGeom.Xform.Define(out_stage, "/root")
-    out_stage.SetDefaultPrim(out_root.GetPrim())
-    out_stage.SetTimeCodesPerSecond(args.fps)
-    out_stage.SetFramesPerSecond(args.fps)
-    # A tet mesh's outside is every triangular face only one tet owns. Drawing that, rather than
-    # all four faces of every tet, is what makes the render look like the object.
-    faces = {}
-    for tet in elements:
-        for tri in ((0, 1, 2), (0, 2, 3), (0, 3, 1), (1, 3, 2)):
-            key = tuple(sorted(int(tet[i]) for i in tri))
-            faces[key] = faces.get(key, 0) + 1
-    outside = [k for k, n in faces.items() if n == 1]
-    surface = UsdGeom.Mesh.Define(out_stage, "/root/deformable")
-    surface.CreateFaceVertexCountsAttr([3] * len(outside))
-    surface.CreateFaceVertexIndicesAttr([i for tri in outside for i in tri])
-    surface.CreateDisplayColorAttr([Gf.Vec3f(0.92, 0.78, 0.25)])
-    plane = UsdGeom.Mesh.Define(out_stage, "/root/ground")
-    plane.CreatePointsAttr([Gf.Vec3f(-half, -half, 0.0), Gf.Vec3f(half, -half, 0.0),
-                            Gf.Vec3f(half, half, 0.0), Gf.Vec3f(-half, half, 0.0)])
-    plane.CreateFaceVertexCountsAttr([4])
-    plane.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
-    print(f"[physx] writing {len(outside)} surface triangles of {len(elements)} tets")
-
+# The same recording every runner writes: the tetrahedral surface the solver moved, and the
+# asset's textured render mesh carried along by it. The visual mesh comes from the original
+# asset, not the PhysX copy this is simulating -- the conversion deactivates the source subtree
+# the textures live on.
 frames = int(args.seconds * args.fps)
+tape = None
+if args.usd:
+    import recording
+    tape = recording.Recording(args.usd, int(args.fps), frames, start, elements,
+                               asset=args.visual_asset, sim_prim_path=str(body.GetPath()))
+
 q = start
 for frame in range(frames):
     for _ in range(args.substeps):
@@ -210,8 +198,8 @@ for frame in range(frames):
     if not np.isfinite(q).all():
         print(f"[physx] diverged at {frame / args.fps:.2f}s")
         break
-    if surface is not None:
-        surface.GetPointsAttr().Set([Gf.Vec3f(*p) for p in q.astype(float)], Usd.TimeCode(frame))
+    if tape is not None:
+        tape.frame(frame, q)
     if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
         v = simulation_mesh(prim.get_nodal_velocities()).reshape(-1, 3)
         print(f"[physx] t={frame / args.fps:5.2f}s  z [{q[:, 2].min():8.4f}, {q[:, 2].max():8.4f}]  "
@@ -236,10 +224,8 @@ print(f"[physx] RESULT fell_mm={fell * 1000:.1f} rest_low_m={q[:, 2].min():.4f} 
       f"rest_high_m={q[:, 2].max():.4f} thickness_mm={(q[:, 2].max() - q[:, 2].min()) * 1000:.1f} "
       f"below_floor_mm={below * 1000:.1f} p99_speed={speed:.3f} max_speed={peak:.3f} verdict={verdict}")
 
-if out_stage is not None:
-    out_stage.SetStartTimeCode(0)
-    out_stage.SetEndTimeCode(frames - 1)
-    out_stage.GetRootLayer().Save()
+if tape is not None:
+    tape.close()
     print(f"[physx] wrote {args.usd}")
 timeline.stop()
 app.close()

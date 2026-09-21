@@ -19,12 +19,18 @@ asset and solver can simulate at all, and whether Isaac's stage is driving them
 correctly. It runs in a few seconds, so the parameters are found here and then applied.
 """
 import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 import warp as wp
 
 import newton
 from pxr import Usd
+
+import recording
 
 # Per-solver contact constants, quoted from newton/examples/multiphysics/example_rigid_soft_contact.py.
 # They are a set: `ke` without its matching `kd` is a different simulation.
@@ -116,7 +122,13 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface):
 
     builder = newton.ModelBuilder()
     builder.default_particle_radius = radius
-    builder.add_usd(Usd.Stage.Open(asset))
+    # The stage has to be held in a name: a traversal of one opened inline outlives the stage
+    # itself and the iteration dies on an expired prim.
+    stage = Usd.Stage.Open(asset)
+    builder.add_usd(stage)
+    # Which prim the solver simulates, so the recording can hide the asset's still copy of it.
+    sim_path = next((str(prim.GetPath()) for prim in stage.Traverse()
+                     if prim.GetTypeName() == "TetMesh"), None)
 
     lift = drop - float(points[:, 2].min())          # lowest point starts `drop` above the plane
     q = np.asarray(builder.particle_q, dtype=np.float64)
@@ -172,7 +184,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface):
             print(f"[baseline] soft_body_relaxation left at {relaxation} -- this Newton's tet kernel "
                   f"spends it as the compliance and never reads the material")
         solver = newton.solvers.SolverXPBD(model, iterations=iterations, soft_body_relaxation=relaxation)
-    return model, solver, pipeline, radius, lift
+    return model, solver, pipeline, radius, lift, sim_path
 
 
 def main():
@@ -191,14 +203,18 @@ def main():
     args = ap.parse_args()
 
     substeps = args.substeps or SUBSTEPS[args.solver]
-    model, solver, pipeline, radius, lift = build(args.asset, args.solver, args.iterations, args.radius,
-                                                  args.drop, args.margin, not args.no_full_surface)
+    model, solver, pipeline, radius, lift, sim_path = build(
+        args.asset, args.solver, args.iterations, args.radius, args.drop, args.margin,
+        not args.no_full_surface)
     frames = int(args.seconds * args.fps)
-    viewer = None
+    # The recording is written here rather than by newton.viewer.ViewerUSD: the two Newton
+    # versions lay their viewer output out differently, and neither carries the asset's render
+    # mesh, so there would be nothing to photograph the textured banana from.
+    tape = None
     if args.usd:
-        from newton.viewer import ViewerUSD
-        viewer = ViewerUSD(output_path=args.usd, fps=int(args.fps), num_frames=frames)
-        viewer.set_model(model)
+        tape = recording.Recording(args.usd, int(args.fps), frames,
+                                   np.asarray(model.particle_q.numpy()), model.tet_indices.numpy(),
+                                   asset=args.asset, sim_prim_path=sim_path)
 
     state_0, state_1, control = model.state(), model.state(), model.control()
     contacts = pipeline.contacts()
@@ -220,10 +236,8 @@ def main():
         if not np.isfinite(q).all():
             print(f"[baseline] diverged at {frame / args.fps:.2f}s")
             return
-        if viewer is not None:
-            viewer.begin_frame(frame / args.fps)
-            viewer.log_state(state_0)
-            viewer.end_frame()
+        if tape is not None:
+            tape.frame(frame, q)
         if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
             speed = float(np.abs(np.asarray(state_0.particle_qd.numpy())).max())
             print(f"[baseline] t={frame / args.fps:5.2f}s  z [{q[:, 2].min():8.4f}, {q[:, 2].max():8.4f}]  "
@@ -251,8 +265,8 @@ def main():
     print(f"[baseline] RESULT fell_mm={fell * 1000:.1f} rest_low_m={q[:, 2].min():.4f} "
           f"rest_high_m={q[:, 2].max():.4f} thickness_mm={(q[:, 2].max() - q[:, 2].min()) * 1000:.1f} "
           f"below_floor_mm={below * 1000:.1f} p99_speed={speed:.3f} max_speed={peak:.3f} verdict={verdict}")
-    if viewer is not None:
-        viewer.close()
+    if tape is not None:
+        tape.close()
         print(f"[baseline] wrote {args.usd}")
 
 

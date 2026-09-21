@@ -59,8 +59,10 @@ def cell_command(env, experiment, asset, usd, seconds):
     if script is None:
         return None, f"{engine} has no {experiment} experiment yet"
     if engine == "physx":
+        # The PhysX copy is what is simulated; the original is where the textures live, and the
+        # conversion deactivates the subtree they are on.
         return [str(BENCH / "isaac-run"), venv, str(HERE / script), physx_asset(asset),
-                "--seconds", str(seconds), "--usd", str(usd)], None
+                "--seconds", str(seconds), "--usd", str(usd), "--visual-asset", asset], None
     return [str(BENCH / f".venv-{venv}" / "bin" / "python"), str(HERE / script), asset,
             "--solver", solver, "--seconds", str(seconds), "--usd", str(usd)], None
 
@@ -147,28 +149,38 @@ def main():
 
             if args.no_render or not usd.exists():
                 continue
-            frames = out / "frames" / cell
-            render = [str(BENCH / "isaac-run"), "isaac610", str(HERE / "render_usd.py"), str(usd),
-                      str(frames), "--fps", str(args.fps), "--size", str(args.size)]
-            try:
-                code, _ = run(render, out / "logs" / f"{cell}.render.log", args.timeout)
-            except subprocess.TimeoutExpired:
-                code = -1
-            written = sorted(frames.glob("frame_*.png"))
-            results[cell]["frames"] = len(written)
-            if written:
-                video = out / "videos" / f"{cell}.mp4"
+            # One run, two videos. The recording holds both meshes, so these are the same physics
+            # photographed twice: `sim` is the tetrahedral surface the solver actually moved, and
+            # `visual` is the asset's own textured mesh carried along by it. They line up frame
+            # for frame, because they came out of the same numbers.
+            results[cell]["videos"] = {}
+            for mesh in ("sim", "visual"):
+                frames = out / "frames" / f"{cell}__{mesh}"
+                render = [str(BENCH / "isaac-run"), "isaac610", str(HERE / "render_usd.py"), str(usd),
+                          str(frames), "--fps", str(args.fps), "--size", str(args.size),
+                          "--show", mesh]
+                try:
+                    code, _ = run(render, out / "logs" / f"{cell}.{mesh}.render.log", args.timeout)
+                except subprocess.TimeoutExpired:
+                    code = -1
+                written = sorted(frames.glob("frame_*.png"))
+                if not written:
+                    print(f"[run] {cell}: no {mesh} frames (exit {code})", flush=True)
+                    continue
+                video = out / "videos" / f"{cell}__{mesh}.mp4"
                 subprocess.call(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(args.fps),
                                  "-i", str(frames / "frame_%05d.png"), "-c:v", "libx264",
                                  "-pix_fmt", "yuv420p", "-crf", "20", str(video)])
-                results[cell]["video"] = video.name if video.exists() else None
-            print(f"[run] {cell}: {len(written)} frames -> {results[cell].get('video')}", flush=True)
+                if video.exists():
+                    results[cell]["videos"][mesh] = video.name
+                print(f"[run] {cell}: {len(written)} {mesh} frames -> {video.name}", flush=True)
 
     (out / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
     print(f"\n[run] wrote {out / 'results.json'}")
     for cell, row in sorted(results.items()):
         state = row.get("skipped") or row.get("error") or row.get("diverged") or "ok"
-        print(f"[run] {cell:<46} {state:<24} {row.get('video') or '-'}")
+        made = ", ".join((row.get("videos") or {}).values()) or "-"
+        print(f"[run] {cell:<46} {state:<24} {made}")
 
 
 if __name__ == "__main__":
