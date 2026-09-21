@@ -38,7 +38,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import asset_properties
 import press_shape
+import recording
 import usd_deformable
 from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, GROUND_CONTACT_KE, ITERATIONS,
                          SELF_CONTACT, SUBSTEPS, XPBD_MAX_RELAXATION, auto_radius,
@@ -184,7 +186,7 @@ def build(asset, solver_name, iterations, radius, press_to, margin, full_surface
         print(f"[press] soft_body_relaxation {relaxation:.4f}")
         solver = newton.solvers.SolverXPBD(model, iterations=iterations, soft_body_relaxation=relaxation)
     return (model, solver, pipeline, radius, height, start_z, thickness, sim_path,
-            (footprint[0] * 0.6, footprint[1] * 0.6, thickness / 2.0))
+            (footprint[0] * 0.6, footprint[1] * 0.6, thickness / 2.0), margin)
 
 
 def main():
@@ -206,7 +208,8 @@ def main():
 
     substeps = args.substeps or SUBSTEPS[args.solver]
     press_to_frac = args.press_to
-    (model, solver, pipeline, radius, height, start_z, thickness, sim_path, plate_half) = build(
+    (model, solver, pipeline, radius, height, start_z, thickness, sim_path, plate_half,
+     margin) = build(
         args.asset, args.solver, args.iterations, args.radius, args.press_to, args.margin,
         not args.no_full_surface)
     frames = int(args.seconds * args.fps)
