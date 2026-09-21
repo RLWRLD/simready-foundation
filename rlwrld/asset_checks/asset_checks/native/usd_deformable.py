@@ -45,6 +45,19 @@ def _bound_material(stage, prim, wanted):
     return next((p for p in stage.Traverse() if wanted in _schemas(p)), None)
 
 
+def is_simulated(prim):
+    """Does this prim carry geometry a solver simulates?
+
+    Answering by schema rather than by prim path is what lets one file's geometry be recognised
+    inside another's reference -- the same asset is /World/banana in the original and /Asset/Body
+    in the PhysX copy, and a name carried across files matches neither.
+    """
+    schemas = _schemas(prim)
+    return (SURFACE_SIM in schemas or VOLUME_SIM in schemas
+            or any(s.startswith("OmniPhysics") and "DeformableSimAPI" in s for s in schemas)
+            or prim.IsA(UsdGeom.TetMesh))
+
+
 def find(stage):
     """The prims this asset declares as deformable, and which kind each is."""
     found = []

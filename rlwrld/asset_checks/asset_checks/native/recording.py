@@ -18,6 +18,7 @@ import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom, Vt
 
 import skinning
+import usd_deformable
 
 SIM = "/root/sim"
 VISUAL = "/root/visual"
@@ -108,9 +109,17 @@ class Recording:
         # and drawn as a finer mesh -- and they are sometimes the same prim, which is what a
         # cloth is. Both cases are the same question asked of the asset, not a special case for
         # any one of them.
-        simulated = None
-        if sim_prim_path:
+        # Find the simulated prim inside the reference by what it *is*, not by a path. A path
+        # belongs to the file it came from: the PhysX runner knows its asset's body as
+        # /Asset/Body while the reference here is the original, where the same geometry is
+        # /World/banana. Looking the name up across files found nothing, the binding fell back to
+        # the runner's already-moved nodes, and the render mesh came out 71 mm from the thing it
+        # was supposed to follow.
+        simulated = next((q for q in Usd.PrimRange(source) if usd_deformable.is_simulated(q)), None)
+        if simulated is None and sim_prim_path:
             simulated = self.stage.GetPrimAtPath(f"{VISUAL}/{Sdf.Path(sim_prim_path).name}")
+            if not (simulated and simulated.IsValid()):
+                simulated = None
         drawable = [q for q in Usd.PrimRange(source)
                     if q.IsA(UsdGeom.PointBased) and UsdGeom.PointBased(q).GetPointsAttr().Get()]
         others = [q for q in drawable if not (simulated and q.GetPath() == simulated.GetPath())]
