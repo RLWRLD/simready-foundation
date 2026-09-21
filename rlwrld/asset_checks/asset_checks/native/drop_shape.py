@@ -17,24 +17,34 @@ from the numbers here.
 # the asset, because a sheet has no height and would then never be dropped at all.
 DROP_HEIGHT = 0.05
 
-# What counts as a pass, as fractions of the drop and of the asset's own size. A speed is per
-# second of the asset's height, so a large asset is allowed to still be moving faster.
+# What counts as a pass, as fractions of the drop and of the asset's own size.
 MIN_FALL_OF_DROP = 0.5
 TUNNEL_DEPTH_OF_HEIGHT = 0.05
-SETTLED_SPEED_OF_HEIGHT = 2.0
+# A speed is judged against a speed. The drop itself gives one -- what the asset is travelling at
+# when it arrives -- and that exists for any asset, including a sheet whose height is zero. The
+# height-scaled threshold this replaces collapsed to nothing for a sheet, and then a cloth lying
+# perfectly still at 1 mm/s read as `never-settled`.
+SETTLED_OF_IMPACT = 0.02
+GRAVITY = 9.81
 # Below this much of its authored height the asset is a sheet, and the fraction of height it kept
 # is not a number that means anything.
 FLAT_OF_HEIGHT = 0.1
 
 
+def impact_speed(drop):
+    """How fast the experiment's own drop leaves the asset travelling when it lands."""
+    return (2.0 * GRAVITY * max(drop, 0.0)) ** 0.5
+
+
 def verdict(finite, fell, drop, below, height, speed, contact_size):
     """What the run showed.
 
-    `contact_size` is the one engine quantity this takes, and only as a floor: a threshold written
-    purely as a fraction of the asset's height is zero for a sheet, and then any residual at all
-    reads as a failure. A resting particle's centre sits one contact size above the floor, so that
-    is the smallest distance and the smallest speed the experiment can meaningfully ask about --
-    it does not change what is being asked, it stops the question becoming vacuous.
+    `contact_size` is the one engine quantity this takes, and only as a floor under the one
+    threshold that is a distance: a depth written purely as a fraction of the asset's height is
+    zero for a sheet, and a resting particle's centre sits one contact size above the floor, so
+    that is the smallest distance the experiment can meaningfully ask about. It is not a floor
+    under the speed -- a distance is not a speed, and using it as one is what made a still cloth
+    fail.
     """
     if not finite:
         return "diverged"
@@ -42,7 +52,7 @@ def verdict(finite, fell, drop, below, height, speed, contact_size):
         return "never-fell"
     if below > max(TUNNEL_DEPTH_OF_HEIGHT * height, 2.0 * contact_size):
         return "through-the-floor"
-    if speed > max(SETTLED_SPEED_OF_HEIGHT * height, contact_size):
+    if speed > SETTLED_OF_IMPACT * impact_speed(drop):
         return "never-settled"
     return "pass"
 

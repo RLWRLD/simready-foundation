@@ -31,6 +31,14 @@ POISSON = ("physics:poissonsRatio",)
 # importer takes half of it as the collision radius, so that is the contact size the asset is
 # asking for, and it is the one every engine should be given.
 THICKNESS = ("physics:thickness", "newton:thickness")
+# Whether the asset collides with itself. This is a physical claim about the thing -- a sheet that
+# folds onto itself behaves differently from one that passes through itself -- so it belongs to the
+# asset, not to whichever solver happens to offer the switch. Every schema that declares it is
+# listed; where an asset is silent the deformable schema's own default answers, and that default is
+# `physxDeformableBody:selfCollision = 0`, off.
+SELF_COLLISION = ("physxDeformableBody:selfCollision", "physxParticle:selfCollision",
+                  "newton:selfCollisionEnabled")
+SELF_COLLISION_WHEN_SILENT = False
 
 
 def _first(prims, names):
@@ -40,6 +48,16 @@ def _first(prims, names):
             attr = prim.GetAttribute(name)
             if attr and attr.HasAuthoredValue():
                 return float(attr.Get()), f"{prim.GetPath()}.{name}"
+    return None, None
+
+
+def _first_flag(prims, names):
+    """Like `_first`, for a declared boolean."""
+    for prim in prims:
+        for name in names:
+            attr = prim.GetAttribute(name)
+            if attr and attr.HasAuthoredValue():
+                return bool(attr.Get()), f"{prim.GetPath()}.{name}"
     return None, None
 
 
@@ -63,6 +81,7 @@ def read(asset):
         value, where = _first(prims, names)
         found[key] = value
         found[key + "_source"] = where
+    found["self_collision"], found["self_collision_source"] = _first_flag(prims, SELF_COLLISION)
     return found
 
 
@@ -77,8 +96,23 @@ def report(tag, declared, chosen):
         value, where = declared.get(key), declared.get(key + "_source")
         if value is not None:
             print(f"[{tag}] asset: {key} = {value:g}  ({where})")
+    if declared.get("self_collision") is not None:
+        print(f"[{tag}] asset: self_collision = {declared['self_collision']}  "
+              f"({declared['self_collision_source']})")
     for key, (value, why) in sorted(chosen.items()):
         print(f"[{tag}] ours:  {key} = {value:g}  -- {why}")
+
+
+def self_collision(declared):
+    """-> (on, why). The asset's answer, or the deformable schema's default when it is silent.
+
+    Every engine is handed the same answer. Where an engine has no switch for it, its runner says
+    so rather than leaving the reader to assume the five ran the same model.
+    """
+    if declared.get("self_collision") is not None:
+        return declared["self_collision"], declared["self_collision_source"]
+    return (SELF_COLLISION_WHEN_SILENT,
+            "the asset does not declare it; physxDeformableBody:selfCollision defaults to off")
 
 
 def contact_size(declared):

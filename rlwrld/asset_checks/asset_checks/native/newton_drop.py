@@ -59,9 +59,10 @@ CONTACT = {
         "vbd": {"soft_contact_ke": 1.0e2, "soft_contact_kd": 1.0e2},
     },
 }
-# A sheet can fold onto itself; a volume cannot fold through itself the same way, and Newton's
-# soft-body examples leave self-contact off while its cloth examples turn it on.
-SELF_CONTACT = {"volume": False, "surface": True}
+# Self-collision is not here: it is a property of the asset, read by
+# `asset_properties.self_collision`. Keying it on the element type made a cloth self-collide and a
+# soft body not -- a decision about the asset that the asset never asked for, and the opposite of
+# what the deformable schema itself defaults to.
 
 
 def colour_for_vbd(builder):
@@ -347,10 +348,15 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     pipeline = newton.CollisionPipeline(model, **kwargs)
     print(f"[baseline] full-surface soft contact: {kwargs.get('enable_rigid_soft_full_surface_contact', False)}")
 
+    self_collision, why = asset_properties.self_collision(declared)
+    print(f"[baseline] self-collision {'on' if self_collision else 'off'} -- {why}")
+    if solver_name != "vbd":
+        print(f"[baseline] SolverXPBD has no particle self-collision switch, so this run has none")
+
     if solver_name == "vbd":
         solver = newton.solvers.SolverVBD(
             model, iterations=iterations,
-            particle_enable_self_contact=SELF_CONTACT[kind],
+            particle_enable_self_contact=self_collision,
             particle_self_contact_radius=radius, particle_self_contact_margin=radius * 2.0,
             rigid_body_particle_contact_buffer_size=max(256, model.particle_count))
     else:

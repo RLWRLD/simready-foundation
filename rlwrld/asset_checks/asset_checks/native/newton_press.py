@@ -43,7 +43,7 @@ import press_shape
 import recording
 import usd_deformable
 from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, ITERATIONS,
-                         CONTACT_STIFFNESS_OF_MATERIAL, SELF_CONTACT, SUBSTEPS,
+                         CONTACT_STIFFNESS_OF_MATERIAL, SUBSTEPS,
                          colour_for_vbd,
                          XPBD_MAX_RELAXATION, auto_radius,
                          contact_material, contact_margin, deformable_kind,
@@ -189,13 +189,18 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     print(f"[press] full-surface soft contact: {full}")
     pipeline = newton.CollisionPipeline(model, **kwargs)
 
+    self_collision, why = asset_properties.self_collision(declared)
+    print(f"[press] self-collision {'on' if self_collision else 'off'} -- {why}")
+    if solver_name != "vbd":
+        print(f"[press] SolverXPBD has no particle self-collision switch, so this run has none")
+
     if solver_name == "vbd":
         # Every particle of the asset could touch the plate at once. The per-body list is fixed
         # at 256 by default and documented as never resizing, so anything past it is dropped
         # without a word.
         solver = newton.solvers.SolverVBD(
             model, iterations=iterations,
-            particle_enable_self_contact=SELF_CONTACT[kind],
+            particle_enable_self_contact=self_collision,
             particle_self_contact_radius=radius, particle_self_contact_margin=radius * 2.0,
             rigid_body_particle_contact_buffer_size=max(256, model.particle_count))
     else:
