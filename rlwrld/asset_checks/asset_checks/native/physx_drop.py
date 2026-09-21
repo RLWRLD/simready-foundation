@@ -41,11 +41,14 @@ import numpy as np  # noqa: E402
 import omni.timeline  # noqa: E402
 import omni.usd  # noqa: E402
 import warp as wp  # noqa: E402
+import asset_properties  # noqa: E402
 from isaacsim.core.experimental.prims import DeformablePrim  # noqa: E402
 from isaacsim.core.simulation_manager import SimulationManager  # noqa: E402
 from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics  # noqa: E402
 
-SIM_API = "OmniPhysicsVolumeDeformableSimAPI"
+# PhysX spells a deformable's simulated geometry one of two ways depending on what it is made
+# of. Asking for both is what lets a cloth and a soft body go through the same runner.
+SIM_APIS = ("OmniPhysicsVolumeDeformableSimAPI", "OmniPhysicsSurfaceDeformableSimAPI")
 BODY_API = "OmniPhysicsDeformableBodyAPI"
 # What counts as a pass, as fractions of the asset's own size and its own drop.
 MIN_FALL_OF_DROP = 0.5
@@ -113,7 +116,7 @@ body = target = None
 for prim_ in Usd.PrimRange(asset, Usd.TraverseInstanceProxies()):
     if body is None and BODY_API in prim_.GetAppliedSchemas():
         body = prim_
-    if target is None and SIM_API in prim_.GetAppliedSchemas():
+    if target is None and any(api in prim_.GetAppliedSchemas() for api in SIM_APIS):
         target = prim_
 if body is None:
     raise SystemExit(f"[physx] {args.asset} declares no {BODY_API}; PhysX has nothing to simulate")
@@ -140,10 +143,22 @@ rest_shape.Set(raised)
 # 17 mm above the floor, which is not the asset's physics, it is a 2 cm contact offset meant for
 # a scene built in metres. Half the median distance between neighbouring nodes is the asset's own
 # resolution, and it is the same quantity Newton is given.
-picked = np.random.default_rng(0).choice(len(points), size=min(512, len(points)), replace=False)
-spacing = np.sqrt(((points[picked][:, None, :] - points[None, :, :]) ** 2).sum(-1))
-spacing[spacing < 1e-9] = np.inf
-offset = float(np.median(spacing.min(axis=1)) * 0.5)
+# The same contact size Newton is given, and from the same place: the asset. PhysX's own
+# defaults are scale-free -- left alone they rest this banana 17 mm above the floor -- and
+# picking a different number here than Newton gets would mean the two engines were never asked
+# to touch the ground in the same way.
+declared, chosen = asset_properties.read(args.visual_asset or args.asset), {}
+if declared.get("particle_radius") is not None:
+    offset = declared["particle_radius"]
+else:
+    picked = np.random.default_rng(0).choice(len(points), size=min(512, len(points)), replace=False)
+    spacing = np.sqrt(((points[picked][:, None, :] - points[None, :, :]) ** 2).sum(-1))
+    spacing[spacing < 1e-9] = np.inf
+    offset = float(np.median(spacing.min(axis=1)) * 0.5)
+    chosen["rest_offset"] = (offset, "the asset does not declare a particle radius; half the "
+                                     "median distance between neighbouring nodes")
+chosen["contact_offset"] = (offset * 2.0, "twice the rest offset, as Newton's contact margin is")
+asset_properties.report("physx", declared, chosen)
 collision = PhysxSchema.PhysxCollisionAPI.Apply(body)
 collision.CreateRestOffsetAttr(offset)
 collision.CreateContactOffsetAttr(offset * 2.0)
@@ -160,7 +175,11 @@ for _ in range(5):
     app.update()
 
 prim = DeformablePrim(str(body.GetPath()))
-elements = simulation_mesh(prim.get_element_indices()).reshape(-1, 4)
+raw = simulation_mesh(prim.get_element_indices())
+# Three indices per element for a cloth, four for a soft body: the view says which.
+per_element = int(prim.num_nodes_per_element) if hasattr(prim, "num_nodes_per_element") else (
+    4 if raw.size % 4 == 0 and raw.size % 3 else 3)
+elements = raw.reshape(-1, per_element)
 try:
     print(f"[physx] physics material: {prim.get_applied_physics_materials()}")
 except Exception as exc:                                  # noqa: BLE001

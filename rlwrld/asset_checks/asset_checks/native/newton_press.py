@@ -39,9 +39,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import press_shape
-import recording
-from newton_drop import (CONTACT, GROUND_CONTACT_KE, ITERATIONS, SUBSTEPS, XPBD_MAX_RELAXATION,
-                         auto_radius, relaxation_is_a_jacobi_factor, xpbd_relaxation)
+import usd_deformable
+from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, GROUND_CONTACT_KE, ITERATIONS,
+                         SUBSTEPS, XPBD_MAX_RELAXATION, auto_radius, contact_material,
+                         relaxation_is_a_jacobi_factor, solver_elements, xpbd_relaxation)
 
 PLATE_BODY = 0        # the only body in the scene
 # What counts as a pass, as fractions of the asset's own settled height rather than absolute
@@ -51,13 +52,27 @@ MIN_RECOVERY = 0.5
 TUNNEL_DEPTH_OF_HEIGHT = 0.05
 
 
-def build(asset, solver_name, iterations, radius, press_to, margin):
+def build(asset, solver_name, iterations, radius, press_to, margin, full_surface=True):
     measure = newton.ModelBuilder()
     measure.add_usd(Usd.Stage.Open(asset))
+    # Where this Newton's importer has no path for what the asset declares -- 1.2.1 knows nothing
+    # of PhysicsSurfaceDeformableSimAPI, though it ships eight cloth examples -- read the
+    # declaration and build it with the engine's own constructor, using 1.5.0's conversion.
+    usd_deformable.add_missing(measure, asset)
     if measure.particle_count == 0:
-        raise SystemExit(f"{asset}: no particles -- this Newton did not import it as a deformable")
+        raise SystemExit(f"{asset}: nothing deformable -- neither this Newton's importer nor its "
+                         f"declared schemas produced any particles")
     points = np.asarray(measure.particle_q, dtype=np.float64)
-    radius = auto_radius(points) if radius == "auto" else float(radius)
+    declared, chosen = asset_properties.read(asset), {}
+    if radius != "auto":
+        radius = float(radius)
+        chosen["requested_particle_radius"] = (radius, "asked for on the command line")
+    elif declared.get("particle_radius") is not None:
+        radius = declared["particle_radius"]     # Newton's importer does not read this attribute
+    else:
+        radius = auto_radius(points)
+        chosen["derived_particle_radius"] = (radius, "the asset declares none; half the median "
+                                                      "distance between neighbouring nodes")
     height = float(points[:, 2].max() - points[:, 2].min())
     span = float(max(points[:, 0].max() - points[:, 0].min(), points[:, 1].max() - points[:, 1].min()))
 
@@ -65,14 +80,23 @@ def build(asset, solver_name, iterations, radius, press_to, margin):
     builder.default_particle_radius = radius
     stage = Usd.Stage.Open(asset)
     builder.add_usd(stage)
-    sim_path = next((str(prim.GetPath()) for prim in stage.Traverse()
-                     if prim.GetTypeName() == "TetMesh"), None)
+    built = usd_deformable.add_missing(builder, asset, chosen)
+    # The radius the run uses is the one the builder ended up with, not the one asked for. A
+    # volume deformable takes `default_particle_radius`; a cloth's constructor sets its own from
+    # the declared shell thickness and ignores it. Reading it back is the only way the contact
+    # margin, the plate's size and the landing tolerance are all talking about the same number.
+    radius = float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
+    if built:
+        print(f"[press] this Newton's importer produced nothing; built from the asset's "
+              f"declaration instead: {built}")
+    sim_path = next((str(prim.GetPath()) for _, prim in usd_deformable.find(stage)), None)
     # Rest on the floor rather than fall onto it: this test is about the plate, not the drop.
     q = np.asarray(builder.particle_q, dtype=np.float64)
     q[:, 2] += radius - q[:, 2].min()
     builder.particle_q = [wp.vec3(*p) for p in q]
     top = float(q[:, 2].max())
     centre = (float(q[:, 0].mean()), float(q[:, 1].mean()))
+    ground_shape = builder.shape_count
     builder.add_ground_plane()
 
     for i in range(builder.shape_count):                       # visual-only import leftovers
@@ -88,13 +112,14 @@ def build(asset, solver_name, iterations, radius, press_to, margin):
     # contacts are generated has both of its faces inside the same margin, and the asset gets
     # pushed from underneath as hard as from above: measured, the same press went from 13.9 mm
     # of compression to 3.1 mm when the plate was thinned below it.
-    thickness = max(4.0 * margin, height * 0.3)
+    margin = margin or radius * CONTACT_MARGIN_OF_RADIUS
+    thickness = press_shape.plate_thickness(height, margin)
     start_z = top + thickness / 2.0 + radius * 2.0
     plate = builder.add_body(xform=wp.transform(wp.vec3(centre[0], centre[1], start_z), wp.quat_identity()),
                              mass=1.0, is_kinematic=True)
+    plate_shape = builder.shape_count
     builder.add_shape_box(plate, hx=footprint[0] * 0.6, hy=footprint[1] * 0.6, hz=thickness / 2.0,
-                          cfg=newton.ModelBuilder.ShapeConfig(density=1000.0,
-                                                              mu=CONTACT[solver_name]["soft_contact_mu"]),
+                          cfg=newton.ModelBuilder.ShapeConfig(density=1000.0),
                           color=(0.25, 0.45, 0.85))
 
     if solver_name == "vbd":
@@ -102,9 +127,24 @@ def build(asset, solver_name, iterations, radius, press_to, margin):
     model = builder.finalize()
     for name, value in CONTACT[solver_name].items():
         setattr(model, name, value)
-    model.shape_material_ke.fill_(GROUND_CONTACT_KE)
-    model.shape_material_kd.fill_(CONTACT[solver_name]["soft_contact_kd"])
-    model.shape_material_mu.fill_(CONTACT[solver_name]["soft_contact_mu"])
+        chosen[name] = (value, f"penalty numerics for {solver_name}, from Newton's "
+                               f"example_rigid_soft_contact.py")
+    friction, restitution = contact_material(declared, chosen)
+    model.soft_contact_mu = friction
+    model.soft_contact_restitution = restitution
+    # The floor and the plate are the experiment's; the asset's own shapes keep what they came
+    # in with. Friction is the same number the asset (or, failing that, this run) set globally,
+    # so the plate does not grip differently from the ground.
+    fixtures = [ground_shape, plate_shape]
+    for array, value in ((model.shape_material_ke, GROUND_CONTACT_KE),
+                         (model.shape_material_kd, CONTACT[solver_name]["soft_contact_kd"]),
+                         (model.shape_material_mu, friction)):
+        values = array.numpy()
+        values[fixtures] = value
+        array.assign(wp.array(values, dtype=float))
+    chosen["particle_radius_used"] = (radius, "read back from the model, whatever set it")
+    chosen["fixture_ke"] = (GROUND_CONTACT_KE, "the floor and plate are the experiment's")
+    asset_properties.report("press", declared, chosen)
 
     # The pipeline is built BEFORE the solver, on purpose. SolverVBD sizes its per-body
     # contact state from the contacts that already exist, and Newton's own error message says
@@ -115,9 +155,16 @@ def build(asset, solver_name, iterations, radius, press_to, margin):
     # generates no contact at all and slides straight through the deformable.
     kwargs = {"broad_phase": "nxn", "soft_contact_margin": margin}
     import inspect
-    if solver_name == "vbd" and "enable_rigid_soft_full_surface_contact" in inspect.signature(
-            newton.CollisionPipeline.__init__).parameters:
+    # Newton 1.5's VBD can meet the surface between particles, not only the particles; 1.2.1 has
+    # no such parameter and SolverXPBD refuses it. It is the engines' real difference and it is
+    # on by default, but it changes the answer enough that a like-for-like comparison needs to be
+    # able to switch it off -- so the run always says which it used.
+    full = (full_surface and solver_name == "vbd"
+            and "enable_rigid_soft_full_surface_contact" in inspect.signature(
+                newton.CollisionPipeline.__init__).parameters)
+    if full:
         kwargs["enable_rigid_soft_full_surface_contact"] = True
+    print(f"[press] full-surface soft contact: {full}")
     pipeline = newton.CollisionPipeline(model, **kwargs)
 
     if solver_name == "vbd":
@@ -145,21 +192,27 @@ def main():
     ap.add_argument("--seconds", type=float, default=4.0)
     ap.add_argument("--radius", default="auto")
     ap.add_argument("--press-to", type=float, default=0.6, help="plate stops at this much of the asset's height")
-    ap.add_argument("--margin", type=float, default=0.01)
+    ap.add_argument("--margin", type=float, default=0.0,
+                    help="soft_contact_margin; 0 derives it from the asset's particle radius")
+    ap.add_argument("--no-full-surface", action="store_true",
+                    help="meet the asset's particles only, the way Newton 1.2.1 must")
+    ap.add_argument("--no-full-surface", action="store_true",
+                    help="meet the asset's particles only, the way Newton 1.2.1 must")
     ap.add_argument("--usd", default=None)
     args = ap.parse_args()
 
     substeps = args.substeps or SUBSTEPS[args.solver]
     press_to_frac = args.press_to
     (model, solver, pipeline, radius, height, start_z, thickness, sim_path, plate_half) = build(
-        args.asset, args.solver, args.iterations, args.radius, args.press_to, args.margin)
+        args.asset, args.solver, args.iterations, args.radius, args.press_to, args.margin,
+        not args.no_full_surface)
     frames = int(args.seconds * args.fps)
     # settle, descend, hold, lift, watch -- in fifths of the run.
     phase = frames // 5
     tape = None
     if args.usd:
         tape = recording.Recording(args.usd, int(args.fps), frames,
-                                   np.asarray(model.particle_q.numpy()), model.tet_indices.numpy(),
+                                   np.asarray(model.particle_q.numpy()), solver_elements(model),
                                    asset=args.asset, sim_prim_path=sim_path, plate=plate_half)
 
     state_0, state_1, control = model.state(), model.state(), model.control()
@@ -178,7 +231,8 @@ def main():
         state.body_qd.assign(wp.array(qd, dtype=wp.spatial_vector, device=model.device))
 
     print(f"[press] {args.asset.split('/')[-1]} on {args.solver}: {model.particle_count} particles, "
-          f"radius {radius * 1000:.2f} mm, authored height {height * 1000:.1f} mm, plate parked at {start_z:.4f}, "
+          f"radius {radius * 1000:.2f} mm, authored height {height * 1000:.1f} mm, "
+          f"plate {thickness * 1000:.1f} mm thick parked at {start_z:.4f}, "
           f"{args.iterations} iterations x {substeps} substeps")
     start_top = lowest_top = bottom_z = None
     deepest, recovered, contact_peak = 0.0, None, 0
