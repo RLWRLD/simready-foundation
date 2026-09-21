@@ -86,7 +86,7 @@ class Recorder:
 
 
 def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace=None, test_config=None, camera_mode="fixed",
-             visual_cues=True, solver="physx"):
+             visual_cues=True, solver="physx", solver_settings=None):
     from simready_benchmark_engine_kit.kit_engine_proxy import BoundsResult, KitEngineProxy
     from simready_benchmark_engine_kit.scene_handle import KitSceneHandle
 
@@ -106,7 +106,7 @@ def _classes(engine, asset_path, recorder, contact_profile, dump_dir=None, trace
 
             def play_counted():  # the profile is authored before every play, so a rebuilt gripper gets it too
                 if Scene.solver is None:  # the scene exists by the first play; a rebuild keeps the schema
-                    Scene.solver = scene_mod.select_solver(self._stage, engine, solver)
+                    Scene.solver = scene_mod.select_solver(self._stage, engine, solver, solver_settings)
                 if contact_profile is not None:
                     Scene.contact_applied.append(contact.apply(self._stage, contact_profile))
                 Scene.plays += 1
@@ -276,7 +276,8 @@ async def run(req):
     recorder = Recorder(engine, 1.0 / float(config.get("physics_fps", 240)))
     trace = contact.Trace(req["trace_contacts"]) if engine == "newton" and req.get("trace_contacts") else None
     Scene, Proxy = _classes(engine, asset, recorder, profile, out if req.get("dump_physics") else None, trace,
-                            config, req.get("camera", "fixed"), req.get("visual_cues", True), req["solver"])
+                            config, req.get("camera", "fixed"), req.get("visual_cues", True), req["solver"],
+                            req.get("solver_settings"))
 
     stage = await scene_mod.new_stage()
     handle = Scene(stage)

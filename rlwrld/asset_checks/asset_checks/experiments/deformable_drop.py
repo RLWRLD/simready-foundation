@@ -63,6 +63,48 @@ def mesh_points(stage, root_path):
     return np.asarray([[p[0], p[1], p[2]] for p in out]) if out else None
 
 
+_SKIN = {}  # asset root -> (sim rest points, [(prim path, rest points, nearest sim index)])
+
+
+def _skin_setup(stage, root_path, sim_prim_path, sim_rest):
+    """Tie the asset's other geometry to the simulated points, once.
+
+    A soft body is simulated as a tetrahedral mesh and drawn as a separate render mesh -- NVIDIA's
+    and SpaceAI's assets both ship that pair -- so writing the solver's points into the simulation
+    mesh leaves the visible one hanging in mid-air, which is what every banana video showed. Each
+    render vertex is bound to its nearest simulation vertex at rest and then carries that vertex's
+    displacement: not skinning weights, but enough that the picture is the simulation.
+    """
+    from pxr import Usd, UsdGeom
+
+    bound = []
+    for prim in Usd.PrimRange(stage.GetPrimAtPath(root_path), Usd.TraverseInstanceProxies()):
+        if str(prim.GetPath()) == sim_prim_path or not prim.IsA(UsdGeom.PointBased):
+            continue
+        attr = UsdGeom.PointBased(prim).GetPointsAttr()
+        points = attr.Get() if attr else None
+        if not points:
+            continue
+        to_world = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        rest = np.asarray([[*to_world.Transform(p)] for p in points], dtype=np.float64)
+        nearest = np.empty(len(rest), dtype=np.int64)
+        for start in range(0, len(rest), 512):  # chunked: the product of both point counts is large
+            chunk = rest[start:start + 512]
+            nearest[start:start + 512] = np.argmin(((chunk[:, None, :] - sim_rest[None, :, :]) ** 2).sum(-1), axis=1)
+        bound.append((str(prim.GetPath()), rest, nearest))
+    return bound
+
+
+def _write_points(stage, prim_path, world_points):
+    from pxr import Gf, Usd, UsdGeom, Vt
+
+    prim = stage.GetPrimAtPath(prim_path)
+    to_local = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()).GetInverse()
+    local = [to_local.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2]))) for p in world_points]
+    UsdGeom.PointBased(prim).GetPointsAttr().Set(
+        Vt.Vec3fArray([Gf.Vec3f(float(v[0]), float(v[1]), float(v[2])) for v in local]))
+
+
 def write_points_back(stage, root_path, positions):
     """Put the solver's particles into the asset's geometry, so a capture shows the simulation.
 
@@ -83,10 +125,16 @@ def write_points_back(stage, root_path, positions):
         declared = any(name.endswith(api) for name in raw_api_schemas(prim) for api in DEFORMABLE_SIM_API)
         if not declared or len(points_attr.Get() or []) != len(positions):
             continue
-        to_local = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()).GetInverse()
-        local = [to_local.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2]))) for p in positions]
-        points_attr.Set(Vt.Vec3fArray([Gf.Vec3f(float(v[0]), float(v[1]), float(v[2])) for v in local]))
-        return str(prim.GetPath())
+        path = str(prim.GetPath())
+        if root_path not in _SKIN:
+            _SKIN[root_path] = (np.asarray(positions, dtype=np.float64),
+                                _skin_setup(stage, root_path, path, np.asarray(positions, dtype=np.float64)))
+        sim_rest, bound = _SKIN[root_path]
+        _write_points(stage, path, positions)
+        displacement = np.asarray(positions, dtype=np.float64) - sim_rest
+        for other_path, rest, nearest in bound:
+            _write_points(stage, other_path, rest + displacement[nearest])
+        return path + (f" (+{len(bound)} carried along)" if bound else "")
     return None
 
 

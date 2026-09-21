@@ -272,7 +272,33 @@ def _select_solver_by_config(solver):
     return f"cfg.solver_cfg = {solver!r} through asset_checks (this Isaac's _get_solver has no branch for it)"
 
 
-def select_solver(stage, engine, solver):
+def _preset_solver_config(solver, settings):
+    """Give Isaac the solver's config before it builds one, so settings survive initialisation.
+
+    Isaac replaces `cfg.solver_cfg` during init only when it is not already the right class, so a
+    config of that class set now is kept and its values are the ones the solver gets. Without this
+    there is nowhere to put a solver setting on Isaac 6.1.0: the scene schema selects the solver and
+    a fresh config comes with it."""
+    if not settings:
+        return None
+    import isaacsim.physics.newton as isaac_newton
+    from isaacsim.physics.newton.impl import newton_config, solver_config
+
+    by_type = {getattr(cls, "__dataclass_fields__", {}).get("solver_type").default: cls
+               for cls in vars(solver_config).values()
+               if isinstance(cls, type) and "solver_type" in getattr(cls, "__dataclass_fields__", {})}
+    config_class = by_type.get(solver)
+    if config_class is None:
+        return None
+    unknown = set(settings) - set(getattr(config_class, "__dataclass_fields__", {}))
+    if unknown:
+        raise RuntimeError(f"{config_class.__name__} has no {sorted(unknown)}; it has "
+                           f"{sorted(config_class.__dataclass_fields__)}")
+    isaac_newton.acquire_stage().cfg.solver_cfg = config_class(**settings)
+    return dict(settings)
+
+
+def select_solver(stage, engine, solver, settings=None):
     """Ask Isaac for `solver` and report how. Isaac 6.1.0 reads a solver's scene API schema off the
     PhysicsScene (`impl/utils.py newton_solver_to_api_schema`) and refuses a stage carrying two of
     them. Under PhysX there is nothing to select. Asking for the Isaac's own default needs nothing
@@ -285,6 +311,7 @@ def select_solver(stage, engine, solver):
     from asset_checks.envs import NEWTON_SOLVER_SCENE_API
 
     fit = check_asset_fits_solver(stage, ASSET_PRIM, solver)
+    fit["solver_settings"] = settings or None
     if engine != "newton":
         return {"requested": solver, "applied": None, "reason": f"{engine} has one solver", **fit}
     try:
@@ -308,6 +335,7 @@ def select_solver(stage, engine, solver):
         raise RuntimeError("no PhysicsScene on the stage to select a solver on")
     # engine-kit applies MjcSceneAPI when it builds a Newton scene, and Isaac takes a scene with two
     # solver schemas as having none ("Multiple solver APIs detected"), so the other one goes.
+    _preset_solver_config(solver, settings)
     replaced = []
     for prim in scenes:
         for other in set(mapping.values()) - {schema}:
