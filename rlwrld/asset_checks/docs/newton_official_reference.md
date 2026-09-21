@@ -180,3 +180,90 @@ Every run now prints which numbers came from the asset, with the prim and attrib
 each, and which are ours with the reason. What is legitimately ours is only what the USD has no
 way to express: the experiment's fixtures, the solver's numerics, and a stated fallback where the
 asset is silent.
+
+## VBD's colouring must include the bending edges
+
+`builder.color()` leaves them out unless asked, and VBD sweeps one colour at a time holding the
+others fixed: two particles joined only by a bending constraint then share a colour and the
+constraint is solved against a stale neighbour. Our cloth has 1240 of them.
+
+The failure is not a wobble. The sheet is stable until it lands and then diverges **on the frame
+it lands**, for every contact stiffness (1e2 to 2e6), every damping (1e2 to 1e-2) and every
+substep count (10 to 200) -- twelve runs, all frame 6. That uniformity is the tell: a resolution
+limit cannot produce it.
+
+`example_cloth_poker_cards.py` -- cloth dropped onto a ground plane, the shipped example of
+exactly this situation -- calls `builder.color(include_bending=True)`, and `color`'s own docstring
+says to set it whenever the model has bending edges. With it, 31.70 mm below the floor becomes
+0.00 mm and the sheet lies at z = 0.00049 m: one particle radius, the same rest height PhysX and
+both XPBDs give.
+
+**A sweep taken off a broken model argues for the wrong thing.** Contact stiffness 1e2 to 2e6
+moved the penetration 31.70 -> 0.22 mm, a clean monotone curve. It was measured on the
+mis-coloured model, and with the colouring right the value we already had is the best of the lot.
+Worth keeping from it: every shipped `soft_contact_ke` of 1e2 is in an example whose cloth *hangs*
+and touches nothing; the ones that touch something use 1e4 to 2e6.
+
+## Self-collision belongs to the asset
+
+`SELF_CONTACT = {"volume": False, "surface": True}` was a physical claim keyed on the element
+type: a cloth self-collided and a soft body did not. No deformable schema in either family has a
+switch for it -- the AOUSD/OmniPhysics surface deformable has only a `selfCollisionFilterPose`
+purpose, and PhysX's `physxParticle:selfCollision` is on a schema these assets never apply -- so
+where the asset is silent the deformable schema's own default answers, and
+`physxDeformableBody:selfCollision` defaults to **off**, the opposite of what we had.
+
+Of the five environments only Newton's VBD has the switch. SolverXPBD has none, and the
+OmniPhysics schemas the PhysX conversion applies declare none, so each runner prints which case it
+is in rather than letting a reader assume all five ran the same model. Measured on this cloth the
+answer does not move: z 0.00050-0.00051 with it on, 0.00050-0.00055 with it off.
+
+Newton 1.2.1's VBD cannot run this cloth with it off -- it diverges on the frame the sheet lands,
+and with it on the sheet survives but never settles (53 mm of crumple at 0.37 m/s after two
+seconds). Every cloth example 1.2.1 ships that has a ground plane turns self-contact on. 1.5.0 is
+correct either way. That is the engine result, and the asset's declaration still decides.
+
+## Two thresholds that were measuring the wrong thing
+
+**The drop is the starting clearance, not the lift.** The runners passed how far *they* raised the
+asset where the experiment asked how far it can fall. An asset authored at the drop height is
+lifted by nothing, so every threshold built on it collapsed to zero: a cloth lying perfectly still
+at 0.000 m/s read `never-settled`, and `never-fell` could never fire at all.
+
+**A speed is judged against a speed.** `2.0 * height` is zero for a sheet, so it fell back to the
+contact size -- a distance used as a speed. The drop states its own scale: `sqrt(2 g clearance)`,
+0.99 m/s here, and 2% of that is the threshold. It is looser for a sheet and tighter for a large
+asset, so PhysX's banana at 62 mm/s now reads `never-settled` where the height-scaled rule passed
+it. After two seconds on the floor it is still jittering, so that is the rule saying something
+true.
+
+## A mesh with animated points must carry an animated extent
+
+`UsdGeom.BBoxCache` reads an authored extent instead of the points, so a mesh referenced from the
+asset keeps the asset's static box at every time. The cloth's render mesh fell 49.5 mm and
+reported never moving; the renderer's "what moves?" found nothing and framed the floor instead.
+A freshly created mesh has no extent and escaped it. Every consumer of bounds was wrong, not only
+the camera.
+
+## The collision video must show what the engine collides with
+
+None of the eleven SimReady sample assets applies `UsdPhysics.MeshCollisionAPI` or authors an
+approximation, so PhysX cannot use their triangle meshes on a dynamic body and cooks a convex hull
+instead -- it logs that as an error on every load, and engine-kit's
+`physics_utils.report_collision_approximations` warns by name. The dishwand's sponge collides as a
+151 cm3 hull, not the 124 cm3 shape it looks like; the toaster collides with its bread slots
+filled in.
+
+`reading.collider_approximation` applies PhysX's rule -- a bare `physics:approximation` without
+the schema applied is ignored, a static collider keeps what it declares, a dynamic one that
+declares nothing usable gets a hull -- and `reading.collider_shape` builds it. A decomposition or
+an SDF is more than a copy of geometry can say, so there the mesh is kept and the run prints which
+approximation is really in force.
+
+**scipy's `ConvexHull.simplices` are not consistently wound.** Orient each against
+`hull.equations` or the mesh renders inside out in patches. The tell was hulls measuring *less*
+volume than the meshes they contain, which is impossible.
+
+The deformables need none of this: the banana hands PhysX its own tetrahedra, one TetMesh that is
+both simulation and collision mesh, and the cloth is a surface deformable with one mesh. The
+separate `collision_tetmesh` only appears where PhysX has to cook tetrahedra itself.
