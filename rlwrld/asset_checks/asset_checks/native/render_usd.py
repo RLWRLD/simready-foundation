@@ -1,6 +1,6 @@
 """Inside Kit: turn an animated USD into frames, with one fixed camera that frames the whole run.
 
-    ./isaac-run isaac610 tools/render_usd.py <animated.usda> <out_dir> [--fps 30] [--size 1024]
+    ./isaac-run isaac610 native/render_usd.py <recording.usda> <out_dir> [--fps 60] [--size 640] [--show visual|collision|both]
 
 Newton writes what it simulated with `newton.viewer.ViewerUSD`: the deformable's surface as an
 animated mesh and its particles as an animated point instancer. That file is the honest record of
@@ -27,7 +27,7 @@ ap.add_argument("stage")
 ap.add_argument("out_dir")
 ap.add_argument("--fps", type=float, default=30.0)
 ap.add_argument("--size", type=int, default=1024)
-ap.add_argument("--show", default="both", choices=("both", "sim", "visual"),
+ap.add_argument("--show", default="both", choices=("both", "collision", "visual"),
                 help="which of the two meshes a recording holds to photograph: the tetrahedral "
                      "surface the solver moved, the asset's textured render mesh carried along "
                      "by it, or whatever the file has")
@@ -59,7 +59,7 @@ settings.set("/rtx/pathtracing/spp", 1)
 # A recording holds both meshes so the two videos come from one run and line up frame for
 # frame. Hiding one is how a camera is pointed at the other; the framing is computed afterwards,
 # so it follows whichever is left visible.
-HIDDEN = {"sim": "/root/visual", "visual": "/root/sim"}
+HIDDEN = {"collision": "/root/visual", "visual": "/root/collision"}   # fixtures show in both
 
 GROUND_SPAN = 50.0   # a prim wider than this is scenery, not the subject
 ASSET_GROUND = "/root/ground"     # the recording's own floor; the room replaces it
@@ -72,7 +72,7 @@ UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
 
 if args.show != "both":
     hide = stage.GetPrimAtPath(HIDDEN[args.show])
-    keep = stage.GetPrimAtPath(HIDDEN["sim" if args.show == "visual" else "visual"])
+    keep = stage.GetPrimAtPath(HIDDEN["collision" if args.show == "visual" else "visual"])
     if not keep or not keep.IsValid():
         print(f"[render] FAIL: this recording has no {args.show} mesh to photograph")
         app.close()
@@ -170,16 +170,15 @@ ROOM_OF_SUBJECT = 10.0
 
 handle = KitSceneHandle(stage)
 room = handle.add_room()
-# `room.py::auto_size`: each axis ten times the subject, snapped up to a whole metre. NVIDIA writes
-# the snap as 100 because their assets are authored in centimetres; it is a metre either way, so it
-# is read off this stage rather than assumed.
-snap = 1.0 / max(UsdGeom.GetStageMetersPerUnit(stage), 1e-9)
+# `room.py::auto_size`, literally: each axis ten times the subject, snapped up to a multiple of 100
+# stage units. On a metre stage that is a 100 m room around a 10 cm orange -- which is the room the
+# live rigid captures show, far blue walls and all -- so it is kept, not "corrected".
+snap = 100.0
 room.set_size(*(max(math.ceil(max(float(s), 0.01) * ROOM_OF_SUBJECT / snap) * snap, snap) for s in size))
 room.set_color(*WALL_COLOUR)
 room.show_ground(color=GROUND_COLOUR)
 handle.lighting.add_dome(intensity=DOME_INTENSITY)
-room_xy = [max(math.ceil(max(float(s), 0.01) * ROOM_OF_SUBJECT / snap) * snap, snap) for s in (size[0], size[1])]
-cues = rigid_scene.add_visual_cues(stage, (centre[0], centre[1]), half_extent_m=max(room_xy) / 2.0)
+cues = rigid_scene.add_visual_cues(stage, (centre[0], centre[1]))   # its defaults are the rigid runs' cues
 print(f"[render] room {tuple(round(max(math.ceil(max(float(s), 0.01) * ROOM_OF_SUBJECT / snap) * snap, snap), 3) for s in size)}, "
       f"floor cues {cues}")
 

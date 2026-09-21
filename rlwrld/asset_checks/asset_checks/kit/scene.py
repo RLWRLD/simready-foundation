@@ -92,6 +92,15 @@ def select_runtime_variant(stage, asset_path, engine):
 
 LOOK_PRIM = "/World/AssetChecksLook"  # visual-only additions; nothing under it collides or has mass
 FLOOR_PRIM = "/World/Room/Floor"  # the visible floor of NVIDIA's test room (all three tests)
+# What a re-render of a run rebuilds for itself rather than copies out of the test's stage: the
+# room, the invisible collision slab under it, our floor cues, and NVIDIA's lights and camera.
+# Everything else that is visible and has geometry is a subject -- the asset, a slope, a gripper --
+# and is recorded, whatever its name.
+# The room is named by its members, not as a whole: NVIDIA's room.py puts the slope drop's slope
+# under /World/Room too, and that is furniture the test placed, to be recorded like a gripper.
+SCENERY = ("/World/Room/Bottom", "/World/Room/Floor", "/World/Room/North", "/World/Room/South",
+           "/World/Room/West", "/World/Room/East", "/World/GroundPlane", LOOK_PRIM, "/World/Lights",
+           "/World/Camera", "/World/ViewportAnnotations", "/World/JM_ForceArrow", "/World/_TestWorldPin")
 
 
 def add_visual_cues(stage, center_xy, tile_m=0.1, half_extent_m=5.0, key_intensity=1000.0):

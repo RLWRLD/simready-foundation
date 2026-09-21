@@ -284,3 +284,129 @@ def stack_notes(stage, engine, root_path):
                       "simulated_kg": round(simulated, 5),
                       "ratio_to_authored": round(simulated / canonical, 3) if canonical > 0 else None})
     return notes
+
+
+def fixture_gprims(stage, asset_root, scenery):
+    """The visible geometry in the scene that is neither the asset nor scenery: the slope, the
+    gripper's pads, whatever a test builds around the asset. Each is a leaf, so it can be copied
+    and placed by its own world matrix without any hierarchy to reproduce."""
+    from pxr import Usd, UsdGeom
+
+    out = []
+    for prim in Usd.PrimRange(stage.GetPrimAtPath("/World")):
+        path = str(prim.GetPath())
+        if path == asset_root or path.startswith(asset_root + "/"):
+            continue
+        if any(path == s or path.startswith(s + "/") for s in scenery):
+            continue
+        if not prim.IsA(UsdGeom.Gprim):
+            continue
+        if UsdGeom.Imageable(prim).ComputeVisibility() != UsdGeom.Tokens.inherited:
+            continue
+        out.append(path)
+    return out
+
+
+def matrices(stage, paths, engine):
+    """World matrices for any prims. A prim that is, or sits under, a rigid body is placed by that
+    body's matrix read the way `body_matrices` reads it (Fabric under Newton) and its own USD offset
+    from the body -- a collider does not move relative to its body, and only bodies are on the
+    Fabric stage. Anything else is read from USD, where a static fixture sits."""
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    def owner(path):
+        prim = stage.GetPrimAtPath(path)
+        while prim and prim.IsValid() and not prim.IsPseudoRoot():
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                return str(prim.GetPath())
+            prim = prim.GetParent()
+        return None
+
+    owners = {p: owner(p) for p in paths}
+    bodies = sorted({b for b in owners.values() if b})
+    body_world = body_matrices(stage, bodies, engine)[0] if bodies else {}
+    cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    out = {}
+    for path in paths:
+        body = owners[path]
+        if body is None:
+            out.update(_usd_matrices(stage, [path]))
+            continue
+        rel, _ = cache.ComputeRelativeTransform(stage.GetPrimAtPath(path), stage.GetPrimAtPath(body))
+        world = rel * type(rel)(*[v for row in body_world[body] for v in row])
+        out[path] = [[float(world[r][c]) for c in range(4)] for r in range(4)]
+    return out
+
+
+# Attribute namespaces that place a prim or run physics on it. A copy gets neither: a recording
+# places its copies itself, and physics never runs on a recording.
+NOT_COPIED = ("xformOp", "physics", "physxCollision", "physxRigidBody", "physxConvexHullCollision",
+              "physxConvexDecompositionCollision", "physxTriangleMeshCollision", "physxSDFMeshCollision")
+
+
+def copy_gprim(source, stage, path):
+    """A leaf copy of a gprim's composed attributes -- its type, points, size, colour -- with no
+    transform and no physics on it. The one way geometry is copied out of a stage, used for a
+    fixture the test built and for the colliders an asset declares."""
+    from pxr import UsdGeom
+
+    copy = stage.DefinePrim(path, source.GetTypeName())
+    for attr in source.GetAttributes():
+        if attr.GetNamespace() in NOT_COPIED or attr.GetName() == "xformOpOrder":
+            continue
+        value = attr.Get()
+        if value is None:
+            continue
+        copy.CreateAttribute(attr.GetName(), attr.GetTypeName(), custom=attr.IsCustom()).Set(value)
+    colour = bound_colour(source)
+    if colour is not None:
+        # A material is a binding, not an attribute, and a copy has none. The flat colour NVIDIA's
+        # room gives a slope (`apply_flat_color`: a UsdPreviewSurface with a diffuseColor) is what
+        # a viewer sees, so it travels with the copy as its displayColor.
+        from pxr import Gf, Vt
+
+        UsdGeom.Gprim(copy).CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*colour)]))
+    return copy
+
+
+def bound_colour(prim):
+    """The diffuse colour of the material bound to `prim`, or None when there is none or it is
+    not a plain colour."""
+    from pxr import UsdShade
+
+    material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+    if not material:
+        return None
+    for shader in (UsdShade.Shader(child) for child in material.GetPrim().GetChildren()):
+        if not shader:
+            continue
+        colour = shader.GetInput("diffuseColor")
+        if colour and colour.Get() is not None and not colour.GetConnectedSource():
+            return tuple(float(v) for v in colour.Get())
+    return None
+
+
+def export_fixtures(stage, paths, target):
+    """Copy the fixtures' geometry -- every authored attribute of each gprim, its type and its
+    material-free colour -- into their own layer, one leaf each under /fixtures, so a recording can
+    reference it and place each one by its recorded world matrix. Returns {live path: copy path}."""
+    from pxr import Sdf, Usd, UsdGeom
+
+    layer = Usd.Stage.CreateNew(str(target))
+    UsdGeom.SetStageUpAxis(layer, UsdGeom.GetStageUpAxis(stage))
+    UsdGeom.SetStageMetersPerUnit(layer, UsdGeom.GetStageMetersPerUnit(stage))
+    root = UsdGeom.Xform.Define(layer, "/fixtures")
+    layer.SetDefaultPrim(root.GetPrim())
+    where = {}
+    for path in paths:
+        source = stage.GetPrimAtPath(path)
+        name = Sdf.Path(path).name
+        copy_path = f"/fixtures/{name}"
+        n = 1
+        while layer.GetPrimAtPath(copy_path):
+            n += 1
+            copy_path = f"/fixtures/{name}_{n}"
+        copy_gprim(source, layer, copy_path)
+        where[path] = copy_path
+    layer.GetRootLayer().Save()
+    return where

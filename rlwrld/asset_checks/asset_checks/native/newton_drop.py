@@ -1,6 +1,6 @@
 """Drop a deformable USD on a ground plane in plain Newton, and report what happens.
 
-    <venv>/bin/python tools/newton_baseline.py <asset.usda> [--solver vbd|xpbd]
+    <venv>/bin/python native/newton_drop.py <asset.usda> [--solver vbd|xpbd]
                                                [--fps 60] [--seconds 3] [--drop 0.05]
                                                [--radius auto|<m>] [--usd out.usda]
 

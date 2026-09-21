@@ -1,6 +1,6 @@
 """Press a deformable USD with a driven plate in plain Newton, and report how far it gives.
 
-    <venv>/bin/python tools/newton_press.py <asset.usda> [--solver vbd|xpbd] [--usd out.usda]
+    <venv>/bin/python native/newton_press.py <asset.usda> [--solver vbd|xpbd] [--usd out.usda]
                                             [--press-to 0.6] [--seconds 4]
 
 The drop test asks whether an asset falls and settles. This asks what it does when something

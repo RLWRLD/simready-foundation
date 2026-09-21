@@ -3,8 +3,8 @@
 One shape of artefact for all four runners. Each frame the recording is handed the simulation
 mesh's nodes -- particles from Newton, tensor-view nodes from PhysX -- and it writes two things:
 
-  * `/root/sim`, the tetrahedral surface the solver actually moved. This is the physics, with
-    nothing between it and the viewer;
+  * `/root/collision`, the surface the solver actually moved -- the geometry the engine collides
+    with. This is the physics, with nothing between it and the viewer;
   * `/root/visual`, the asset's own textured render mesh, carried along by the tetrahedra it sits
     in. This is what the thing looks like.
 
@@ -14,18 +14,45 @@ can photograph either by hiding the other and the two videos line up frame for f
 Nothing here knows which engine is calling. That is the point: a difference between two videos
 has to be a difference between two solvers, not between two recorders.
 """
+import pathlib
+import sys
+
 import numpy as np
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
 
 import skinning
 import usd_deformable
 
-SIM = "/root/sim"
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+from asset_checks.kit.reading import copy_gprim  # noqa: E402  -- the one way geometry is copied out of a stage
+
+COLLISION = "/root/collision"
 VISUAL = "/root/visual"
 GROUND = "/root/ground"
 PLATE = "/root/plate"
-SIM_COLOUR = (0.92, 0.78, 0.25)
+FIXTURES = "/root/fixtures"
+COLLISION_COLOUR = (0.92, 0.78, 0.25)
 PLATE_OPACITY = 0.18
+
+
+def _ground(stage, half):
+    """The recording's own floor, a marker of where z = 0 is; the renderer hides it and builds the
+    room in its place."""
+    plane = UsdGeom.Mesh.Define(stage, GROUND)
+    h = float(half)
+    plane.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(-h, -h, 0.0), Gf.Vec3f(h, -h, 0.0),
+                                          Gf.Vec3f(h, h, 0.0), Gf.Vec3f(-h, h, 0.0)]))
+    plane.CreateFaceVertexCountsAttr(Vt.IntArray([4]))
+    plane.CreateFaceVertexIndicesAttr(Vt.IntArray([0, 1, 2, 3]))
+    return plane
+
+
+def _unique(stage, path):
+    candidate, n = path, 1
+    while stage.GetPrimAtPath(candidate):
+        n += 1
+        candidate = f"{path}_{n}"
+    return candidate
 
 
 class Recording:
@@ -50,11 +77,11 @@ class Recording:
         self.elements = np.asarray(elements, dtype=np.int64)
 
         faces = skinning.surface_faces(self.elements)
-        self.sim = UsdGeom.Mesh.Define(self.stage, SIM)
-        self.sim.CreateFaceVertexCountsAttr(Vt.IntArray([3] * len(faces)))
-        self.sim.CreateFaceVertexIndicesAttr(Vt.IntArray([i for face in faces for i in face]))
-        self.sim.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*SIM_COLOUR)]))
-        self.sim.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+        self.collision = UsdGeom.Mesh.Define(self.stage, COLLISION)
+        self.collision.CreateFaceVertexCountsAttr(Vt.IntArray([3] * len(faces)))
+        self.collision.CreateFaceVertexIndicesAttr(Vt.IntArray([i for face in faces for i in face]))
+        self.collision.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*COLLISION_COLOUR)]))
+        self.collision.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
 
         self.visual = self.binding = None
         # The asset's own rest pose is what a binding is made in, and it is read back from the
@@ -63,12 +90,7 @@ class Recording:
         if asset:
             self._bind_visual(asset, sim_prim_path, None)
 
-        plane = UsdGeom.Mesh.Define(self.stage, GROUND)
-        h = ground_half
-        plane.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(-h, -h, 0.0), Gf.Vec3f(h, -h, 0.0),
-                                              Gf.Vec3f(h, h, 0.0), Gf.Vec3f(-h, h, 0.0)]))
-        plane.CreateFaceVertexCountsAttr(Vt.IntArray([4]))
-        plane.CreateFaceVertexIndicesAttr(Vt.IntArray([0, 1, 2, 3]))
+        _ground(self.stage, ground_half)
 
         self.plate = None
         # Where the simulation puts the plate, not the origin. The runner centres it on the
@@ -115,7 +137,7 @@ class Recording:
         source.GetReferences().AddReference(str(asset))
         # The asset's own simulated prim comes along with the reference and would sit inside the
         # moving mesh at its rest pose. The recording already draws that geometry, moving, as
-        # /root/sim.
+        # /root/collision.
         if sim_prim_path:
             simulated = self.stage.GetPrimAtPath(f"{VISUAL}/{Sdf.Path(sim_prim_path).name}")
             if simulated:
@@ -218,7 +240,7 @@ class Recording:
     def frame(self, index, node_points, plate_z=None):
         nodes = np.asarray(node_points, dtype=np.float64)
         time = Usd.TimeCode(index)
-        self._write_points(self.sim, nodes, time)
+        self._write_points(self.collision, nodes, time)
         if self.visual is not None:
             moved = nodes if self.binding is None else skinning.deform(self.binding, self.elements, nodes)
             self._write_points(self.visual, moved, time)
@@ -229,3 +251,161 @@ class Recording:
 
     def close(self):
         self.stage.GetRootLayer().Save()
+
+
+class RigidRecording:
+    """One rigid run, drawn again from the poses the engine reported.
+
+    Under /root/visual the asset is referenced as it is, textures and all; its root takes the
+    recorded pose of the test's asset root (a test may load it lifted), and each rigid body's prim
+    takes its recorded world matrix, expressed in its parent's frame. Under /root/collision each
+    body's declared colliders -- the gprims carrying CollisionAPI, copied in the body's frame and
+    flat-coloured -- ride the same matrices: what the USD says the engine collides with, where the
+    engine put it. Under /root/fixtures the test's own furniture (a slope, a gripper's pads) comes
+    in from the layer the run saved, each piece placed by its own recorded matrix. Fixtures show in
+    both views; only the asset changes clothes.
+    """
+
+    def __init__(self, path, fps, asset, result, fixtures_layer=None, ground_half=2.0):
+        traj = result["trajectory"]
+        self.times = np.asarray(traj["t"], dtype=np.float64)
+        self.poses = {p: np.asarray(v, dtype=np.float64) for p, v in traj["pose"].items()}
+        # A series that started late -- a gripper built after the asset settled -- is indexed from
+        # the step it started at, and its prim is invisible before then.
+        self.pose_from = {p: int(traj.get("pose_from", {}).get(p, 0)) for p in self.poses}
+        self.asset_prim = result["asset_prim"]
+        self.bodies = list(result.get("rigid_bodies") or [])
+        self.fixtures = dict((result.get("fixtures") or {}).get("prims") or {})
+        self.fps = fps
+        self.frames = int(round(self.times[-1] * fps)) + 1
+
+        self.stage = Usd.Stage.CreateNew(str(path))
+        UsdGeom.SetStageUpAxis(self.stage, UsdGeom.Tokens.z)
+        UsdGeom.SetStageMetersPerUnit(self.stage, 1.0)
+        self.stage.SetDefaultPrim(UsdGeom.Xform.Define(self.stage, "/root").GetPrim())
+        self.stage.SetTimeCodesPerSecond(fps)
+        self.stage.SetFramesPerSecond(fps)
+        self.stage.SetStartTimeCode(0)
+        self.stage.SetEndTimeCode(self.frames - 1)
+        self._ops = {}
+        self._live = {}
+
+        # The asset, as it is.
+        visual = self.stage.DefinePrim(VISUAL)
+        visual.GetReferences().AddReference(str(asset))
+        self.visual_bodies = {}
+        for body in self.bodies:
+            rel = body[len(self.asset_prim) + 1:]
+            prim = self.stage.GetPrimAtPath(f"{VISUAL}/{rel}")
+            if not prim or not prim.IsValid():
+                raise SystemExit(f"[recording] {body} is not under the referenced asset as {VISUAL}/{rel}")
+            self.visual_bodies[body] = prim
+
+        # Its declared colliders, copied in each body's frame.
+        asset_stage = Usd.Stage.Open(str(asset))
+        asset_root = asset_stage.GetDefaultPrim().GetPath()
+        cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        self.collision_bodies = {}
+        for body in self.bodies:
+            rel = body[len(self.asset_prim) + 1:]
+            body_prim = asset_stage.GetPrimAtPath(asset_root.AppendPath(rel))
+            if not body_prim or not body_prim.IsValid():
+                raise SystemExit(f"[recording] {body} is {rel} under {asset_root} in {asset}, which does not exist")
+            holder = UsdGeom.Xform.Define(self.stage, _unique(self.stage, f"{COLLISION}/{Sdf.Path(body).name}"))
+            self.collision_bodies[body] = holder.GetPrim()
+            copied = 0
+            for gprim in Usd.PrimRange(body_prim, Usd.TraverseInstanceProxies()):
+                if not (gprim.IsA(UsdGeom.Gprim) and gprim.HasAPI(UsdPhysics.CollisionAPI)):
+                    continue
+                if gprim != body_prim and str(gprim.GetPath()) in {asset_root.AppendPath(b[len(self.asset_prim) + 1:]) for b in self.bodies}:
+                    continue  # a nested body owns its own
+                copy = copy_gprim(gprim, self.stage, _unique(self.stage, f"{holder.GetPath()}/{gprim.GetName()}"))
+                relative, _ = cache.ComputeRelativeTransform(gprim, body_prim)
+                UsdGeom.Xformable(copy).AddTransformOp().Set(relative)
+                g = UsdGeom.Gprim(copy)
+                g.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*COLLISION_COLOUR)]))
+                if copy.IsA(UsdGeom.Mesh):
+                    UsdGeom.Mesh(copy).CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+                copied += 1
+            if not copied:
+                raise SystemExit(f"[recording] {body} declares no collider (no CollisionAPI gprim under it)")
+
+        # The test's furniture.
+        self.fixture_prims = {}
+        if self.fixtures:
+            if not fixtures_layer:
+                raise SystemExit("[recording] the run recorded fixtures but no fixtures layer was given")
+            root = self.stage.DefinePrim(FIXTURES)
+            root.GetReferences().AddReference(str(fixtures_layer))
+            for live, copy_path in self.fixtures.items():
+                prim = self.stage.GetPrimAtPath(f"{FIXTURES}/{Sdf.Path(copy_path).name}")
+                if not prim or not prim.IsValid():
+                    raise SystemExit(f"[recording] fixture {live} was saved as {copy_path} but is not in {fixtures_layer}")
+                self.fixture_prims[live] = prim
+        self._live = {prim.GetPath(): live for live, prim in self.fixture_prims.items()}
+        _ground(self.stage, ground_half)
+
+    def _pose_at(self, path, seconds):
+        """The recorded matrix nearest `seconds`, or None before the series began."""
+        i = int(np.argmin(np.abs(self.times - seconds))) - self.pose_from[path]
+        if i < 0:
+            return None
+        return self.poses[path][min(i, len(self.poses[path]) - 1)]
+
+    def _place(self, prim, flat16, tc):
+        """Give `prim` the recorded world matrix at `tc`, as a transform in its parent's frame;
+        with no matrix yet, hide it at `tc`."""
+        key = prim.GetPath()
+        visibility = UsdGeom.Imageable(prim).GetVisibilityAttr() or UsdGeom.Imageable(prim).CreateVisibilityAttr()
+        if flat16 is None:
+            visibility.Set(UsdGeom.Tokens.invisible, tc)
+            return
+        if key not in self._ops:
+            xf = UsdGeom.Xformable(prim)
+            xf.ClearXformOpOrder()
+            self._ops[key] = xf.AddTransformOp()
+            if self.pose_from.get(self._live.get(key), 0) > 0:
+                visibility.Set(UsdGeom.Tokens.inherited, tc)   # it has just appeared
+        parent_world = UsdGeom.XformCache(tc).GetLocalToWorldTransform(prim.GetParent())
+        world = Gf.Matrix4d(*[float(v) for v in flat16])
+        self._ops[key].Set(world * parent_world.GetInverse(), tc)
+
+    def write(self):
+        visual_root = self.stage.GetPrimAtPath(VISUAL)
+        ordered = sorted(self.bodies, key=lambda b: b.count("/"))  # parents before children
+        for frame in range(self.frames):
+            seconds, tc = frame / self.fps, Usd.TimeCode(frame)
+            self._place(visual_root, self._pose_at(self.asset_prim, seconds), tc)
+            for body in ordered:
+                pose = self._pose_at(body, seconds)
+                self._place(self.visual_bodies[body], pose, tc)
+                self._place(self.collision_bodies[body], pose, tc)
+            for live, prim in self.fixture_prims.items():
+                self._place(prim, self._pose_at(live, seconds), tc)
+
+    def close(self):
+        self.stage.GetRootLayer().Save()
+
+
+def main():
+    """`python recording.py --rigid <result.json> <asset> <out.usda> [--fps 60]`: the animated USD
+    of a rigid cell, from the poses its run recorded."""
+    import argparse
+    import json
+
+    ap = argparse.ArgumentParser(description=main.__doc__.splitlines()[0])
+    ap.add_argument("--rigid", nargs=3, metavar=("RESULT_JSON", "ASSET", "OUT_USDA"), required=True)
+    ap.add_argument("--fps", type=int, default=60)
+    a = ap.parse_args()
+    result_json, asset, out = (pathlib.Path(x) for x in a.rigid)
+    result = json.loads(result_json.read_text())
+    fixtures = result_json.parent / result["fixtures"]["layer"] if result.get("fixtures") else None
+    rec = RigidRecording(out, a.fps, asset.resolve(), result, fixtures)
+    rec.write()
+    rec.close()
+    print(f"[recording] {out}: {rec.frames} frames at {a.fps} fps, {len(rec.bodies)} body(ies), "
+          f"{len(rec.fixture_prims)} fixture(s)")
+
+
+if __name__ == "__main__":
+    main()
