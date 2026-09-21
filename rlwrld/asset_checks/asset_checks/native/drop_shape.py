@@ -31,13 +31,18 @@ GRAVITY = 9.81
 FLAT_OF_HEIGHT = 0.1
 
 
-def impact_speed(drop):
-    """How fast the experiment's own drop leaves the asset travelling when it lands."""
-    return (2.0 * GRAVITY * max(drop, 0.0)) ** 0.5
+def impact_speed(clearance):
+    """How fast a fall through `clearance` leaves the asset travelling when it lands."""
+    return (2.0 * GRAVITY * max(clearance, 0.0)) ** 0.5
 
 
-def verdict(finite, fell, drop, below, height, speed, contact_size):
+def verdict(finite, fell, clearance, below, height, speed, contact_size):
     """What the run showed.
+
+    `clearance` is how far the asset can fall: its lowest point's height above the floor when the
+    experiment lets go. Not how far a runner lifted it -- an asset already authored at the drop
+    height is lifted by nothing, and reading the lift as the drop made every threshold built on it
+    collapse to zero, so a cloth that had settled perfectly read `never-settled`.
 
     `contact_size` is the one engine quantity this takes, and only as a floor under the one
     threshold that is a distance: a depth written purely as a fraction of the asset's height is
@@ -48,11 +53,11 @@ def verdict(finite, fell, drop, below, height, speed, contact_size):
     """
     if not finite:
         return "diverged"
-    if fell < MIN_FALL_OF_DROP * drop:
+    if fell < MIN_FALL_OF_DROP * clearance:
         return "never-fell"
     if below > max(TUNNEL_DEPTH_OF_HEIGHT * height, 2.0 * contact_size):
         return "through-the-floor"
-    if speed > SETTLED_OF_IMPACT * impact_speed(drop):
+    if speed > SETTLED_OF_IMPACT * impact_speed(clearance):
         return "never-settled"
     return "pass"
 

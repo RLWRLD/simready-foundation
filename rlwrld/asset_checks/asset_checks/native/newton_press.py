@@ -191,6 +191,13 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
 
     self_collision, why = asset_properties.self_collision(declared)
     print(f"[press] self-collision {'on' if self_collision else 'off'} -- {why}")
+    if solver_name == "vbd" and not self_collision and not model.tet_count:
+        # Context for a cell that dies here. Every cloth example Newton ships that has a ground
+        # plane -- bending, franka, hanging, poker_cards, rollers -- enables self-contact, so a
+        # sheet run without it is outside anything the engine demonstrates. 1.5.0 handles it; 1.2.1
+        # diverges on the first frame. We follow the asset either way and report what happened.
+        print(f"[press] no cloth example Newton ships runs a sheet over a ground plane with "
+              f"self-contact off; if this cell diverges, that is the reason to look at first")
     if solver_name != "vbd":
         print(f"[press] SolverXPBD has no particle self-collision switch, so this run has none")
 

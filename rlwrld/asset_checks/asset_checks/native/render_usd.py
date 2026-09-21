@@ -46,6 +46,14 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux  # noqa: E402
 settings = carb.settings.get_settings()
 settings.set("/app/asyncRendering", False)          # so a grab cannot race the render thread
 settings.set("/app/asyncRenderingLowLatency", False)
+# What the rigid captures turn off, from the code that turns them off
+# (`simready_benchmark_engine_kit/kit_engine_proxy.py`): without these the stage's red and green
+# axis lines are drawn across the floor and no rigid video has them.
+settings.set("/app/viewport/grid/enabled", False)      # omni.kit.viewport.legacy_gizmos reads this
+settings.set("/persistent/app/viewport/displayOptions", 0)   # bitmask; 0 is nothing visible
+settings.set("/rtx/wireframe/enabled", False)
+for key in ("visualizationCollisionMesh", "visualizationDisplayJoints", "visualizationSimulationOutput"):
+    settings.set(f"/persistent/physics/{key}", False)
 settings.set("/rtx/pathtracing/spp", 1)
 
 # A recording holds both meshes so the two videos come from one run and line up frame for
@@ -146,61 +154,42 @@ size = bounds.GetSize()
 span = max(size[0], size[1], size[2])
 print(f"[render] bounds centre {tuple(round(c, 4) for c in centre)} size {tuple(round(s, 4) for s in size)}")
 
-# The framing the rigid runs use, so a deformable video sits beside a rigid one without the eye
-# having to re-orient: `simready_benchmark_engine_kit/camera_follow.py` places the camera along
-# (0.3, 0.8, 0.4) from the subject's centre with a 35 mm lens on a 36 mm aperture, far enough back
-# that the bounding box's diagonal fills the frame with a fifth to spare.
-FOCAL_LENGTH, APERTURE, MARGIN = 35.0, 36.0, 1.2
-CAMERA_DIRECTION = Gf.Vec3d(0.3, 0.8, 0.4).GetNormalized()
+# The framing, the room and the floor of the rigid runs, from the code that made them rather than
+# from a reading of it. `simready_benchmark_engine_kit` owns the camera maths and the room;
+# NVIDIA's own ground_drop test states the colours; `asset_checks.kit.scene.add_visual_cues` draws
+# the checkerboard that makes the floor readable. A copy of any of this is a copy that drifts --
+# an earlier hand-rolled version of these forty lines put the camera high over a plain grey room.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+from asset_checks.kit import scene as rigid_scene                   # noqa: E402
+from simready_benchmark_engine_kit import camera_follow             # noqa: E402
+from simready_benchmark_engine_kit.scene_handle import KitSceneHandle  # noqa: E402
 
-diagonal = max(0.1, (size[0] ** 2 + size[1] ** 2 + size[2] ** 2) ** 0.5)
-fov = 2.0 * math.atan(APERTURE / (2.0 * FOCAL_LENGTH))
-distance = max(0.1, diagonal * MARGIN / (2.0 * math.tan(fov / 2.0)))
-eye = centre + CAMERA_DIRECTION * distance
-camera = UsdGeom.Camera.Define(stage, "/RenderCamera")
-camera.CreateFocalLengthAttr(FOCAL_LENGTH)
-camera.CreateHorizontalApertureAttr(APERTURE)
-camera.CreateVerticalApertureAttr(APERTURE)
-camera.CreateClippingRangeAttr(Gf.Vec2f(max(1e-3, distance * 0.01), distance * 20.0))
-forward = (centre - eye).GetNormalized()
-right = Gf.Cross(forward, Gf.Vec3d(0, 0, 1)).GetNormalized()
-up = Gf.Cross(right, forward).GetNormalized()
-m = Gf.Matrix4d(1.0)
-m.SetRow3(0, right)
-m.SetRow3(1, up)
-m.SetRow3(2, -forward)
-m.SetTranslateOnly(eye)
-UsdGeom.Xformable(camera).AddTransformOp().Set(m)
-
-# ...and the room: floor plus four walls, ten times the subject's box, so the background is a
-# room rather than an empty plane running to the horizon. Same rule as `room.py::auto_size`.
+# `simready_benchmark_kit_suite/fet003_physics/ground_drop.py`, the rigid drop these sit beside.
+WALL_COLOUR = (0.3, 0.4, 0.7)     # "saturated blue walls"
+GROUND_COLOUR = (0.25, 0.35, 0.6)  # "darker blue ground"
+DOME_INTENSITY = 1000.0
 ROOM_OF_SUBJECT = 10.0
-room_x = max(size[0], 0.01) * ROOM_OF_SUBJECT
-room_y = max(size[1], 0.01) * ROOM_OF_SUBJECT
-room_z = max(size[2], 0.01) * ROOM_OF_SUBJECT
-room = UsdGeom.Xform.Define(stage, "/RenderRoom")
-for name, translate, scale in (
-    ("floor", (centre[0], centre[1], bounds.GetMin()[2] - room_z * 0.005), (room_x / 2, room_y / 2, room_z * 0.005)),
-    ("back", (centre[0], centre[1] + room_y / 2, centre[2] + room_z / 2), (room_x / 2, room_z * 0.005, room_z / 2)),
-    ("front", (centre[0], centre[1] - room_y / 2, centre[2] + room_z / 2), (room_x / 2, room_z * 0.005, room_z / 2)),
-    ("left", (centre[0] - room_x / 2, centre[1], centre[2] + room_z / 2), (room_z * 0.005, room_y / 2, room_z / 2)),
-    ("right", (centre[0] + room_x / 2, centre[1], centre[2] + room_z / 2), (room_z * 0.005, room_y / 2, room_z / 2)),
-):
-    wall = UsdGeom.Cube.Define(stage, f"/RenderRoom/{name}")
-    wall.CreateSizeAttr(2.0)
-    UsdGeom.XformCommonAPI(wall).SetScale(Gf.Vec3f(*scale))
-    UsdGeom.XformCommonAPI(wall).SetTranslate(Gf.Vec3d(*translate))
-    wall.CreateDisplayColorAttr([Gf.Vec3f(0.55, 0.55, 0.58)])
 
-if not any(prim.IsA(UsdLux.BoundableLightBase) or prim.IsA(UsdLux.NonboundableLightBase)
-           for prim in stage.Traverse()):
-    dome = UsdLux.DomeLight.Define(stage, "/RenderDome")
-    dome.CreateIntensityAttr(800.0)
-    key = UsdLux.DistantLight.Define(stage, "/RenderKey")
-    key.CreateIntensityAttr(2500.0)
-    key.CreateAngleAttr(1.0)
-    UsdGeom.Xformable(key).AddRotateXYZOp().Set(Gf.Vec3f(-40.0, 0.0, 35.0))
-    print("[render] the stage had no lights; added a dome and a key")
+handle = KitSceneHandle(stage)
+room = handle.add_room()
+# `room.py::auto_size`: each axis ten times the subject, snapped up to a whole metre. NVIDIA writes
+# the snap as 100 because their assets are authored in centimetres; it is a metre either way, so it
+# is read off this stage rather than assumed.
+snap = 1.0 / max(UsdGeom.GetStageMetersPerUnit(stage), 1e-9)
+room.set_size(*(max(math.ceil(max(float(s), 0.01) * ROOM_OF_SUBJECT / snap) * snap, snap) for s in size))
+room.set_color(*WALL_COLOUR)
+room.show_ground(color=GROUND_COLOUR)
+handle.lighting.add_dome(intensity=DOME_INTENSITY)
+cues = rigid_scene.add_visual_cues(stage, (centre[0], centre[1]))
+print(f"[render] room {tuple(round(max(math.ceil(max(float(s), 0.01) * ROOM_OF_SUBJECT / snap) * snap, snap), 3) for s in size)}, "
+      f"floor cues {cues}")
+
+params = camera_follow.compute_target_from_bbox(center=tuple(float(c) for c in centre),
+                                                size=tuple(float(s) for s in size))
+camera = UsdGeom.Camera.Define(stage, "/RenderCamera")
+camera_follow.apply_camera_params(stage, "/RenderCamera", params)
+print(f"[render] camera from camera_follow: {params}")
+
 
 # Anything that moves and was not given a colour gets one. Newton writes the simulated surface
 # as a plain mesh with no displayColor, so the asset came out the same grey as the floor and the
