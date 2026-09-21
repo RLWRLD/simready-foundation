@@ -286,6 +286,107 @@ def stack_notes(stage, engine, root_path):
     return notes
 
 
+# What PhysX does with a dynamic mesh collider, given what the asset declares. A bare
+# `physics:approximation` without `UsdPhysics.MeshCollisionAPI` applied is ignored, and an
+# approximation PhysX cannot use on a dynamic body falls back to a convex hull -- engine-kit's
+# `physics_utils.report_collision_approximations` says so in as many words, and Isaac logs the
+# fallback as an error. These are the approximations it can use.
+DYNAMIC_APPROXIMATIONS = ("convexHull", "convexDecomposition", "boundingCube", "boundingSphere", "sdf")
+
+
+def collider_approximation(prim):
+    """-> (what the engine collides with for this collider, why).
+
+    The names are UsdPhysics': "none" means the mesh itself. A static collider keeps whatever it
+    declares; a dynamic one gets convexHull wherever PhysX would.
+    """
+    from pxr import UsdPhysics
+
+    declared = "none"
+    if prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+        declared = str(UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get() or "none")
+    elif prim.GetAttribute("physics:approximation") and prim.GetAttribute("physics:approximation").HasAuthoredValue():
+        return ("convexHull",
+                f"physics:approximation={prim.GetAttribute('physics:approximation').Get()!r} is authored without "
+                f"UsdPhysics.MeshCollisionAPI, so PhysX ignores it and falls back to a convex hull")
+    if "PhysxSDFMeshCollisionAPI" in prim.GetAppliedSchemas():
+        declared = "sdf"
+    if not _under_dynamic_body(prim):
+        return declared, "declared, and static so PhysX keeps it"
+    if declared in DYNAMIC_APPROXIMATIONS:
+        return declared, "declared"
+    return "convexHull", f"declared {declared!r}, which PhysX cannot use on a dynamic body, so it falls back"
+
+
+def _under_dynamic_body(prim):
+    from pxr import UsdPhysics
+
+    while prim and prim.IsValid() and not prim.IsPseudoRoot():
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            enabled = prim.GetAttribute("physics:rigidBodyEnabled")
+            kinematic = prim.GetAttribute("physics:kinematicEnabled")
+            return (enabled.Get() is not False if enabled else True) and not (kinematic and kinematic.Get())
+        prim = prim.GetParent()
+    return False
+
+
+def collider_shape(points, approximation):
+    """The points of the shape the engine collides with, and its triangles.
+
+    `convexHull` is the hull of the collider's own points, which is what PhysX cooks from them;
+    the bounding shapes are built from the same points. `none` is the mesh itself, and anything
+    else (a decomposition, an SDF) is more than a copy of the geometry can say, so the caller is
+    told to keep the mesh and report the approximation's name beside it.
+    """
+    import numpy as np
+
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if approximation in ("none", "convexDecomposition", "sdf", "meshSimplification"):
+        return None
+    if approximation == "boundingCube":
+        lo, hi = points.min(axis=0), points.max(axis=0)
+        corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+        faces = [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)]
+        return corners, [list(f) for f in faces]
+    if approximation == "boundingSphere":
+        centre = 0.5 * (points.min(axis=0) + points.max(axis=0))
+        radius = float(np.linalg.norm(points - centre, axis=1).max())
+        return _sphere(centre, radius)
+    if approximation == "convexHull":
+        from scipy.spatial import ConvexHull
+
+        hull = ConvexHull(points)
+        used = sorted(set(int(i) for face in hull.simplices for i in face))
+        index = {old: new for new, old in enumerate(used)}
+        faces = []
+        # `simplices` are not consistently wound, and a mesh whose triangles disagree has normals
+        # pointing both ways: it renders inside out in patches. `equations` carries each facet's
+        # outward normal, so each triangle is turned to agree with it.
+        for simplex, equation in zip(hull.simplices, hull.equations):
+            a, b, c = (points[int(i)] for i in simplex)
+            face = [index[int(i)] for i in simplex]
+            if float(np.dot(np.cross(b - a, c - a), equation[:3])) < 0.0:
+                face.reverse()
+            faces.append(face)
+        return points[used], faces
+    raise ValueError(f"unknown collision approximation {approximation!r}")
+
+
+def _sphere(centre, radius, rings=16, segments=24):
+    import numpy as np
+
+    lat = np.linspace(0.0, np.pi, rings + 1)
+    lon = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
+    points = [centre + radius * np.array([np.sin(a) * np.cos(b), np.sin(a) * np.sin(b), np.cos(a)])
+              for a in lat for b in lon]
+    faces = []
+    for i in range(rings):
+        for j in range(segments):
+            a, b = i * segments + j, i * segments + (j + 1) % segments
+            faces.append([a, b, b + segments, a + segments])
+    return np.asarray(points), faces
+
+
 def fixture_gprims(stage, asset_root, scenery):
     """The visible geometry in the scene that is neither the asset nor scenery: the slope, the
     gripper's pads, whatever a test builds around the asset. Each is a leaf, so it can be copied

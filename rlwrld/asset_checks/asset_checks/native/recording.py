@@ -24,6 +24,7 @@ import skinning
 import usd_deformable
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+from asset_checks.kit import reading  # noqa: E402  -- one owner for reading a stage's physics
 from asset_checks.kit.reading import copy_gprim  # noqa: E402  -- the one way geometry is copied out of a stage
 
 COLLISION = "/root/collision"
@@ -323,13 +324,9 @@ class RigidRecording:
                     continue
                 if gprim != body_prim and str(gprim.GetPath()) in {asset_root.AppendPath(b[len(self.asset_prim) + 1:]) for b in self.bodies}:
                     continue  # a nested body owns its own
-                copy = copy_gprim(gprim, self.stage, _unique(self.stage, f"{holder.GetPath()}/{gprim.GetName()}"))
+                copy = self._collider(gprim, holder.GetPath())
                 relative, _ = cache.ComputeRelativeTransform(gprim, body_prim)
                 UsdGeom.Xformable(copy).AddTransformOp().Set(relative)
-                g = UsdGeom.Gprim(copy)
-                g.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*COLLISION_COLOUR)]))
-                if copy.IsA(UsdGeom.Mesh):
-                    UsdGeom.Mesh(copy).CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
                 copied += 1
             if not copied:
                 raise SystemExit(f"[recording] {body} declares no collider (no CollisionAPI gprim under it)")
@@ -348,6 +345,38 @@ class RigidRecording:
                 self.fixture_prims[live] = prim
         self._live = {prim.GetPath(): live for live, prim in self.fixture_prims.items()}
         _ground(self.stage, ground_half)
+
+    def _collider(self, gprim, under):
+        """The shape the engine collides with, as its own flat-coloured mesh.
+
+        Not the render mesh with a colour on it: these assets declare no approximation and apply
+        no `UsdPhysics.MeshCollisionAPI`, so PhysX cannot use their triangle meshes on a dynamic
+        body and cooks a convex hull instead -- it logs that fallback as an error, and drawing the
+        triangle mesh would show a shape nothing collides with. `reading.collider_approximation`
+        decides what the engine uses and `reading.collider_shape` builds it; where the shape is
+        more than geometry can say (a decomposition, an SDF) the mesh is kept and the run says so.
+        """
+        approximation, why = reading.collider_approximation(gprim)
+        points = UsdGeom.PointBased(gprim).GetPointsAttr().Get() if gprim.IsA(UsdGeom.PointBased) else None
+        shape = reading.collider_shape(points, approximation) if points else None
+        path = _unique(self.stage, f"{under}/{gprim.GetName()}")
+        if shape is None:
+            copy = copy_gprim(gprim, self.stage, path)
+            note = f"as authored ({approximation}: {why})"
+        else:
+            hull, faces = shape
+            mesh = UsdGeom.Mesh.Define(self.stage, path)
+            mesh.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(*p) for p in hull]))
+            mesh.CreateFaceVertexCountsAttr(Vt.IntArray([len(f) for f in faces]))
+            mesh.CreateFaceVertexIndicesAttr(Vt.IntArray([i for f in faces for i in f]))
+            copy = mesh.GetPrim()
+            note = f"{approximation} of {len(points)} points -> {len(hull)} ({why})"
+        g = UsdGeom.Gprim(copy)
+        g.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*COLLISION_COLOUR)]))
+        if copy.IsA(UsdGeom.Mesh):
+            UsdGeom.Mesh(copy).CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+        print(f"[recording] collider {gprim.GetName()}: {note}")
+        return copy
 
     def _pose_at(self, path, seconds):
         """The recorded matrix nearest `seconds`, or None before the series began."""
