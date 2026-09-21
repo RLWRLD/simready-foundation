@@ -111,13 +111,13 @@ def keep_valid(cell):
 
 
 def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, validated, contact_profile, dump_physics=False, trace_contacts=0, camera="fixed",
-            visual_cues=True, startup_retries=1, solver_settings=None):
+            visual_cues=True, startup_retries=1, solver_settings=None, particle_radius=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     expected = envs.gpu_settings(gpu)
     request = {"asset": str(asset), "experiment": experiment, "engine": env.engine, "env": env.name,
                "out_dir": str(out_dir), "expected_settings": expected, "capture_px": capture_px,
                "validated_features": validated, "contact_profile": contact_profile, "dump_physics": dump_physics,
-               "trace_contacts": trace_contacts, "camera": camera, "visual_cues": visual_cues, "solver": env.solver, "solver_settings": solver_settings,
+               "trace_contacts": trace_contacts, "camera": camera, "visual_cues": visual_cues, "solver": env.solver, "solver_settings": solver_settings, "particle_radius": particle_radius,
                "code": code_version()}
     (out_dir / "request.json").write_text(json.dumps(request, indent=1))
     cmd = [str(bench / "isaac-run"), env.venv, str(bench / f".venv-{env.venv}" / "bin" / "isaacsim"), env.experience,
@@ -329,6 +329,9 @@ def main():
                     help="render NVIDIA's test room as is, without the floor grid and key light")
     ap.add_argument("--camera", default="fixed", choices=("fixed", "follow"),
                     help="fixed: one camera framing the test's whole motion (slope keeps follow); follow: engine-kit's follow camera")
+    ap.add_argument("--particle-radius", type=float, default=None, metavar="M",
+                    help="radius for a deformable's particles (default: half the median distance to a neighbour; "
+                         "Newton's own default of 0.1 m explodes any centimetre-scale asset)")
     ap.add_argument("--solver-setting", action="append", default=[], metavar="NAME=VALUE",
                     help="a setting for the environment's Newton solver, e.g. iterations=30 (repeatable)")
     ap.add_argument("--keep-going", action="store_true",
@@ -376,7 +379,7 @@ def main():
                         shutil.rmtree(cell)
                 print(f"[asset_checks] {asset.name} / {env.name} / {experiment} ...", flush=True)
                 result = run_one(bench, gpu, env, experiment, asset, cell, args.timeout, args.capture_px, validated, args.newton_contact, args.dump_physics, args.trace_contacts, args.camera, not args.plain_scene,
-                                 solver_settings=solver_settings)
+                                 solver_settings=solver_settings, particle_radius=args.particle_radius)
                 rows.append((asset.stem, env.name, result))
                 first = ((result.get("message") or "").strip().splitlines() or [""])[0][:120]
                 print(f"[asset_checks]   {'INVALID: ' + '; '.join(result['invalid']) if result['invalid'] else (result['verdict'] + ' ' + first).strip()}", flush=True)
