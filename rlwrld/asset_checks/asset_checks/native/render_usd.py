@@ -15,6 +15,7 @@ The camera is placed once, from the bounds of the whole animation, so every fram
 is shot from the same place and the videos can be put side by side.
 """
 import argparse
+import math
 import pathlib
 import sys
 
@@ -69,12 +70,18 @@ if args.show != "both":
         UsdGeom.Imageable(hide).MakeInvisible()
         print(f"[render] showing the {args.show} mesh; {HIDDEN[args.show]} hidden")
 
+# The room is the floor now, and two coincident floors z-fight.
+asset_ground = stage.GetPrimAtPath(ASSET_GROUND)
+if asset_ground and asset_ground.IsValid():
+    UsdGeom.Imageable(asset_ground).MakeInvisible()
+
 start, end = stage.GetStartTimeCode(), stage.GetEndTimeCode()
 stage_fps = stage.GetTimeCodesPerSecond() or 60.0
 print(f"[render] {args.stage}: time {start}..{end} at {stage_fps} tcps")
 
 
 GROUND_SPAN = 50.0   # a prim wider than this is scenery, not the subject
+ASSET_GROUND = "/root/ground"     # the recording's own floor; the room replaces it
 
 
 def moving_prims(times):
@@ -138,14 +145,21 @@ size = bounds.GetSize()
 span = max(size[0], size[1], size[2])
 print(f"[render] bounds centre {tuple(round(c, 4) for c in centre)} size {tuple(round(s, 4) for s in size)}")
 
-# A three-quarter view from just above the floor. The obvious camera -- up high, looking down --
-# is the wrong one here: a press puts an opaque plate directly between it and the asset, and the
-# whole video is a picture of the plate. Low and to the side, you see the gap the plate is
-# closing and the asset squeezing out into it, and a drop still reads as plain vertical motion.
-distance = max(span * 2.0, 0.30)
-eye = Gf.Vec3d(centre[0] + distance * 0.75, centre[1] - distance * 0.95, centre[2] + distance * 0.22)
+# The framing the rigid runs use, so a deformable video sits beside a rigid one without the eye
+# having to re-orient: `simready_benchmark_engine_kit/camera_follow.py` places the camera along
+# (0.3, 0.8, 0.4) from the subject's centre with a 35 mm lens on a 36 mm aperture, far enough back
+# that the bounding box's diagonal fills the frame with a fifth to spare.
+FOCAL_LENGTH, APERTURE, MARGIN = 35.0, 36.0, 1.2
+CAMERA_DIRECTION = Gf.Vec3d(0.3, 0.8, 0.4).GetNormalized()
+
+diagonal = max(0.1, (size[0] ** 2 + size[1] ** 2 + size[2] ** 2) ** 0.5)
+fov = 2.0 * math.atan(APERTURE / (2.0 * FOCAL_LENGTH))
+distance = max(0.1, diagonal * MARGIN / (2.0 * math.tan(fov / 2.0)))
+eye = centre + CAMERA_DIRECTION * distance
 camera = UsdGeom.Camera.Define(stage, "/RenderCamera")
-camera.CreateFocalLengthAttr(28.0)
+camera.CreateFocalLengthAttr(FOCAL_LENGTH)
+camera.CreateHorizontalApertureAttr(APERTURE)
+camera.CreateVerticalApertureAttr(APERTURE)
 camera.CreateClippingRangeAttr(Gf.Vec2f(max(1e-3, distance * 0.01), distance * 20.0))
 forward = (centre - eye).GetNormalized()
 right = Gf.Cross(forward, Gf.Vec3d(0, 0, 1)).GetNormalized()
@@ -156,6 +170,26 @@ m.SetRow3(1, up)
 m.SetRow3(2, -forward)
 m.SetTranslateOnly(eye)
 UsdGeom.Xformable(camera).AddTransformOp().Set(m)
+
+# ...and the room: floor plus four walls, ten times the subject's box, so the background is a
+# room rather than an empty plane running to the horizon. Same rule as `room.py::auto_size`.
+ROOM_OF_SUBJECT = 10.0
+room_x = max(size[0], 0.01) * ROOM_OF_SUBJECT
+room_y = max(size[1], 0.01) * ROOM_OF_SUBJECT
+room_z = max(size[2], 0.01) * ROOM_OF_SUBJECT
+room = UsdGeom.Xform.Define(stage, "/RenderRoom")
+for name, translate, scale in (
+    ("floor", (centre[0], centre[1], bounds.GetMin()[2] - room_z * 0.005), (room_x / 2, room_y / 2, room_z * 0.005)),
+    ("back", (centre[0], centre[1] + room_y / 2, centre[2] + room_z / 2), (room_x / 2, room_z * 0.005, room_z / 2)),
+    ("front", (centre[0], centre[1] - room_y / 2, centre[2] + room_z / 2), (room_x / 2, room_z * 0.005, room_z / 2)),
+    ("left", (centre[0] - room_x / 2, centre[1], centre[2] + room_z / 2), (room_z * 0.005, room_y / 2, room_z / 2)),
+    ("right", (centre[0] + room_x / 2, centre[1], centre[2] + room_z / 2), (room_z * 0.005, room_y / 2, room_z / 2)),
+):
+    wall = UsdGeom.Cube.Define(stage, f"/RenderRoom/{name}")
+    wall.CreateSizeAttr(2.0)
+    UsdGeom.XformCommonAPI(wall).SetScale(Gf.Vec3f(*scale))
+    UsdGeom.XformCommonAPI(wall).SetTranslate(Gf.Vec3d(*translate))
+    wall.CreateDisplayColorAttr([Gf.Vec3f(0.55, 0.55, 0.58)])
 
 if not any(prim.IsA(UsdLux.BoundableLightBase) or prim.IsA(UsdLux.NonboundableLightBase)
            for prim in stage.Traverse()):

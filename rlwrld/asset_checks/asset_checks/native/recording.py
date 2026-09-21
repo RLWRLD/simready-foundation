@@ -74,7 +74,22 @@ class Recording:
             self.plate = UsdGeom.Cube.Define(self.stage, PLATE)
             self.plate.CreateSizeAttr(2.0)
             UsdGeom.XformCommonAPI(self.plate).SetScale(Gf.Vec3f(half_x, half_y, half_z))
-            self.plate.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.25, 0.45, 0.85)]))
+            # See-through, because a solid plate hides the thing being measured, with its edges
+            # drawn so its position is still readable against the asset.
+            self.plate.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.30, 0.50, 0.90)]))
+            self.plate.CreateDisplayOpacityAttr(Vt.FloatArray([0.18]))
+            self.plate_edges = UsdGeom.BasisCurves.Define(self.stage, PLATE + "_edges")
+            self.plate_edges.CreateTypeAttr(UsdGeom.Tokens.linear)
+            self.plate_edges.CreateCurveVertexCountsAttr(Vt.IntArray([2] * 12))
+            corners = [(sx, sy, sz) for sx in (-half_x, half_x) for sy in (-half_y, half_y)
+                       for sz in (-half_z, half_z)]
+            edges = [(a, b) for a in range(8) for b in range(a + 1, 8)
+                     if sum(abs(corners[a][i] - corners[b][i]) > 1e-12 for i in range(3)) == 1]
+            self.plate_edges.CreatePointsAttr(
+                Vt.Vec3fArray([Gf.Vec3f(*corners[i]) for edge in edges for i in edge]))
+            self.plate_edges.CreateWidthsAttr(Vt.FloatArray([max(half_z * 0.08, 1e-4)] * 24))
+            self.plate_edges.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.10, 0.25, 0.60)]))
+            self.plate_edges_api = UsdGeom.XformCommonAPI(self.plate_edges)
             self.plate_api = UsdGeom.XformCommonAPI(self.plate)
 
     def _bind_visual(self, asset, sim_prim_path, _unused):
@@ -116,7 +131,18 @@ class Recording:
 
         rest = np.asarray(UsdGeom.PointBased(render_prim).GetPointsAttr().Get(), dtype=np.float64)
         self.visual = UsdGeom.PointBased(render_prim)
-        if len(rest) == len(self.nodes_rest) and np.allclose(rest, self.nodes_rest, atol=1e-9):
+
+        # The simulated mesh's *authored* points, read from the reference rather than taken from
+        # the runner. The runner has already moved its nodes -- lifted to a drop height, or set
+        # down on the floor -- and binding against those puts every render vertex outside the
+        # elements, where they all clamp onto the nearest surface and the asset renders as a flat
+        # smear no solver produced. The authored pose is the one frame the two meshes agree in.
+        #
+        # This was fixed once and then reintroduced by a rewrite that kept the comment and
+        # dropped the code, so it is asserted below rather than trusted.
+        simulated_rest = (np.asarray(UsdGeom.PointBased(simulated).GetPointsAttr().Get(), dtype=np.float64)
+                          if simulated else self.nodes_rest)
+        if len(rest) == len(simulated_rest) and np.allclose(rest, simulated_rest, atol=1e-9):
             # Same points: nothing to bind, and binding would only add error.
             self.binding = None
             print(f"[recording] the asset draws what it simulates ({len(rest)} points), moved directly")
@@ -127,11 +153,24 @@ class Recording:
         # drop height, or set down on the floor -- puts every vertex outside the elements and
         # they all clamp to the nearest surface: the banana came out as a flat smear no solver
         # produced.
-        if len(self.nodes_rest) <= int(self.elements.max()):
-            raise SystemExit(f"[recording] the asset's simulated mesh has {len(self.nodes_rest)} "
+        if len(simulated_rest) <= int(self.elements.max()):
+            raise SystemExit(f"[recording] the asset's simulated mesh has {len(simulated_rest)} "
                              f"points but the solver indexes {int(self.elements.max()) + 1}: these "
                              f"are not the same mesh, and binding them would invent a shape")
-        self.binding = skinning.bind(rest, self.nodes_rest, self.elements)
+        # A binding made in the right pose leaves most vertices inside their element. If nearly
+        # all of them land outside, the two meshes were not in the same pose and the result would
+        # be a smear -- so it fails here rather than rendering something nobody simulated.
+        # Assert the pose directly rather than inferring it from how many vertices landed
+        # outside: that count has its own definition and its own bugs, and this is the thing
+        # that actually has to be true. A render mesh bound against nodes the runner has already
+        # moved produces a flat smear no solver computed.
+        span = max(float(np.ptp(simulated_rest, axis=0).max()), 1e-9)
+        drift = float(np.abs(rest.mean(axis=0) - simulated_rest.mean(axis=0)).max())
+        if drift > 0.05 * span:
+            raise SystemExit(f"[recording] the render mesh and the simulated mesh are not in the "
+                             f"same pose -- their centres are {drift * 1000:.1f} mm apart on a "
+                             f"{span * 1000:.1f} mm asset. Binding them would invent a shape.")
+        self.binding = skinning.bind(rest, simulated_rest, self.elements)
         print(f"[recording] bound {len(rest)} render vertices to {len(self.elements)} "
               f"{'tetrahedra' if self.elements.shape[1] == 4 else 'triangles'} "
               f"({self.binding['outside']} outside, carried by their nearest)")
@@ -145,6 +184,7 @@ class Recording:
             self.visual.GetPointsAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*p) for p in moved]), time)
         if self.plate is not None and plate_z is not None:
             self.plate_api.SetTranslate(Gf.Vec3d(0.0, 0.0, float(plate_z)), time)
+            self.plate_edges_api.SetTranslate(Gf.Vec3d(0.0, 0.0, float(plate_z)), time)
 
     def close(self):
         self.stage.GetRootLayer().Save()

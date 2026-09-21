@@ -32,7 +32,7 @@ def press_depth(height):
     from this number.
     """
     return INDENT_OF_HEIGHT * height
-PLATE_THICKNESS_OF_HEIGHT = 0.6
+PLATE_THICKNESS_OF_HEIGHT = 0.25
 PLATE_FOOTPRINT = 0.6        # half-extents, as a fraction of the asset's own footprint
 PHASES = 5                   # settle, descend, hold, lift, watch -- one fifth of the run each
 
@@ -44,15 +44,19 @@ def plate_thickness(height):
     band has both of its faces inside it and pushes the asset up from underneath as hard as down
     -- measured, the same press fell from 13.9 mm of compression to 3.1 mm. That constraint is
     real and it is the engine's to satisfy: the plate is this thick, the indentation is
-    `press_depth`, and a band between the two is what an engine has to arrange. The numbers are
-    chosen so such a band exists -- half of 0.6 is 0.3, comfortably above the 0.2 it must cover.
+    `press_depth`, and a band between the two is what an engine has to arrange: wide enough for
+    the indentation (0.2 of the height), no wider than the plate itself (0.25), so it never
+    reaches the far face. Thicker than that and the plate is most of what the video shows.
     """
     return PLATE_THICKNESS_OF_HEIGHT * height
 
 
 def widest_usable_margin(height):
     """The widest contact band an engine may use and still meet only one face of the plate."""
-    return 0.5 * plate_thickness(height)
+    # The band must not reach the plate's far face, or the asset is pushed up from above as hard
+    # as down from below. One thickness is the limit, not half of one: the asset only ever meets
+    # the underside, and the far face is a whole thickness beyond it.
+    return plate_thickness(height)
 
 
 def plate_height(frame, frames, start_z, bottom_z):
