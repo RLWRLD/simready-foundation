@@ -41,7 +41,7 @@ import omni.kit.app  # noqa: E402
 import omni.kit.viewport.utility  # noqa: E402
 import omni.timeline  # noqa: E402
 import omni.usd  # noqa: E402
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux  # noqa: E402
+from pxr import Gf, Usd, UsdGeom  # noqa: E402
 
 settings = carb.settings.get_settings()
 settings.set("/app/asyncRendering", False)          # so a grab cannot race the render thread

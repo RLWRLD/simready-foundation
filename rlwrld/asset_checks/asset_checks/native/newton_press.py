@@ -42,7 +42,7 @@ import asset_properties
 import press_shape
 import recording
 import usd_deformable
-from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, ITERATIONS,
+from newton_drop import (CONTACT, ITERATIONS,
                          CONTACT_STIFFNESS_OF_MATERIAL, SUBSTEPS,
                          colour_for_vbd,
                          XPBD_MAX_RELAXATION, auto_radius,
