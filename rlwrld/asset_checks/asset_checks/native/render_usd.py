@@ -63,6 +63,7 @@ HIDDEN = {"collision": "/root/visual", "visual": "/root/collision"}   # fixtures
 
 GROUND_SPAN = 50.0   # a prim wider than this is scenery, not the subject
 ASSET_GROUND = "/root/ground"     # the recording's own floor; the room replaces it
+FIXTURES = "/root/fixtures"       # what the experiment placed: a plate, a slope, a gripper's pads
 
 out = pathlib.Path(args.out_dir)
 out.mkdir(parents=True, exist_ok=True)
@@ -78,8 +79,14 @@ if args.show != "both":
         app.close()
         sys.exit(4)
     if hide and hide.IsValid():
-        UsdGeom.Imageable(hide).MakeInvisible()
-        print(f"[render] showing the {args.show} mesh; {HIDDEN[args.show]} hidden")
+        # The root and every gprim beneath it, so the hiding does not rest on how a scene
+        # delegate treats an ancestor's opinion; the count is printed so a run proves it.
+        hidden = 0
+        for prim in Usd.PrimRange(hide):
+            if prim == hide or prim.IsA(UsdGeom.Gprim):
+                UsdGeom.Imageable(prim).MakeInvisible()
+                hidden += 1
+        print(f"[render] showing the {args.show} mesh; {HIDDEN[args.show]} hidden ({hidden} prims)")
 
 # The room is the floor now, and two coincident floors z-fight.
 asset_ground = stage.GetPrimAtPath(ASSET_GROUND)
@@ -91,6 +98,19 @@ stage_fps = stage.GetTimeCodesPerSecond() or 60.0
 print(f"[render] {args.stage}: time {start}..{end} at {stage_fps} tcps")
 
 
+
+
+def is_scenery(prim, times):
+    """A prim wider than GROUND_SPAN is the world around the subject, not the subject: Newton writes
+    its ground as a 1000 m quad, and the slope drop's slope is a 100 m plane spanning the room.
+    NVIDIA does not frame that either -- its fixed camera frames the asset and the gripper, and
+    hands the slope test back to a follow camera."""
+    box = UsdGeom.BBoxCache(Usd.TimeCode(times[0]), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+    r = box.ComputeWorldBound(prim).ComputeAlignedRange()
+    if r.IsEmpty():
+        return False
+    size = r.GetSize()
+    return max(size[0], size[1], size[2]) > GROUND_SPAN
 
 
 def moving_prims(times):
@@ -112,9 +132,8 @@ def moving_prims(times):
         ranges = [c.ComputeWorldBound(prim).ComputeAlignedRange() for c in caches]
         if any(r.IsEmpty() for r in ranges):
             continue
-        size = ranges[0].GetSize()
-        if max(size[0], size[1], size[2]) > GROUND_SPAN:
-            continue               # scenery; never the subject, moving or not
+        if is_scenery(prim, times):
+            continue               # never the subject, moving or not
         if not UsdGeom.Imageable(prim).ComputeVisibility() == UsdGeom.Tokens.inherited:
             continue               # a hidden mesh must not pull the camera towards itself
         travel = max(Gf.Vec3d(a.GetMidpoint() - b.GetMidpoint()).GetLength()
@@ -142,7 +161,18 @@ def world_bounds(prims, times):
 
 samples = [start + (end - start) * f for f in (0.0, 0.25, 0.5, 0.75, 1.0)]
 moving = moving_prims(samples)
-bounds = world_bounds(moving, samples)
+# What the experiment involves, which is what NVIDIA's `_place_fixed_camera` frames: the asset and
+# the gripper, down to the floor. Here that is what moves plus the fixtures the experiment placed
+# -- a press plate, a slope, a gripper's pads -- and the floor is z = 0, where the recording puts
+# it. Framing only what moves put the camera so close to a sliding orange that the slope it slid
+# down filled the frame as a wall.
+fixtures = [prim for prim in Usd.PrimRange(stage.GetPrimAtPath(FIXTURES))
+            if prim.IsA(UsdGeom.Gprim) and not is_scenery(prim, samples)]
+subject = moving + fixtures
+bounds = world_bounds(subject, samples)
+if not bounds.IsEmpty():
+    bounds.UnionWith(Gf.Vec3d(bounds.GetMin()[0], bounds.GetMin()[1], min(0.0, bounds.GetMin()[2])))
+print(f"[render] framing on {len(moving)} moving prim(s) and {len(fixtures)} fixture(s), down to the floor")
 if bounds.IsEmpty():
     print("[render] FAIL: nothing with bounds in this stage")
     app.close()

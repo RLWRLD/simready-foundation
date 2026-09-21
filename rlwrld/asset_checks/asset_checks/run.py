@@ -237,6 +237,11 @@ def summarize(rows, out):
     experiments = sorted({(r.get("request") or {}).get("experiment") or r.get("test", "?") for _, _, r in rows})
     by_cell = {(asset, (r.get("request") or {}).get("experiment") or r.get("test", "?"), env): r for asset, env, r in rows}
     lines, reasons = [], []
+    strips = sorted(p.name for p in (out / "compare").glob("*.mp4")) if (out / "compare").is_dir() else []
+    if strips:
+        lines += ["Each run is drawn twice from its recorded poses -- the asset's textured mesh (`visual`) and",
+                  "the colliders it declares (`collision`) -- and `compare/` holds one strip per asset,",
+                  f"experiment and view, environments side by side: {len(strips)} strips.", ""]
     for experiment in experiments:
         lines += [f"## {experiment}", "", "| asset | " + " | ".join(environments) + " |",
                   "|---" * (len(environments) + 1) + "|"]
