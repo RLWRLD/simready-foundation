@@ -101,7 +101,14 @@ for prim_ in Usd.PrimRange(asset, Usd.TraverseInstanceProxies()):
 if body is None:
     raise SystemExit(f"[physx] {args.asset} declares no {BODY_API}; PhysX has nothing to simulate")
 
-points = np.asarray(UsdGeom.PointBased(body).GetPointsAttr().Get(), dtype=np.float64)
+# The geometry is the prim carrying the *sim* schema and the body is the one carrying the *body*
+# schema, and they are only the same prim when the asset authors a TetMesh that is itself the
+# body. A cooked surface hierarchy puts an Xform on top with the mesh underneath, and reading
+# points off the Xform gets nothing at all.
+geometry = target
+points = np.asarray(UsdGeom.PointBased(geometry).GetPointsAttr().Get(), dtype=np.float64)
+if points.ndim != 2:
+    raise SystemExit(f"[physx] {geometry.GetPath()} carries no points to place")
 height = float(points[:, 2].max() - points[:, 2].min())
 footprint = (float(points[:, 0].max() - points[:, 0].min()), float(points[:, 1].max() - points[:, 1].min()))
 centre = (float(points[:, 0].mean()), float(points[:, 1].mean()))
@@ -114,18 +121,17 @@ centre = (float(points[:, 0].mean()), float(points[:, 1].mean()))
 # picking a different number here than Newton gets would mean the two engines were never asked
 # to touch the ground in the same way.
 declared, chosen = asset_properties.read(args.visual_asset or args.asset), {}
-if declared.get("particle_radius") is not None:
-    offset = declared["particle_radius"]
-else:
+offset, offset_source = asset_properties.contact_size(declared)
+if offset is None:
     picked = np.random.default_rng(0).choice(len(points), size=min(512, len(points)), replace=False)
     spacing = np.sqrt(((points[picked][:, None, :] - points[None, :, :]) ** 2).sum(-1))
     spacing[spacing < 1e-9] = np.inf
     offset = float(np.median(spacing.min(axis=1)) * 0.5)
-    chosen["rest_offset"] = (offset, "the asset does not declare a particle radius; half the "
-                                     "median distance between neighbouring nodes")
+    chosen["rest_offset"] = (offset, "the asset declares neither a particle radius nor a shell "
+                                     "thickness; half the median distance between nodes")
 chosen["contact_offset"] = (offset * 2.0, "twice the rest offset, as Newton's contact margin is")
 asset_properties.report("physx", declared, chosen)
-collision = PhysxSchema.PhysxCollisionAPI.Apply(body)
+collision = PhysxSchema.PhysxCollisionAPI.Apply(geometry)
 collision.CreateRestOffsetAttr(offset)
 collision.CreateContactOffsetAttr(offset * 2.0)
 
@@ -133,10 +139,10 @@ collision.CreateContactOffsetAttr(offset * 2.0)
 lift = offset - float(points[:, 2].min())
 points[:, 2] += lift
 raised = [Gf.Vec3f(*p) for p in points]
-UsdGeom.PointBased(body).GetPointsAttr().Set(raised)
-rest_shape = body.GetAttribute("omniphysics:restShapePoints")
+UsdGeom.PointBased(geometry).GetPointsAttr().Set(raised)
+rest_shape = geometry.GetAttribute("omniphysics:restShapePoints")
 if not rest_shape or not rest_shape.HasAuthoredValue():
-    raise SystemExit(f"[physx] {body.GetPath()} authors no omniphysics:restShapePoints")
+    raise SystemExit(f"[physx] {geometry.GetPath()} authors no omniphysics:restShapePoints")
 rest_shape.Set(raised)
 
 # The margin that matters here is PhysX's own contact offset, not a number carried over from
@@ -192,7 +198,7 @@ if args.usd:
                                       footprint[1] * press_shape.PLATE_FOOTPRINT, thickness / 2.0))
 
 settle_at, recover_at = press_shape.settle_frame(frames), press_shape.recovery_frame(frames)
-start_top = lowest_top = bottom_z = recovered = None
+start_top = lowest_top = bottom_z = recovered = settled_height = None
 deepest = 0.0
 for frame in range(frames):
     plate_z = press_shape.plate_height(frame, frames, start_z, bottom_z)
@@ -229,7 +235,8 @@ touched = int(bottom_z is not None and bottom_z - thickness / 2.0 < start_top)
 print(press_shape.result_line("physx", start_top or 0.0, lowest_top or 0.0, compressed, height,
                               recovery, max(0.0, deepest - offset), touched,
                               press_shape.verdict(touched, compressed, height,
-                                                  max(0.0, deepest - offset), recovery)))
+                                                  max(0.0, deepest - offset), recovery,
+                                                  settled_height=settled_height, margin=offset * 2.0)))
 if tape is not None:
     tape.close()
     print(f"[physx] wrote {args.usd}")

@@ -101,6 +101,7 @@ def run(command, log_path, timeout):
 # is a table nobody checks.
 COLUMNS = {
     "drop": [("verdict", "verdict"), ("fell_mm", "fell (mm)"), ("thickness_mm", "settled (mm)"),
+             ("height_kept", "height kept"),
              ("below_floor_mm", "below floor (mm)"), ("p99_speed", "p99 speed")],
     "press": [("verdict", "verdict"), ("compressed_mm", "compressed (mm)"),
               ("compressed_frac", "of height"), ("recovered_frac", "recovered"),

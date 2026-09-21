@@ -41,8 +41,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import press_shape
 import usd_deformable
 from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, GROUND_CONTACT_KE, ITERATIONS,
-                         SUBSTEPS, XPBD_MAX_RELAXATION, auto_radius, contact_material,
-                         relaxation_is_a_jacobi_factor, solver_elements, xpbd_relaxation)
+                         SELF_CONTACT, SUBSTEPS, XPBD_MAX_RELAXATION, auto_radius,
+                         contact_material, deformable_kind, relaxation_is_a_jacobi_factor,
+                         solver_elements, xpbd_relaxation)
 
 PLATE_BODY = 0        # the only body in the scene
 # What counts as a pass, as fractions of the asset's own settled height rather than absolute
@@ -67,8 +68,8 @@ def build(asset, solver_name, iterations, radius, press_to, margin, full_surface
     if radius != "auto":
         radius = float(radius)
         chosen["requested_particle_radius"] = (radius, "asked for on the command line")
-    elif declared.get("particle_radius") is not None:
-        radius = declared["particle_radius"]     # Newton's importer does not read this attribute
+    elif asset_properties.contact_size(declared)[0] is not None:
+        radius = asset_properties.contact_size(declared)[0]
     else:
         radius = auto_radius(points)
         chosen["derived_particle_radius"] = (radius, "the asset declares none; half the median "
@@ -125,10 +126,11 @@ def build(asset, solver_name, iterations, radius, press_to, margin, full_surface
     if solver_name == "vbd":
         builder.color()
     model = builder.finalize()
-    for name, value in CONTACT[solver_name].items():
+    kind = deformable_kind(model)
+    for name, value in CONTACT[kind][solver_name].items():
         setattr(model, name, value)
-        chosen[name] = (value, f"penalty numerics for {solver_name}, from Newton's "
-                               f"example_rigid_soft_contact.py")
+        chosen[name] = (value, f"penalty numerics for a {kind} deformable on {solver_name}, from "
+                               f"Newton's own examples for that pair")
     friction, restitution = contact_material(declared, chosen)
     model.soft_contact_mu = friction
     model.soft_contact_restitution = restitution
@@ -137,7 +139,7 @@ def build(asset, solver_name, iterations, radius, press_to, margin, full_surface
     # so the plate does not grip differently from the ground.
     fixtures = [ground_shape, plate_shape]
     for array, value in ((model.shape_material_ke, GROUND_CONTACT_KE),
-                         (model.shape_material_kd, CONTACT[solver_name]["soft_contact_kd"]),
+                         (model.shape_material_kd, CONTACT[kind][solver_name]["soft_contact_kd"]),
                          (model.shape_material_mu, friction)):
         values = array.numpy()
         values[fixtures] = value
@@ -171,8 +173,11 @@ def build(asset, solver_name, iterations, radius, press_to, margin, full_surface
         # Every particle of the asset could touch the plate at once. The per-body list is fixed
         # at 256 by default and documented as never resizing, so anything past it is dropped
         # without a word.
-        solver = newton.solvers.SolverVBD(model, iterations=iterations, particle_enable_self_contact=False,
-                                          rigid_body_particle_contact_buffer_size=max(256, model.particle_count))
+        solver = newton.solvers.SolverVBD(
+            model, iterations=iterations,
+            particle_enable_self_contact=SELF_CONTACT[kind],
+            particle_self_contact_radius=radius, particle_self_contact_margin=radius * 2.0,
+            rigid_body_particle_contact_buffer_size=max(256, model.particle_count))
     else:
         relaxation = (xpbd_relaxation(model.tet_count, model.particle_count)
                       if relaxation_is_a_jacobi_factor() else XPBD_MAX_RELAXATION)
@@ -194,8 +199,6 @@ def main():
     ap.add_argument("--press-to", type=float, default=0.6, help="plate stops at this much of the asset's height")
     ap.add_argument("--margin", type=float, default=0.0,
                     help="soft_contact_margin; 0 derives it from the asset's particle radius")
-    ap.add_argument("--no-full-surface", action="store_true",
-                    help="meet the asset's particles only, the way Newton 1.2.1 must")
     ap.add_argument("--no-full-surface", action="store_true",
                     help="meet the asset's particles only, the way Newton 1.2.1 must")
     ap.add_argument("--usd", default=None)
@@ -235,7 +238,7 @@ def main():
           f"plate {thickness * 1000:.1f} mm thick parked at {start_z:.4f}, "
           f"{args.iterations} iterations x {substeps} substeps")
     start_top = lowest_top = bottom_z = None
-    deepest, recovered, contact_peak = 0.0, None, 0
+    deepest, recovered, contact_peak, settled_height = 0.0, None, 0, None
     last_plate_z = start_z
     for frame in range(frames):
         if frame < phase:
@@ -276,6 +279,7 @@ def main():
             # longer has, so the plate stops in the air and presses nothing at all.
             start_top = lowest_top = top_now
             floor_now = float(q[:, 2].min())
+            settled_height = top_now - floor_now
             bottom_z = floor_now + (top_now - floor_now) * press_to_frac + thickness / 2.0
             print(f"[press] settled to {top_now:.4f}; plate will go to {bottom_z:.4f} "
                   f"({press_to_frac * 100:.0f}% of the settled height)")
@@ -293,16 +297,8 @@ def main():
 
     compressed = start_top - lowest_top
     recovery = 0.0 if recovered is None or compressed <= 1e-9 else (recovered - lowest_top) / compressed
-    if contact_peak == 0:
-        verdict = "no-contact"          # the plate never met the asset: not a measurement at all
-    elif compressed < MIN_COMPRESSION * height:
-        verdict = "did-not-deform"
-    elif deepest > TUNNEL_DEPTH_OF_HEIGHT * height:
-        verdict = "pushed-through-floor"
-    elif recovery < MIN_RECOVERY:
-        verdict = "did-not-spring-back"
-    else:
-        verdict = "pass"
+    verdict = press_shape.verdict(contact_peak, compressed, height, deepest, recovery,
+                                  settled_height=settled_height, margin=margin)
     print(f"[press] most soft contacts in any frame: {contact_peak}")
     # One token per measurement, no spaces inside a value: the runner reads this line, and a
     # value it has to guess the end of is a value it will read wrong.
