@@ -83,7 +83,9 @@ if args.show != "both":
         # delegate treats an ancestor's opinion; the count is printed so a run proves it.
         hidden = 0
         for prim in Usd.PrimRange(hide):
-            if prim == hide or prim.IsA(UsdGeom.Gprim):
+            # An instance proxy takes no opinion of its own, and does not need one: its instance
+            # is under this root and is hidden with it.
+            if (prim == hide or prim.IsA(UsdGeom.Gprim)) and not prim.IsInstanceProxy():
                 UsdGeom.Imageable(prim).MakeInvisible()
                 hidden += 1
         print(f"[render] showing the {args.show} mesh; {HIDDEN[args.show]} hidden ({hidden} prims)")
@@ -126,7 +128,10 @@ def moving_prims(times):
     caches = [UsdGeom.BBoxCache(Usd.TimeCode(t), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
               for t in times]
     moving, still = [], []   # `still`: visible, not scenery, and not moving -- what a fallback may frame
-    for prim in stage.Traverse():
+    # Instance proxies too. A referenced asset may hold its geometry in instances -- this lamp's
+    # four render meshes are -- and `Stage.Traverse()` stops at the instance, so the whole asset
+    # read as "nothing with bounds in this stage" and no frame was drawn.
+    for prim in Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()):
         if not (prim.IsA(UsdGeom.Gprim) or prim.IsA(UsdGeom.PointInstancer)):
             continue
         ranges = [c.ComputeWorldBound(prim).ComputeAlignedRange() for c in caches]
@@ -166,7 +171,7 @@ moving = moving_prims(samples)
 # -- a press plate, a slope, a gripper's pads -- and the floor is z = 0, where the recording puts
 # it. Framing only what moves put the camera so close to a sliding orange that the slope it slid
 # down filled the frame as a wall.
-fixtures = [prim for prim in Usd.PrimRange(stage.GetPrimAtPath(FIXTURES))
+fixtures = [prim for prim in Usd.PrimRange(stage.GetPrimAtPath(FIXTURES), Usd.TraverseInstanceProxies())
             if prim.IsA(UsdGeom.Gprim) and not is_scenery(prim, samples)]
 subject = moving + fixtures
 bounds = world_bounds(subject, samples)
@@ -224,6 +229,8 @@ print(f"[render] camera from camera_follow: {params}")
 # same grey as the plate's shadow -- a correct simulation that reads as nothing happening.
 for prim in moving:
     gprim = UsdGeom.Gprim(prim)
+    if prim.IsInstanceProxy():
+        continue    # nothing can be authored on a proxy; its instance carries what it has
     if gprim and not (gprim.GetDisplayColorAttr().HasAuthoredValue() or prim.GetChildren()):
         gprim.CreateDisplayColorAttr([Gf.Vec3f(0.92, 0.78, 0.25)])
 
