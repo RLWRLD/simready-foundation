@@ -44,7 +44,6 @@ app = SimulationApp({"headless": True}, experience=EXPERIENCE)
 # exists initialises USD outside Kit, and Kit can then no longer register its own schema wrappers:
 # the run dies during startup with "extension class wrapper ... has not been created yet".
 import asset_properties  # noqa: E402
-import press_shape  # noqa: E402
 
 import numpy as np  # noqa: E402
 import omni.timeline  # noqa: E402
@@ -52,7 +51,7 @@ import omni.usd  # noqa: E402
 import warp as wp  # noqa: E402
 from isaacsim.core.experimental.prims import DeformablePrim  # noqa: E402
 from isaacsim.core.simulation_manager import SimulationManager  # noqa: E402
-from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics  # noqa: E402
+from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics  # noqa: E402
 
 # PhysX spells a deformable's simulated geometry one of two ways depending on what it is made
 # of. Asking for both is what lets a cloth and a soft body go through the same runner.

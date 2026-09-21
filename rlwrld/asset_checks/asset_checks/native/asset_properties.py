@@ -13,7 +13,7 @@ contact friction is a property of the materials in the scene, not of the integra
 mu=0.3 and XPBD mu=1.0 because two Newton examples happened to use those numbers makes the two
 solvers incomparable, which is the one thing this whole benchmark must not do.
 """
-from pxr import Usd, UsdGeom, UsdPhysics
+from pxr import Usd, UsdGeom
 
 # What the AOUSD physics schemas call these, in the order we prefer them. `newton:` names are what
 # an asset authored for Newton spells out directly; `physics:` names are the portable ones.
