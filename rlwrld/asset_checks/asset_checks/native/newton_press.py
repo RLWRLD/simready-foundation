@@ -44,6 +44,7 @@ import recording
 import usd_deformable
 from newton_drop import (CONTACT, CONTACT_MARGIN_OF_RADIUS, ITERATIONS,
                          CONTACT_STIFFNESS_OF_MATERIAL, SELF_CONTACT, SUBSTEPS,
+                         colour_for_vbd,
                          XPBD_MAX_RELAXATION, auto_radius,
                          contact_material, contact_margin, deformable_kind,
                          relaxation_is_a_jacobi_factor,
@@ -132,7 +133,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
                           color=(0.25, 0.45, 0.85))
 
     if solver_name == "vbd":
-        builder.color()
+        colour_for_vbd(builder)
     model = builder.finalize()
     kind = deformable_kind(model)
     for name, value in CONTACT[kind][solver_name].items():

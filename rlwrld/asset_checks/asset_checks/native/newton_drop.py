@@ -64,6 +64,23 @@ CONTACT = {
 SELF_CONTACT = {"volume": False, "surface": True}
 
 
+def colour_for_vbd(builder):
+    """Give SolverVBD its colour groups, with the bending edges in the graph.
+
+    VBD sweeps one colour at a time and treats the other colours as fixed, so two
+    particles joined by a constraint must never share a colour.  `builder.color`
+    leaves bending edges out of that graph unless asked -- its own docstring says to
+    set `include_bending` "if your model contains bending edges", and Newton's cloth
+    examples all do.  Left out, a sheet is stable until something disturbs it and
+    then diverges on the frame it lands, for every stiffness, damping and substep
+    count.  A tetrahedral body has no bending edges, so this reduces to a plain
+    colouring for one.
+    """
+    bending = len(builder.edge_indices)
+    builder.color(include_bending=bending > 0)
+    print(f"[baseline] VBD colouring: {bending} bending edge(s) in the graph")
+
+
 def deformable_kind(model):
     """What this asset is made of, asked of the model rather than assumed."""
     return "volume" if model.tet_count else "surface"
@@ -281,7 +298,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
         print(f"[baseline] hid {len(ghosts)} visual-only shape(s) the USD import added: {ghosts}")
 
     if solver_name == "vbd":
-        builder.color()  # SolverVBD refuses a model without particle colour groups
+        colour_for_vbd(builder)
     model = builder.finalize()
     kind = deformable_kind(model)
     for name, value in CONTACT[kind][solver_name].items():
