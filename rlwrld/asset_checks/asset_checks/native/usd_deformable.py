@@ -117,6 +117,14 @@ def contact_size_of(stage, kind, prim):
     return None
 
 
+def _world_points(prim):
+    """The prim's points in world coordinates, which is where the importer put them -- an asset
+    that carries a transform on its simulation prim is matched there, not at its local values."""
+    xf = np.asarray(UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()), dtype=np.float64)
+    local = np.asarray(UsdGeom.PointBased(prim).GetPointsAttr().Get(), dtype=np.float64)
+    return local @ xf[:3, :3] + xf[3, :3]
+
+
 def _authored(prim, names):
     for name in names:
         attr = prim.GetAttribute(name)
@@ -147,9 +155,12 @@ def carry_material_damping(builder, stage, convert, report=None):
     edge_m = [list(m) for m in builder.edge_bending_properties]
     for kind, sim, _render in bodies(stage):
         material = _bound_material(stage, sim, MATERIAL[kind])
-        points = np.asarray(UsdGeom.PointBased(sim).GetPointsAttr().Get(), dtype=np.float64)
+        points = _world_points(sim)
         mine = {where[tuple(np.round(p, 6))] for p in points if tuple(np.round(p, 6)) in where}
         path = str(sim.GetPath())
+        if len(mine) != len(points):
+            raise SystemExit(f"{path}: {len(points) - len(mine)} of its {len(points)} points are not in "
+                             f"the builder at their world coordinates; its damping cannot be assigned")
         if kind == "volume":
             value, name = _authored(material, asset_properties.TET_DAMPING) if material else (None, None)
             if value is None:
@@ -204,7 +215,7 @@ def assign_particle_radii(builder, stage, fallback, report=None):
         size = contact_size_of(stage, kind, sim)
         if size is None:
             size = fallback
-        points = np.asarray(UsdGeom.PointBased(sim).GetPointsAttr().Get(), dtype=np.float64)
+        points = _world_points(sim)
         index = [where.get(tuple(np.round(p, 6))) for p in points]
         lost = sum(i is None for i in index)
         if lost:

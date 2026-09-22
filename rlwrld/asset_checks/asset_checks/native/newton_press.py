@@ -154,7 +154,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     model.soft_contact_ke = contact_stiffness(model)
     chosen["soft_contact_ke"] = (model.soft_contact_ke,
                                  "N/m per contact: the asset's own material at its own resolution "
-                                 "(k_mu * 2r for a volume, tri_ke for a membrane), stiffest body; "
+                                 "(E * 2r for a volume, tri_ke for a membrane), stiffest body; "
                                  + (f"{solver_name} reads it" if solver_reads(solver_name, "soft_contact_ke")
                                     else f"{solver_name} reads no contact stiffness at all"))
     damping = contact_damping(model)

@@ -119,8 +119,9 @@ def contact_stiffness(model):
 
     A particle contact stands in for one element's worth of material -- a patch of the asset's
     own resolution l (two particle radii) across and l deep. A column of a volume that size has
-    stiffness E*A/h = E*l, so a tetrahedral body gives k_mu * l; a membrane patch resists out of
-    plane through its tension E*t, which is `tri_ke` already, so a surface gives tri_ke as it is.
+    stiffness E*A/h = E*l, with E from the Lame parameters the model holds
+    (E = mu (3 lambda + 2 mu) / (lambda + mu)); a membrane patch resists out of plane through its
+    tension E*t, which is `tri_ke` already, so a surface gives tri_ke as it is.
     Both are N/m, both come from the USD, and the stiffest body the contact touches decides,
     because a contact softer than the material gives where the material should. Under a plate
     the N contacts act in parallel (E*A/l) against the body beneath them (E*A/h), h/l ~ 12-20
@@ -136,7 +137,9 @@ def contact_stiffness(model):
     if model.tet_count:
         tets = model.tet_indices.numpy().reshape(-1, 4)
         spacing = 2.0 * radius[tets].mean(axis=1)
-        candidates.append(float((model.tet_materials.numpy()[:, 0] * spacing).max()))
+        mu, lam = model.tet_materials.numpy()[:, 0], model.tet_materials.numpy()[:, 1]
+        young = mu * (3.0 * lam + 2.0 * mu) / np.maximum(lam + mu, 1e-30)
+        candidates.append(float((young * spacing).max()))
     if model.tri_count:
         tri_ke = model.tri_materials.numpy()[:, 0]
         if (tri_ke > 0.0).any():
@@ -516,7 +519,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     model.soft_contact_ke = contact_stiffness(model)
     chosen["soft_contact_ke"] = (model.soft_contact_ke,
                                  "N/m per contact: the asset's own material at its own resolution "
-                                 "(k_mu * 2r for a volume, tri_ke for a membrane), stiffest body; "
+                                 "(E * 2r for a volume, tri_ke for a membrane), stiffest body; "
                                  + (f"{solver_name} reads it" if solver_reads(solver_name, "soft_contact_ke")
                                     else f"{solver_name} reads no contact stiffness at all"))
     damping = contact_damping(model)
