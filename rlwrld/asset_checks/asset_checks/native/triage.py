@@ -38,18 +38,20 @@ def elements(stage):
 
 
 def textures(stage):
-    """Which referenced files an asset needs, and whether they are there."""
+    """Which referenced files an asset needs and has not got.
+
+    Ask USD, not the filesystem. A `.usdz` carries its textures inside itself and resolves them to
+    `package.usdz[inside/the/package.png]`, which is not a path any directory holds -- taking the
+    resolver's answer as a filename reported every texture of every packaged asset as missing.
+    An empty `resolvedPath` is the resolver saying it could not find it, and that is the finding.
+    """
     missing = []
-    root = pathlib.Path(stage.GetRootLayer().realPath).parent
     for prim in Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()):
         for attr in prim.GetAttributes():
             value = attr.Get() if attr.GetTypeName().type.typeName == "SdfAssetPath" else None
-            if value is None:
+            if value is None or not value.path:
                 continue
-            path = getattr(value, "resolvedPath", "") or getattr(value, "path", "")
-            if path and not pathlib.Path(path).is_absolute():
-                path = str(root / path)
-            if path and not pathlib.Path(path).is_file():
+            if not value.resolvedPath:
                 missing.append(f"{prim.GetPath()}.{attr.GetName()} -> {value.path}")
     return missing
 
