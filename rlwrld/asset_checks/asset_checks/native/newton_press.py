@@ -44,7 +44,8 @@ import press_shape
 import recording
 import usd_deformable
 from newton_drop import (CONTACT, ITERATIONS,
-                         CONTACT_STIFFNESS_OF_MATERIAL, material_stiffness,
+                         CONTACT_STIFFNESS_OF_MATERIAL, CONTACT_DAMPING_RATIO, material_stiffness,
+                         contact_damping, damping_as_the_kernel_reads_it,
                          colour_for_vbd,
                          XPBD_MAX_RELAXATION, auto_radius,
                          contact_material, contact_margin, deformable_kind,
@@ -156,6 +157,11 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
                                  f"{CONTACT_STIFFNESS_OF_MATERIAL:g}x the asset's own stiffness where that "
                                  f"is higher than {solver_name}'s example floor, so the contact does not "
                                  f"give where the material should")
+    damping = contact_damping(model)
+    model.soft_contact_kd = damping_as_the_kernel_reads_it(damping, model.soft_contact_ke)
+    chosen["soft_contact_kd"] = (model.soft_contact_kd,
+                                 f"{damping:.4g} N*s/m, {CONTACT_DAMPING_RATIO:g}x critical for the "
+                                 f"median particle at this contact stiffness, as this kernel reads it")
     friction, restitution = contact_material(declared, chosen)
     model.soft_contact_mu = friction
     model.soft_contact_restitution = restitution
@@ -164,7 +170,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # so the plate does not grip differently from the ground.
     fixtures = [ground_shape, plate_shape]
     for array, value in ((model.shape_material_ke, model.soft_contact_ke),
-                         (model.shape_material_kd, CONTACT[solver_name]["soft_contact_kd"]),
+                         (model.shape_material_kd, model.soft_contact_kd),
                          (model.shape_material_mu, friction)):
         values = array.numpy()
         values[fixtures] = value
