@@ -43,7 +43,7 @@ import press_shape
 import recording
 import usd_deformable
 from newton_drop import (CONTACT, ITERATIONS,
-                         CONTACT_STIFFNESS_OF_MATERIAL, SUBSTEPS,
+                         CONTACT_STIFFNESS_OF_MATERIAL, SUBSTEPS, material_stiffness,
                          colour_for_vbd,
                          XPBD_MAX_RELAXATION, auto_radius,
                          contact_material, contact_margin, deformable_kind,
@@ -136,20 +136,18 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
         colour_for_vbd(builder)
     model = builder.finalize()
     kind = deformable_kind(model)
-    for name, value in CONTACT[kind][solver_name].items():
+    for name, value in CONTACT[solver_name].items():
         setattr(model, name, value)
-        chosen[name] = (value, f"penalty numerics for a {kind} deformable on {solver_name}, from "
-                               f"Newton's own examples for that pair")
-    if kind == "volume":
-        # A contact softer than the material yields instead of the material: the plate sinks in
-        # and the asset barely moves. Newton's grasping example sets the contact to twice its
-        # duck's shear modulus, and this asset's own modulus is the scale here.
-        material_ke = CONTACT_STIFFNESS_OF_MATERIAL * float(np.median(model.tet_materials.numpy()[:, 0]))
-        model.soft_contact_ke = max(model.soft_contact_ke, material_ke)
-        chosen["soft_contact_ke"] = (model.soft_contact_ke,
-                                     "raised to twice the asset's own shear modulus, the ratio "
-                                     "Newton's grasping example uses, so the contact does not "
-                                     "give where the material should")
+        chosen[name] = (value, f"penalty numerics for {solver_name}, from its own shipped examples")
+    # A contact softer than the material yields instead of the material: the plate sinks in and
+    # the asset barely moves. Newton's grasping example sets the contact to twice its duck's shear
+    # modulus, and this asset's own material is the scale here.
+    model.soft_contact_ke = max(model.soft_contact_ke,
+                                CONTACT_STIFFNESS_OF_MATERIAL * material_stiffness(model))
+    chosen["soft_contact_ke"] = (model.soft_contact_ke,
+                                 f"{CONTACT_STIFFNESS_OF_MATERIAL:g}x the asset's own stiffness where that "
+                                 f"is higher than {solver_name}'s example floor, so the contact does not "
+                                 f"give where the material should")
     friction, restitution = contact_material(declared, chosen)
     model.soft_contact_mu = friction
     model.soft_contact_restitution = restitution
@@ -158,7 +156,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # so the plate does not grip differently from the ground.
     fixtures = [ground_shape, plate_shape]
     for array, value in ((model.shape_material_ke, model.soft_contact_ke),
-                         (model.shape_material_kd, CONTACT[kind][solver_name]["soft_contact_kd"]),
+                         (model.shape_material_kd, CONTACT[solver_name]["soft_contact_kd"]),
                          (model.shape_material_mu, friction)):
         values = array.numpy()
         values[fixtures] = value

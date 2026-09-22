@@ -26,7 +26,7 @@ import time
 import agreement
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from asset_checks import envs as rigid_envs, video  # noqa: E402
+from asset_checks import envs as rigid_envs, experiments as rigid_experiments, video  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -39,10 +39,13 @@ BENCH = pathlib.Path("/home/wongyun/Workspace/Research/Robotics/simready-bench")
 PARTICLE_SOLVERS = ("physx", "vbd", "xpbd")
 ENVIRONMENTS = {name: (e.venv, e.engine, e.solver) for name, e in rigid_envs.ENVIRONMENTS.items()
                 if e.solver in PARTICLE_SOLVERS}
-EXPERIMENTS = ("drop", "press")
-# PhysX is driven from inside Kit, so it needs the isaac-run launcher; Newton is a plain import.
-SCRIPTS = {("newton", "drop"): "newton_drop.py", ("newton", "press"): "newton_press.py",
-           ("physx", "drop"): "physx_drop.py", ("physx", "press"): "physx_press.py"}
+# Which experiments a deformable asset has, and what drives each under each engine, from the one
+# place experiments are declared. PhysX is driven from inside Kit, so it needs the isaac-run
+# launcher; Newton is a plain import.
+EXPERIMENTS = tuple(sorted(rigid_experiments.for_kind("deformable")))
+SCRIPTS = {(engine, name): script
+           for name, module in rigid_experiments.for_kind("deformable").items()
+           for engine, script in module.DEFORMABLE.items()}
 
 
 # PhysX and Newton do not read the same schemas -- Newton reads the AOUSD public `Physics*`

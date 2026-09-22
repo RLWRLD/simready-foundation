@@ -49,16 +49,32 @@ import recording
 # (cloth/example_cloth_hanging.py, which splits kd by solver in exactly this shape). Using the
 # soft-body numbers on a sheet is a thousandfold too stiff and it diverges in two hundredths of a
 # second -- measured.
+# The floor under the contact stiffness, per solver, from that solver's own shipped examples --
+# XPBD's from `example_rigid_soft_contact`, VBD's from the cloth and gripper examples. It is only a
+# floor: `material_stiffness` raises it to twice what the asset declares wherever the asset is
+# stiffer, which is what decides it for anything but a limp sheet. Measured: with that rule in
+# place one set serves a banana and a cloth alike (banana 30.97 mm either way, cloth 0.01-0.03),
+# so there is no branch here on what the asset is shaped like.
 CONTACT = {
-    "volume": {
-        "xpbd": {"soft_contact_ke": 75.0, "soft_contact_kd": 1.0, "soft_contact_kf": 1.0e3},
-        "vbd": {"soft_contact_ke": 1.0e5, "soft_contact_kd": 1.0e-4, "soft_contact_kf": 1.0e3},
-    },
-    "surface": {
-        "xpbd": {"soft_contact_ke": 1.0e2, "soft_contact_kd": 1.0e0},
-        "vbd": {"soft_contact_ke": 1.0e2, "soft_contact_kd": 1.0e2},
-    },
+    "xpbd": {"soft_contact_ke": 1.0e2, "soft_contact_kd": 1.0e0},
+    "vbd": {"soft_contact_ke": 1.0e2, "soft_contact_kd": 1.0e2},
 }
+
+
+def material_stiffness(model):
+    """The stiffness the contact has to match, from whichever array this model keeps it in.
+
+    A tetrahedral body states a shear modulus in Pa; a membrane states a stretch stiffness in N/m.
+    They are not the same quantity and the model holds them in different arrays, so the rule reads
+    whichever is there -- it is one rule about the asset's own material, not two about its shape.
+    """
+    import numpy as np
+
+    if model.tet_count:
+        return float(np.median(model.tet_materials.numpy()[:, 0]))
+    return float(np.median(model.tri_materials.numpy()[:, 0]))
+
+
 # Self-collision is not here: it is a property of the asset, read by
 # `asset_properties.self_collision`. Keying it on the element type made a cloth self-collide and a
 # soft body not -- a decision about the asset that the asset never asked for, and the opposite of
@@ -302,24 +318,23 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
         colour_for_vbd(builder)
     model = builder.finalize()
     kind = deformable_kind(model)
-    for name, value in CONTACT[kind][solver_name].items():
+    for name, value in CONTACT[solver_name].items():
         setattr(model, name, value)
-    if kind == "volume":
-        # The contact has to be at least as stiff as what it is pressing, or it is the contact
-        # that gives. The asset's own shear modulus is the scale, and the ratio is the grasping
-        # example's. The penalty examples are quoted for a beam a hundred times softer than this.
-        material_ke = CONTACT_STIFFNESS_OF_MATERIAL * float(np.median(model.tet_materials.numpy()[:, 0]))
-        model.soft_contact_ke = max(model.soft_contact_ke, material_ke)
-    for name, value in CONTACT[kind][solver_name].items():
-        chosen[name] = (value, f"penalty numerics for a {kind} deformable on {solver_name}, from "
-                               f"Newton's own examples for that pair")
+        chosen[name] = (value, f"penalty numerics for {solver_name}, from its own shipped examples")
+    # The contact has to be at least as stiff as what it is pressing, or it is the contact that
+    # gives. The asset's own material is the scale and the ratio is the grasping example's.
+    model.soft_contact_ke = max(model.soft_contact_ke,
+                                CONTACT_STIFFNESS_OF_MATERIAL * material_stiffness(model))
+    chosen["soft_contact_ke"] = (model.soft_contact_ke,
+                                 f"{CONTACT_STIFFNESS_OF_MATERIAL:g}x the asset's own stiffness where that is "
+                                 f"higher than {solver_name}'s example floor")
     friction, restitution = contact_material(declared, chosen)
     model.soft_contact_mu = friction
     model.soft_contact_restitution = restitution
     # Only the floor we added is ours to give a material to. Filling every shape would overwrite
     # whatever the asset's own shapes were imported with.
     for array, value in ((model.shape_material_ke, model.soft_contact_ke),
-                         (model.shape_material_kd, CONTACT[kind][solver_name]["soft_contact_kd"]),
+                         (model.shape_material_kd, CONTACT[solver_name]["soft_contact_kd"]),
                          (model.shape_material_mu, friction)):
         values = array.numpy()
         values[ground_shape] = value
@@ -417,7 +432,7 @@ def main():
     print(f"[baseline] {args.asset.split('/')[-1]} on {args.solver}: {model.particle_count} particles, "
           f"radius {radius * 1000:.2f} mm, lifted {lift * 100:.1f} cm, {args.iterations} iterations x "
           f"{substeps} substeps at {args.fps:g} fps")
-    print(f"[baseline] contact {CONTACT[deformable_kind(model)][args.solver]}")
+    print(f"[baseline] contact ke {model.soft_contact_ke:.4g} kd {model.soft_contact_kd:g}")
     print(f"[baseline] starts z [{start[:, 2].min():.4f}, {start[:, 2].max():.4f}]")
     for frame in range(frames):
         # SolverVBD keeps a bounding-volume hierarchy for collision and it does not notice the
