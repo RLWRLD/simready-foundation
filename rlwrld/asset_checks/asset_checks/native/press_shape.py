@@ -105,17 +105,30 @@ def recovery_frame(frames):
     return 4 * phase + phase // 2
 
 
-def verdict(contacts, compressed, height, deepest, recovery, settled_height=None):
+def verdict(contacts, compressed, height, deepest, recovery, settled_height=None,
+            contact_size=None):
     """What the run showed. `nothing-to-press` is not a physics failure -- it says the experiment
     does not apply, which is a different thing and must not be read as one.
 
-    Whether there is anything to press is a question about the asset, so it is asked of the
-    asset: something that settles to less than a tenth of the height it was authored with -- a
-    sheet, typically -- has no height to lose, and reporting `did-not-deform` for it would blame
-    the solver for a question nobody could answer. Asking it of the engine's contact band
-    instead would make the same asset pressable in one engine and not in another.
+    Whether there is anything to press is asked of the asset, and of the *indent this experiment
+    would apply to it*: press_depth of what the asset settled to. If that is no deeper than the
+    asset's own contact band, the plate's whole travel happens inside the band and whatever comes
+    back is the band, not the material.
+
+    This replaces a threshold written as a fraction of the asset's authored height, which was the
+    same mistake the drop made with its settling speed: for a sheet the height is ~0, so the
+    threshold was ~0 and the rule that was supposed to exempt sheets never fired for one. Measured,
+    a cloth and an empty polybag -- neither of which can be pressed, and one of which is the
+    user's own example of the case -- were graded `pushed-through-floor` on one engine and `pass`
+    on another. `contact_size` is the asset's declared particle radius or shell thickness, the one
+    number every engine here is given, so this does not make an asset pressable in one and not
+    another. Without it the old height rule still applies, so an older caller is not silently
+    changed into a stricter one.
     """
-    if settled_height is not None and settled_height < FLAT_OF_HEIGHT * height:
+    if settled_height is not None and contact_size:
+        if press_depth(settled_height) <= 2.0 * contact_size:
+            return "nothing-to-press"
+    elif settled_height is not None and settled_height < FLAT_OF_HEIGHT * height:
         return "nothing-to-press"
     if contacts == 0:
         return "no-contact"          # the plate never met the asset: not a measurement at all
