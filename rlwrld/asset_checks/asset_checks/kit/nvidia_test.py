@@ -16,11 +16,10 @@ subclasses:
 import math
 import pathlib
 
-TESTS = {
-    "drop": ("simready_benchmark_kit_suite.fet003_physics.ground_drop", "ground_drop"),
-    "slope": ("simready_benchmark_kit_suite.fet003_physics.slope_drop", "slope_drop"),
-    "grasp": ("simready_benchmark_kit_suite.fet005_grasp.grasp_and_lift", "grasp_and_lift"),
-}
+# Which NVIDIA test each experiment is, from the one place experiments are declared.
+from asset_checks import experiments  # noqa: E402
+
+TESTS = experiments.rigid_tests()
 
 
 def registered(experiment):
