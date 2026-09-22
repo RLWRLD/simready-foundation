@@ -93,8 +93,16 @@ def check_free_fall(fallen, fps, clearance, tolerance=0.05):
     return ratio, f"{measured}: the frame is the time it claims"
 
 
-def verdict(finite, fell, clearance, below, height, speed, contact_size):
+def verdict(finite, fell, clearance, below, height, speed, contact_size, extent=None):
     """What the run showed.
+
+    `extent` is how tall the asset ended up. A dropped body cannot end taller than the room it was
+    given -- its own height plus the gap it was dropped through -- without something having put
+    energy in, so anything past that is a run that did not stay physical and is named before any
+    rule that assumes it did. Measured: Newton 1.2.1's XPBD threw a loaded polybag 36.6 m up at
+    109 m/s, and this read `pass`, because every other rule here looks at the asset's *bottom* or
+    at a percentile of its speed, and its bottom was still politely on the floor while most of its
+    particles had not moved.
 
     `clearance` is how far the asset can fall: its lowest point's height above the floor when the
     experiment lets go. Not how far a runner lifted it -- an asset already authored at the drop
@@ -110,6 +118,8 @@ def verdict(finite, fell, clearance, below, height, speed, contact_size):
     """
     if not finite:
         return "diverged"
+    if extent is not None and extent > clearance + height + 2.0 * contact_size:
+        return "flew-apart"
     if fell < MIN_FALL_OF_DROP * clearance:
         return "never-fell"
     if below > max(TUNNEL_DEPTH_OF_HEIGHT * height, 2.0 * contact_size):

@@ -508,7 +508,8 @@ def main():
     # in both drop runners, and a pair of copies is a pair waiting to drift.
     decision = drop_shape.verdict(bool(np.isfinite(q).all()), fell,
                                   float(start[:, 2].min()), below, height,
-                                  speed, radius)
+                                  speed, radius,
+                                  extent=float(q[:, 2].max() - q[:, 2].min()))
     kept = drop_shape.height_kept(float(q[:, 2].max() - q[:, 2].min()), height, radius)
     print(drop_shape.result_line("baseline", fell, float(q[:, 2].min()), float(q[:, 2].max()),
                                  below, speed, peak, decision, kept, first_frame))
