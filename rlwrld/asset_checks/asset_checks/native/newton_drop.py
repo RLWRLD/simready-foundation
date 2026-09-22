@@ -19,6 +19,8 @@ asset and solver can simulate at all, and whether Isaac's stage is driving them
 correctly. It runs in a few seconds, so the parameters are found here and then applied.
 """
 import argparse
+import inspect
+import math
 import os
 import sys
 
@@ -47,7 +49,7 @@ import recording
 # ...and they depend on what the asset is made of, not only on which solver runs it. Newton's own
 # examples are explicit about this: a volumetric soft body gets ke ~1e5
 # (multiphysics/example_rigid_soft_contact.py) and a cloth gets ke ~1e2
-# (cloth/example_cloth_hanging.py, which splits kd by solver in exactly this shape). Using the
+# (cloth/example_cloth_hanging.py, which splits its contact stiffness by solver in this shape). Using the
 # soft-body numbers on a sheet is a thousandfold too stiff and it diverges in two hundredths of a
 # second -- measured.
 # The floor under the contact stiffness, per solver, from that solver's own shipped examples --
@@ -57,9 +59,44 @@ import recording
 # place one set serves a banana and a cloth alike (banana 30.97 mm either way, cloth 0.01-0.03),
 # so there is no branch here on what the asset is shaped like.
 CONTACT = {
-    "xpbd": {"soft_contact_ke": 1.0e2, "soft_contact_kd": 1.0e0},
-    "vbd": {"soft_contact_ke": 1.0e2, "soft_contact_kd": 1.0e2},
+    "xpbd": {"soft_contact_ke": 1.0e2},
+    "vbd": {"soft_contact_ke": 1.0e2},
 }
+# The contact spring is critically damped for the typical particle: c = 2 * zeta * sqrt(ke * m).
+# It was a constant per solver before (100 for VBD, 1 for XPBD, read off two shipped examples), and
+# Newton's own examples use 1, 10 and 100 for scenes of different mass, so the number was a
+# property of those scenes. Measured across this canon it was 6x critical on the banana and 1600x
+# on the empty polybag; on the loaded polybag's 3 mg film it was 650x, and the film left the
+# floor at 345 km/s on the frame it landed -- all five of that asset's Newton cells read
+# `diverged` because of it. At critical the film settles (0.06 m/s at 0.33 s).
+CONTACT_DAMPING_RATIO = 1.0
+
+
+def contact_damping(model):
+    """-> the contact damping in N*s/m: critical for the median particle mass at this model's
+    contact stiffness. The stiffness has to be set first."""
+    mass = model.particle_mass.numpy()
+    mass = mass[mass > 0.0]
+    return 2.0 * CONTACT_DAMPING_RATIO * math.sqrt(float(model.soft_contact_ke) * float(np.median(mass)))
+
+
+def damping_as_the_kernel_reads_it(value, ke):
+    """The number to hand the solver so that the contact damping *is* `value` N*s/m.
+
+    Newton 1.2.1's VBD contact force law multiplies kd by ke (`damping_coeff = kd * ke`: a
+    Rayleigh multiplier); 1.4.0 made kd absolute and called it a breaking change. The kernel's own
+    source says which, and that is what is read -- never a version number, because the same name
+    meaning two things across versions is exactly how `soft_body_relaxation` already bit once.
+    XPBD's kernels read neither, so for XPBD the value is a record and changes nothing.
+    """
+    from newton._src.solvers.vbd import rigid_vbd_kernels
+    source = inspect.getsource(rigid_vbd_kernels._compute_body_particle_contact_force)
+    if "kd * ke" in source:
+        return value / ke
+    if "kd / dt" in source:
+        return value
+    raise SystemExit("this Newton's contact kernel reads kd in a way this runner does not know; "
+                     "read _compute_body_particle_contact_force and say which")
 
 
 def material_stiffness(model):
@@ -359,13 +396,18 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     chosen["soft_contact_ke"] = (model.soft_contact_ke,
                                  f"{CONTACT_STIFFNESS_OF_MATERIAL:g}x the asset's own stiffness where that is "
                                  f"higher than {solver_name}'s example floor")
+    damping = contact_damping(model)
+    model.soft_contact_kd = damping_as_the_kernel_reads_it(damping, model.soft_contact_ke)
+    chosen["soft_contact_kd"] = (model.soft_contact_kd,
+                                 f"{damping:.4g} N*s/m, {CONTACT_DAMPING_RATIO:g}x critical for the "
+                                 f"median particle at this contact stiffness, as this kernel reads it")
     friction, restitution = contact_material(declared, chosen)
     model.soft_contact_mu = friction
     model.soft_contact_restitution = restitution
     # Only the floor we added is ours to give a material to. Filling every shape would overwrite
     # whatever the asset's own shapes were imported with.
     for array, value in ((model.shape_material_ke, model.soft_contact_ke),
-                         (model.shape_material_kd, CONTACT[solver_name]["soft_contact_kd"]),
+                         (model.shape_material_kd, model.soft_contact_kd),
                          (model.shape_material_mu, friction)):
         values = array.numpy()
         values[ground_shape] = value
