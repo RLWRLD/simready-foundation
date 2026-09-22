@@ -46,21 +46,43 @@ def engines():
     return out
 
 
-def read_kinds(bench, asset):
+READ_ASSET = """
+import sys
+sys.path.insert(0, {root!r})
+sys.path.insert(0, {native!r})
+from pxr import Usd
+from asset_checks.kit.scene import asset_kinds
+import usd_deformable
+stage = Usd.Stage.Open(sys.argv[1])
+kinds = sorted(asset_kinds(stage, stage.GetDefaultPrim().GetPath()))
+print('KINDS', ' '.join(kinds))
+if 'deformable' in kinds:
+    reason = usd_deformable.why_not_one_body(stage, sys.argv[1])
+    if reason:
+        print('REFUSE', reason)
+"""
+
+
+def read_asset(bench, asset):
+    """What the asset is, and whether it is shaped like something this pipeline can run.
+
+    Both answers come from the asset's own schemas, read once, in the venv that has USD. The
+    second is `usd_deformable`'s rule rather than a copy of it, so a refusal here says exactly what
+    a runner would have said -- only before a Kit launch instead of after one.
+    """
     out = subprocess.run(
         [str(bench / ".venv-isaac610" / "bin" / "python"), "-c",
-         "import sys;"
-         f"sys.path.insert(0, {str(PACKAGE_ROOT)!r});"
-         "from pxr import Usd;"
-         "from asset_checks.kit.scene import asset_kinds;"
-         "stage = Usd.Stage.Open(sys.argv[1]);"
-         "print('KINDS', ' '.join(sorted(asset_kinds(stage, stage.GetDefaultPrim().GetPath()))))",
-         str(asset)],
+         READ_ASSET.format(root=str(PACKAGE_ROOT), native=str(HERE / "native")), str(asset)],
         capture_output=True, text=True)
+    kinds = None
     for line in out.stdout.splitlines():
         if line.startswith("KINDS"):
-            return set(line.split()[1:])
-    raise SystemExit(f"could not read what {asset} is:\n{(out.stdout + out.stderr).strip()[-600:]}")
+            kinds = set(line.split()[1:])
+        elif line.startswith("REFUSE"):
+            raise SystemExit(line[len("REFUSE "):])
+    if kinds is None:
+        raise SystemExit(f"could not read what {asset} is:\n{(out.stdout + out.stderr).strip()[-600:]}")
+    return kinds
 
 
 def main():
@@ -94,7 +116,7 @@ def main():
     env = known[args.engine][args.solver]
     experiment = experiments.get(args.experiment)
 
-    kinds = read_kinds(bench, asset)
+    kinds = read_asset(bench, asset)
     if not kinds:
         raise SystemExit(f"{asset.name} declares neither a rigid body nor a deformable; there is "
                          f"nothing here to simulate")

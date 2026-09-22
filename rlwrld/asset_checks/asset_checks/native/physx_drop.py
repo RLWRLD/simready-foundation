@@ -21,6 +21,7 @@ import isaacsim
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import drop_shape  # noqa: E402  (imports nothing; safe before SimulationApp)
+import stepping  # noqa: E402  (a plain integer; safe before SimulationApp)
 import physx_scene  # noqa: E402  (same: USD is imported inside `world`, not at its top)
 from isaacsim import SimulationApp
 
@@ -28,8 +29,8 @@ ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 ap.add_argument("asset")
 ap.add_argument("--seconds", type=float, default=2.0)
 ap.add_argument("--fps", type=float, default=60.0)
-ap.add_argument("--substeps", type=int, default=physx_scene.SUBSTEPS,
-                help="physics steps inside one recorded frame (physx_scene.SUBSTEPS)")
+ap.add_argument("--substeps", type=int, default=stepping.SUBSTEPS,
+                help="physics steps inside one recorded frame (stepping.SUBSTEPS)")
 ap.add_argument("--drop", type=float, default=drop_shape.DROP_HEIGHT)
 ap.add_argument("--usd", default=None)
 ap.add_argument("--visual-asset", default=None,
@@ -46,6 +47,7 @@ app = SimulationApp({"headless": True}, experience=EXPERIENCE)
 # exists initialises USD outside Kit, and Kit can then no longer register its own schema wrappers:
 # the run dies during startup with "extension class wrapper ... has not been created yet".
 import asset_properties  # noqa: E402
+import usd_deformable  # noqa: E402  (which mesh the asset asks to be simulated)
 import newton_drop  # noqa: E402  (imports no engine at module level: the contact rule lives there)
 
 import numpy as np  # noqa: E402
@@ -106,12 +108,13 @@ physx_scene.world(stage, args.fps, args.substeps)
 for _ in range(30):
     app.update()
 
-body = target = None
+# Which mesh this asset asks to be simulated -- one, or a refusal naming the several.
+_kind, target = usd_deformable.one_body(stage, pathlib.Path(args.asset).name)
+body = None
 for prim_ in Usd.PrimRange(asset, Usd.TraverseInstanceProxies()):
-    if body is None and BODY_API in prim_.GetAppliedSchemas():
+    if BODY_API in prim_.GetAppliedSchemas():
         body = prim_
-    if target is None and any(api in prim_.GetAppliedSchemas() for api in SIM_APIS):
-        target = prim_
+        break
 if body is None:
     raise SystemExit(f"[physx] {args.asset} declares no {BODY_API}; PhysX has nothing to simulate")
 target = target or body

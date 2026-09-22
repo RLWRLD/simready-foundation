@@ -59,15 +59,58 @@ def is_simulated(prim):
 
 
 def find(stage):
-    """The prims this asset declares as deformable, and which kind each is."""
+    """The prims this asset declares as deformable, and which kind each is.
+
+    Instance proxies are traversed: `Stage.Traverse()` skips them, and a mesh brought in through
+    an instanced reference is exactly the mesh a packaged asset has.
+    """
     found = []
-    for prim in stage.Traverse():
+    for prim in Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()):
         schemas = _schemas(prim)
         if SURFACE_SIM in schemas:
             found.append(("surface", prim))
         elif VOLUME_SIM in schemas or prim.IsA(UsdGeom.TetMesh):
             found.append(("volume", prim))
     return found
+
+
+def _points(prim):
+    value = UsdGeom.PointBased(prim).GetPointsAttr().Get()
+    return 0 if value is None else len(value)
+
+
+def why_not_one_body(stage, asset_name=""):
+    """-> the reason this asset cannot be run as it is, or None.
+
+    An asset may declare several simulated meshes -- a loaded polybag declares its film as a
+    surface and its contents as a volume, and they are one object that has to be solved together
+    and collide with each other. Both runners drive one mesh and a recording draws one, so taking
+    the first would simulate the film alone and report it under the loaded bag's name.
+
+    Separated from the raising so that `check` can refuse before it launches anything, and the
+    runners can refuse if they are called directly: one rule, asked in two places.
+    """
+    name = asset_name or stage.GetRootLayer().identifier
+    found = find(stage)
+    if not found:
+        return f"{name} declares no simulated mesh; there is nothing here to deform"
+    if len(found) > 1:
+        listed = "; ".join(f"{prim.GetPath()} ({kind}, {_points(prim)} points)"
+                           for kind, prim in found)
+        return (f"{name} declares {len(found)} simulated meshes and this pipeline drives one: "
+                f"{listed}. They are one object, so running it would simulate the first and report "
+                f"it under the whole asset's name. Two coupled bodies is the feature this asset "
+                f"needs; it is refused rather than answered wrongly")
+    return None
+
+
+def one_body(stage, asset_name=""):
+    """The single mesh this asset asks to be simulated; -> (kind, prim), or SystemExit saying why
+    not."""
+    reason = why_not_one_body(stage, asset_name)
+    if reason:
+        raise SystemExit(reason)
+    return find(stage)[0]
 
 
 def add_surface(builder, stage, prim, report=None):

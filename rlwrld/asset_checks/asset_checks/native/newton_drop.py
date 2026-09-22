@@ -31,6 +31,7 @@ import newton
 from pxr import Usd
 
 import asset_properties
+import stepping
 import drop_shape
 import usd_deformable
 import recording
@@ -151,7 +152,6 @@ def contact_margin(radius, substeps, fps, drop, depth=0.0, gravity=9.81):
     """
     stride = (2.0 * gravity * max(drop, 0.0)) ** 0.5 / (fps * substeps)
     return max(CONTACT_MARGIN_OF_RADIUS * radius, depth, stride)
-SUBSTEPS = {"xpbd": 32, "vbd": 10}   # rigid_soft_contact uses 32; the softbody examples use 10
 ITERATIONS = 10             # every official soft-body example is 5-10
 XPBD_MAX_RELAXATION = 0.9   # SolverXPBD's own default; never raise it, only lower it
 # What counts as a pass, as fractions of the asset's own size and its own drop.
@@ -283,6 +283,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     # The stage has to be held in a name: a traversal of one opened inline outlives the stage
     # itself and the iteration dies on an expired prim.
     stage = Usd.Stage.Open(asset)
+    usd_deformable.one_body(stage, asset)   # the same refusal PhysX gives
     builder.add_usd(stage)
     built = usd_deformable.add_missing(builder, asset, chosen)
     # The radius the run uses is the one the builder ended up with, not the one asked for. A
@@ -399,7 +400,8 @@ def main():
     ap.add_argument("asset")
     ap.add_argument("--solver", default="vbd", choices=("vbd", "xpbd"))
     ap.add_argument("--iterations", type=int, default=ITERATIONS)
-    ap.add_argument("--substeps", type=int, default=0, help="0 = the official count for this solver")
+    ap.add_argument("--substeps", type=int, default=0,
+                    help="0 = the count every engine is given (stepping.SUBSTEPS)")
     ap.add_argument("--fps", type=float, default=60.0)
     ap.add_argument("--seconds", type=float, default=3.0)
     ap.add_argument("--radius", default="auto")
@@ -410,7 +412,7 @@ def main():
     ap.add_argument("--usd", default=None, help="write an animated USD of the run here")
     args = ap.parse_args()
 
-    substeps = args.substeps or SUBSTEPS[args.solver]
+    substeps = args.substeps or stepping.SUBSTEPS
     model, solver, pipeline, radius, lift, sim_path = build(
         args.asset, args.solver, args.iterations, args.radius, args.drop, args.margin,
         not args.no_full_surface, substeps, args.fps)
