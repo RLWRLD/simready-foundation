@@ -353,8 +353,11 @@ async def run(req):
             result["fixtures"] = {"layer": layer.name, "prims": reading.export_fixtures(handle._stage, fixtures, layer)}
         except Exception:  # noqa: BLE001
             result["fixtures"] = {"error": traceback.format_exc()}
-    if req["experiment"] in ("drop", "slope") and recorder.traj["t"]:
-        # NVIDIA's slope (45 deg) expects the asset to keep sliding: PR #2's rest criterion belongs to its
-        # own walled 15 deg slope, so on this slope only its tunnel / explode checks apply
-        result["pr2_criteria"] = pr2.evaluate(recorder.traj, float(config.get("floor_level", 0.0)), expect_rest=req["experiment"] == "drop")
+    # Whether PR #2's criteria apply, and whether they should expect rest, is the experiment's to
+    # say -- it was written out here, so an experiment added later would have been left out of it
+    # in silence.
+    wants = getattr(experiments.get(req["experiment"]), "PR2_CRITERIA", None)
+    if wants and recorder.traj["t"]:
+        result["pr2_criteria"] = pr2.evaluate(recorder.traj, float(config.get("floor_level", 0.0)),
+                                              expect_rest=wants == "rest")
     return result

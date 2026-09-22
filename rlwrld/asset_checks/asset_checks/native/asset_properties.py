@@ -31,6 +31,11 @@ POISSON = ("physics:poissonsRatio",)
 # importer takes half of it as the collision radius, so that is the contact size the asset is
 # asking for, and it is the one every engine should be given.
 THICKNESS = ("physics:thickness", "newton:thickness")
+# What a surface deformable states instead of a modulus: a membrane's stiffness is a force per
+# unit length, not a pressure, and the two are not interchangeable.
+STRETCH = ("physics:stretchStiffness", "newton:stretchStiffness")
+BEND = ("physics:bendStiffness", "newton:bendStiffness")
+SHEAR = ("physics:shearStiffness", "newton:shearStiffness")
 # Whether the asset collides with itself. This is a physical claim about the thing -- a sheet that
 # folds onto itself behaves differently from one that passes through itself -- so it belongs to the
 # asset, not to whichever solver happens to offer the switch. Every schema that declares it is
@@ -77,7 +82,8 @@ def read(asset):
     for key, names in (("particle_radius", RADIUS), ("friction", FRICTION),
                        ("restitution", RESTITUTION), ("density", DENSITY),
                        ("youngs_modulus", YOUNGS), ("poissons_ratio", POISSON),
-                       ("thickness", THICKNESS)):
+                       ("thickness", THICKNESS), ("stretch_stiffness", STRETCH),
+                       ("bend_stiffness", BEND), ("shear_stiffness", SHEAR)):
         value, where = _first(prims, names)
         found[key] = value
         found[key + "_source"] = where
