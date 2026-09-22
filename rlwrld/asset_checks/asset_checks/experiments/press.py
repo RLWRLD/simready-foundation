@@ -11,5 +11,9 @@ KINDS = {"deformable"}
 SECONDS = 4.0
 RIGID = None
 DEFORMABLE = {"newton": "newton_press.py", "physx": "physx_press.py"}
+# Pressing measures how much a body gives and how much of that it gets back. A surface has no
+# thickness to give, so for a cloth the experiment has no answer, and the pipeline refuses it
+# rather than reporting a verdict about nothing.
+BODIES = {"volume"}
 # PR #2's criteria are about an asset falling; they say nothing here.
 PR2_CRITERIA = None

@@ -59,13 +59,14 @@ kinds = sorted(asset_kinds(stage, stage.GetDefaultPrim().GetPath()))
 print('KINDS', ' '.join(kinds))
 if 'deformable' in kinds:
     most = int(sys.argv[2]) if sys.argv[2] != 'any' else None
-    reason = usd_deformable.why_not_runnable(stage, sys.argv[1], most=most)
+    needs = set(sys.argv[3].split(',')) if sys.argv[3] != 'any' else None
+    reason = usd_deformable.why_not_runnable(stage, sys.argv[1], most=most, needs=needs)
     if reason:
         print('REFUSE', reason)
 """
 
 
-def read_asset(bench, asset, drives):
+def read_asset(bench, asset, drives, needs):
     """What the asset is, and whether it is shaped like something this pipeline can run.
 
     Both answers come from the asset's own schemas, read once, in the venv that has USD. The
@@ -75,7 +76,7 @@ def read_asset(bench, asset, drives):
     out = subprocess.run(
         [str(bench / ".venv-isaac610" / "bin" / "python"), "-c",
          READ_ASSET.format(root=str(PACKAGE_ROOT), native=str(HERE / "native")),
-         str(asset), str(drives)],
+         str(asset), str(drives), ",".join(sorted(needs)) if needs else "any"],
         capture_output=True, text=True)
     kinds = None
     for line in out.stdout.splitlines():
@@ -119,23 +120,29 @@ def main():
     env = known[args.engine][args.solver]
     experiment = experiments.get(args.experiment)
 
-    out_for_refusal = pathlib.Path(args.out).resolve() if args.out else pathlib.Path("results").resolve()
+    # `--out` is the run directory. Both runners lay the same tree inside it --
+    # <out>/<asset>/<env>/<experiment>/ -- and put the side-by-side strips in <out>/compare/, so a
+    # second engine or a second experiment written to the same `--out` joins the same comparison.
+    out = pathlib.Path(args.out).resolve() if args.out else pathlib.Path("results").resolve()
+    cell = out / asset.stem / env.name / experiment.NAME
+
+    def refuse(reason):
+        # A refusal that leaves nothing behind is a refusal nobody reading the run can see. It is
+        # written where the cell's result would have gone, so the report shows it in that box.
+        cell.mkdir(parents=True, exist_ok=True)
+        (cell / "refused.json").write_text(json.dumps(
+            {"asset": str(asset), "experiment": args.experiment, "engine": args.engine,
+             "solver": args.solver, "reason": str(reason)}, indent=1))
+        raise SystemExit(reason)
+
     # How many simulated bodies this engine's runner drives. Newton builds every declared body
     # into one model; the PhysX runners drive one and say how many that is.
     from asset_checks.native import physx_scene
     drives = physx_scene.BODIES if env.engine == "physx" else "any"
     try:
-        kinds = read_asset(bench, asset, drives)
+        kinds = read_asset(bench, asset, drives, getattr(experiment, "BODIES", None))
     except SystemExit as refusal:
-        # A refusal that leaves nothing behind is a refusal nobody reading the run can see: the
-        # asset simply has no directory, and the report counts the assets that do. Write the
-        # reason where the report looks, then refuse as before.
-        record = out_for_refusal / asset.stem / "refused.json"
-        record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(json.dumps({"asset": str(asset), "experiment": args.experiment,
-                                      "engine": args.engine, "solver": args.solver,
-                                      "reason": str(refusal)}, indent=1))
-        raise
+        refuse(str(refusal))
     if not kinds:
         raise SystemExit(f"{asset.name} declares neither a rigid body nor a deformable; there is "
                          f"nothing here to simulate")
@@ -146,22 +153,17 @@ def main():
     from asset_checks.kit.scene import SOLVER_SIMULATES
 
     if kind not in SOLVER_SIMULATES.get(env.solver, set()):
-        raise SystemExit(f"{env.solver} cannot simulate a {kind} asset: it does "
+        refuse(f"{env.solver} cannot simulate a {kind} asset: it does "
                          + ", ".join(sorted(SOLVER_SIMULATES.get(env.solver, ()))) + " only. "
                          f"For a {kind} asset on {args.engine}, the solvers are "
                          + ", ".join(sorted(s for s, e in known[args.engine].items()
                                             if kind in SOLVER_SIMULATES.get(e.solver, set()))))
     if kind not in experiment.KINDS:
-        raise SystemExit(f"the {experiment.NAME} experiment is for "
+        refuse(f"the {experiment.NAME} experiment is for "
                          + " and ".join(sorted(experiment.KINDS)) + f" assets, and {asset.name} is "
                          f"{kind}. For a {kind} asset the experiments are "
                          + ", ".join(sorted(experiments.for_kind(kind))))
 
-    # `--out` is the run directory. Both runners lay the same tree inside it --
-    # <out>/<asset>/<env>/<experiment>/ -- and put the side-by-side strips in <out>/compare/, so a
-    # second engine or a second experiment written to the same `--out` joins the same comparison.
-    out = pathlib.Path(args.out).resolve() if args.out else pathlib.Path("results").resolve()
-    cell = out / asset.stem / env.name / experiment.NAME
     print(f"[check] {experiment.NAME} on {env.name} (Isaac {env.isaac}, {env.engine}"
           + (f" {env.newton.rstrip('.')}" if env.newton else "") + f", {env.solver}) -> {cell}", flush=True)
 
