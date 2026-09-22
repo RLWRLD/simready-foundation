@@ -27,11 +27,12 @@ GRAVITY = 9.81
 # every declared body into one model off one particle array, so its runners take whatever
 # the asset has and this number is not theirs.
 BODIES = 1
-GROUND_DEPTH = 0.5     # how far the floor reaches below z = 0; it reaches recording.GROUND_HALF out
+GROUND_DEPTH = 0.5     # how far the floor reaches below z = 0; `floor` says how far out
 
 
-def world(stage, fps, substeps, path="/World/PhysicsScene", ground_path="/World/Ground"):
-    """Define the scene and the floor. Both live on the stage at known paths; nothing is returned.
+def world(stage, fps, substeps, path="/World/PhysicsScene"):
+    """Define the scene: gravity and the step rate. The floor is `floor`, once the asset's size is
+    known, and its material `floor_material`, once the asset's friction is.
 
     Raises if PhysX does not take the step rate: a rate that was asked for and not applied is the
     bug this module exists to stop, and a silent default is how it hid the first time.
@@ -40,7 +41,6 @@ def world(stage, fps, substeps, path="/World/PhysicsScene", ground_path="/World/
     # unable to register its own schema wrappers, and the run dies during startup.
     from pxr import Gf, PhysxSchema, UsdGeom, UsdPhysics
 
-    import recording   # the floor drawn in the video and the floor simulated are one floor
 
     scene = UsdPhysics.Scene.Define(stage, path)
     scene.CreateGravityDirectionAttr(Gf.Vec3f(0.0, 0.0, -1.0))
@@ -58,14 +58,42 @@ def world(stage, fps, substeps, path="/World/PhysicsScene", ground_path="/World/
           f"{1.0 / rate * 1000:.3f} ms in each {1.0 / fps * 1000:.2f} ms frame, "
           f"the step Newton integrates with", flush=True)
 
-    # A solid floor, not a sheet. Newton's `add_ground_plane` is a half-space -- infinitely thick
-    # -- and a zero-thickness triangle mesh is a weaker collider by construction: measured, a
-    # pressed banana was squeezed 11 mm through the sheet, which says nothing about PhysX and
-    # everything about the floor it was given. The box's top face is at z = 0, so the two engines'
-    # floors are in the same place.
-    half = recording.GROUND_HALF
+
+
+def floor(stage, half, ground_path="/World/Ground"):
+    """A solid floor, not a sheet, reaching `half` out from the origin (`recording.ground_half`,
+    so the drawn floor and the simulated one are the same floor).
+
+    Newton's `add_ground_plane` is a half-space -- infinitely thick -- and a zero-thickness
+    triangle mesh is a weaker collider by construction: measured, a pressed banana was squeezed
+    11 mm through the sheet, which says nothing about PhysX and everything about the floor it was
+    given. The box's top face is at z = 0, so the two engines' floors are in the same place.
+    """
+    from pxr import Gf, UsdGeom, UsdPhysics
     ground = UsdGeom.Cube.Define(stage, ground_path)
     ground.CreateSizeAttr(2.0)
     UsdGeom.XformCommonAPI(ground).SetScale(Gf.Vec3f(half, half, GROUND_DEPTH / 2.0))
     UsdGeom.XformCommonAPI(ground).SetTranslate(Gf.Vec3d(0.0, 0.0, -GROUND_DEPTH / 2.0))
     UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
+    print(f"[physx] floor: a box {2 * half:.2f} m across, top face at z = 0", flush=True)
+
+
+def floor_material(stage, friction, restitution, paths, path="/World/FixtureMaterial"):
+    """Give the experiment's fixtures -- the floor, and a press's plate -- the friction the asset
+    resolved to, the same number Newton's floor and plate are given. Static and dynamic friction
+    are the one number, because Newton's contact has one `mu`. Says so in the log."""
+    from pxr import UsdPhysics, UsdShade
+    material = UsdShade.Material.Define(stage, path)
+    api = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+    api.CreateStaticFrictionAttr(float(friction))
+    api.CreateDynamicFrictionAttr(float(friction))
+    api.CreateRestitutionAttr(float(restitution))
+    for target in paths:
+        prim = stage.GetPrimAtPath(target)
+        if not prim or not prim.IsValid():
+            raise SystemExit(f"[physx] no fixture at {target} to give a material to")
+        UsdShade.MaterialBindingAPI.Apply(prim).Bind(material, UsdShade.Tokens.weakerThanDescendants,
+                                                     "physics")
+    print(f"[physx] fixtures {', '.join(str(p) for p in paths)} bound to {path}: friction "
+          f"{friction:g}, restitution {restitution:g} -- the asset's numbers, the same Newton's "
+          f"floor and plate are given", flush=True)

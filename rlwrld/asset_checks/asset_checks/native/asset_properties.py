@@ -13,7 +13,12 @@ contact friction is a property of the materials in the scene, not of the integra
 mu=0.3 and XPBD mu=1.0 because two Newton examples happened to use those numbers makes the two
 solvers incomparable, which is the one thing this whole benchmark must not do.
 """
-from pxr import Usd, UsdGeom
+try:
+    from pxr import Usd, UsdGeom
+except ImportError:
+    # The names and rules in this module are read by tools that have no USD (run.py, the
+    # coordinator); every function here needs it and fails on use, not on import.
+    Usd = UsdGeom = None
 
 # What the AOUSD physics schemas call these, in the order we prefer them. `newton:` names are what
 # an asset authored for Newton spells out directly; `physics:` names are the portable ones.
@@ -36,6 +41,16 @@ THICKNESS = ("physics:thickness", "newton:thickness")
 STRETCH = ("physics:stretchStiffness", "newton:stretchStiffness")
 BEND = ("physics:bendStiffness", "newton:bendStiffness")
 SHEAR = ("physics:shearStiffness", "newton:shearStiffness")
+# A material damping, where the asset states one. Read so that it is at least *reported*: Newton's
+# importer sets its own triangle damping and PhysX's conversion carries none, so a declared value
+# reaches neither engine, and a number the asset declares and nobody honours must be said.
+DAMPING = ("newton:kDamp", "newton:triKd", "physics:damping")
+# Per element kind, the attribute that damps it: a volume's tetrahedra, a membrane's triangles
+# and its bending edges. These are what Newton-flavoured assets author (the AOUSD proposal has
+# no damping attribute yet); the importer reads none of them.
+TET_DAMPING = ("newton:kDamp",)
+TRI_DAMPING = ("newton:triKd",)
+EDGE_DAMPING = ("newton:edgeKd",)
 # Whether the asset collides with itself. This is a physical claim about the thing -- a sheet that
 # folds onto itself behaves differently from one that passes through itself -- so it belongs to the
 # asset, not to whichever solver happens to offer the switch. Every schema that declares it is
@@ -83,7 +98,8 @@ def read(asset):
                        ("restitution", RESTITUTION), ("density", DENSITY),
                        ("youngs_modulus", YOUNGS), ("poissons_ratio", POISSON),
                        ("thickness", THICKNESS), ("stretch_stiffness", STRETCH),
-                       ("bend_stiffness", BEND), ("shear_stiffness", SHEAR)):
+                       ("bend_stiffness", BEND), ("shear_stiffness", SHEAR),
+                       ("damping", DAMPING)):
         value, where = _first(prims, names)
         found[key] = value
         found[key + "_source"] = where
@@ -98,7 +114,8 @@ def report(tag, declared, chosen):
     is a benchmark nobody should believe.
     """
     for key in ("particle_radius", "thickness", "friction", "restitution", "density",
-                "youngs_modulus", "poissons_ratio"):
+                "youngs_modulus", "poissons_ratio", "stretch_stiffness", "bend_stiffness",
+                "shear_stiffness", "damping"):
         value, where = declared.get(key), declared.get(key + "_source")
         if value is not None:
             print(f"[{tag}] asset: {key} = {value:g}  ({where})")
@@ -107,6 +124,19 @@ def report(tag, declared, chosen):
               f"({declared['self_collision_source']})")
     for key, (value, why) in sorted(chosen.items()):
         print(f"[{tag}] ours:  {key} = {value:g}  -- {why}")
+
+
+def friction(declared):
+    """-> (mu, why). The asset's friction, or the one default shared by every engine and solver.
+
+    One function, because it was two: Newton's runner asked `declared` and PhysX's conversion
+    asked the material prim with its own fallback, and an asset declaring only a static friction
+    reached one engine as that number and the other as the default.
+    """
+    if declared.get("friction") is not None:
+        return declared["friction"], declared.get("friction_source")
+    return DEFAULT_FRICTION, ("the asset declares no friction; one value for every engine and "
+                              "solver so they rub the same floor")
 
 
 def self_collision(declared):

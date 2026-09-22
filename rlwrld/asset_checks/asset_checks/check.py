@@ -40,9 +40,7 @@ def engines():
     """
     out = {}
     for env in envs.ENVIRONMENTS.values():
-        name = "physx" if env.engine == "physx" else "newton" + env.newton.rstrip(".")
-        if env.engine == "physx" and env.isaac != "6.1.0":
-            name = f"physx{env.isaac}"
+        name = envs.engine_name(env)
         out.setdefault(name, {})[env.solver] = env
     return out
 
@@ -144,8 +142,8 @@ def main():
     except SystemExit as refusal:
         refuse(str(refusal))
     if not kinds:
-        raise SystemExit(f"{asset.name} declares neither a rigid body nor a deformable; there is "
-                         f"nothing here to simulate")
+        refuse(f"{asset.name} declares neither a rigid body nor a deformable; there is nothing "
+               f"here to simulate")
     kind = "deformable" if "deformable" in kinds else "rigid"
     print(f"[check] {asset.name} is {kind} ({', '.join(sorted(kinds))} declared)", flush=True)
 

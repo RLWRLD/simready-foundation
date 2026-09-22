@@ -21,8 +21,9 @@ import physx_scene  # noqa: E402  (imports no USD at its top: safe before Simula
 
 ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 ap.add_argument("asset")
-ap.add_argument("--seconds", type=float, default=4.0)
-ap.add_argument("--fps", type=float, default=60.0)
+ap.add_argument("--seconds", type=float, required=True,
+                help="simulated seconds: the experiment's own SECONDS, which run.py passes")
+ap.add_argument("--fps", type=float, default=stepping.FPS)
 ap.add_argument("--substeps", type=int, default=stepping.SUBSTEPS,
                 help="physics steps inside one recorded frame (stepping.SUBSTEPS)")
 ap.add_argument("--margin", type=float, default=0.0, help="0 = the engine's own contact offset")
@@ -41,6 +42,7 @@ app = SimulationApp({"headless": True}, experience=EXPERIENCE)
 import asset_properties  # noqa: E402
 import usd_deformable  # noqa: E402  (which mesh the asset asks to be simulated)
 import newton_drop  # noqa: E402  (imports no engine at module level: the contact rule lives there)
+import recording  # noqa: E402  (the floor's size, and the recording)
 import press_shape  # noqa: E402
 
 import numpy as np  # noqa: E402
@@ -50,10 +52,8 @@ from isaacsim.core.experimental.prims import DeformablePrim, RigidPrim  # noqa: 
 from isaacsim.core.simulation_manager import SimulationManager  # noqa: E402
 from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics  # noqa: E402
 
-# PhysX spells a deformable's simulated geometry one of two ways depending on what it is made
-# of. Asking for both is what lets a cloth and a soft body go through the same runner.
-SIM_APIS = ("OmniPhysicsVolumeDeformableSimAPI", "OmniPhysicsSurfaceDeformableSimAPI")
-BODY_API = "OmniPhysicsDeformableBodyAPI"
+# The body schema, as PhysX spells the AOUSD name; the rule lives with the names.
+BODY_API = usd_deformable.physx_name(usd_deformable.BODY)
 PLATE = "/World/PressPlate"
 
 
@@ -85,11 +85,15 @@ asset = stage.DefinePrim("/World/Asset")
 asset.GetReferences().AddReference(args.asset)
 
 physx_scene.world(stage, args.fps, args.substeps)
+FIXTURES = ["/World/Ground", PLATE]
 for _ in range(30):
     app.update()
 
-# Which mesh this asset asks to be simulated -- one, or a refusal naming the several.
-_refusal = usd_deformable.why_not_runnable(stage, pathlib.Path(args.asset).name,
+# Which mesh this asset asks to be simulated -- one, or a refusal naming the several. Asked of
+# the asset being evaluated (the original, with the AOUSD names and the material the parity check
+# measured), not of the PhysX copy, which spells the same physics under other names.
+_original = Usd.Stage.Open(args.visual_asset or args.asset)
+_refusal = usd_deformable.why_not_runnable(_original, pathlib.Path(args.visual_asset or args.asset).name,
                                           most=physx_scene.BODIES)
 if _refusal:
     raise SystemExit(_refusal)
@@ -124,13 +128,9 @@ centre = (float(points[:, 0].mean()), float(points[:, 1].mean()))
 declared, chosen = asset_properties.read(args.visual_asset or args.asset), {}
 offset, offset_source = asset_properties.contact_size(declared)
 if offset is None:
-    picked = np.random.default_rng(0).choice(len(points), size=min(512, len(points)), replace=False)
-    spacing = np.sqrt(((points[picked][:, None, :] - points[None, :, :]) ** 2).sum(-1))
-    spacing[spacing < 1e-9] = np.inf
-    offset = float(np.median(spacing.min(axis=1)) * 0.5)
+    offset = newton_drop.auto_radius(points)   # the same rule Newton's radius comes from
     chosen["rest_offset"] = (offset, "the asset declares neither a particle radius nor a shell "
                                      "thickness; half the median distance between nodes")
-chosen["contact_offset"] = (offset * 2.0, "twice the rest offset, as Newton's contact margin is")
 # PhysX derives its contact response from the bound material, so unlike Newton there is no
 # separate penalty stiffness to raise: the asset's own Young's modulus is already what the plate
 # pushes against. Recorded here so the two engines' logs can be read against each other.
@@ -191,6 +191,9 @@ for _ in range(10):
 print(f"[physx] {height * 1000:.1f} mm tall, rest offset {offset * 1000:.2f} mm, "
       f"plate {thickness * 1000:.1f} mm thick parked at {start_z:.4f}")
 
+physx_scene.floor(stage, recording.ground_half(points))
+_mu, _mu_why = asset_properties.friction(declared)
+physx_scene.floor_material(stage, _mu, declared.get("restitution") or 0.0, FIXTURES)
 SimulationManager.set_physics_sim_device("cuda")
 timeline = omni.timeline.get_timeline_interface()
 timeline.set_time_codes_per_second(args.fps)
@@ -201,9 +204,16 @@ for _ in range(5):
 prim = DeformablePrim(str(body.GetPath()))
 raw = simulation_mesh(prim.get_element_indices())
 # Three indices per element for a cloth, four for a soft body: the view says which.
-per_element = int(prim.num_nodes_per_element) if hasattr(prim, "num_nodes_per_element") else (
-    4 if raw.size % 4 == 0 and raw.size % 3 else 3)
+if not hasattr(prim, "num_nodes_per_element"):
+    raise SystemExit("[physx] this DeformablePrim reports no num_nodes_per_element; the element "
+                     "shape is not guessed from the index count")
+per_element = int(prim.num_nodes_per_element)
 elements = raw.reshape(-1, per_element)
+bound_materials = prim.get_applied_physics_materials()
+print(f"[physx] physics material: {bound_materials}")
+if not bound_materials or not all(bound_materials):
+    raise SystemExit("[physx] the body has no physics material bound: PhysX would run its own "
+                     "default (youngs_modulus 5e5) and look like a softer engine")
 import warp as wp  # noqa: E402
 prim.set_nodal_positions(wp.array(points.reshape(1, -1, 3).astype(np.float32), dtype=wp.float32))
 prim.set_nodal_velocities(wp.zeros((1, points.shape[0], 3), dtype=wp.float32))
@@ -218,16 +228,17 @@ plate_prim = RigidPrim(PLATE)
 frames = int(args.seconds * args.fps)
 tape = None
 if args.usd:
-    import recording
     tape = recording.Recording(args.usd, int(args.fps), frames, points, elements,
                                asset=args.visual_asset, sim_prim_path=str(body.GetPath()),
+                               ground_half=recording.ground_half(points),
                                plate_centre=centre,
                                plate=(footprint[0] * press_shape.PLATE_FOOTPRINT,
                                       footprint[1] * press_shape.PLATE_FOOTPRINT, thickness / 2.0))
 
 settle_at, recover_at = press_shape.settle_frame(frames), press_shape.recovery_frame(frames)
 start_top = lowest_top = bottom_z = recovered = settled_height = depth = None
-deepest = 0.0
+settled = lowest_q = None
+deepest, finite = 0.0, True
 for frame in range(frames):
     plate_z = press_shape.plate_height(frame, frames, start_z, bottom_z)
     plate_prim.set_world_poses(positions=np.array([[centre[0], centre[1], plate_z]], dtype=np.float32))
@@ -238,12 +249,14 @@ for frame in range(frames):
     q = world_nodes(prim)
     if not np.isfinite(q).all():
         print(f"[physx] diverged at {frame / args.fps:.2f}s")
+        finite = False
         break
     if tape is not None:
         tape.frame(frame, q, plate_z=plate_z)
     top_now = float(q[:, 2].max())
     if frame == settle_at:
         start_top = lowest_top = top_now
+        settled = lowest_q = q.copy()
         floor_now = float(q[:, 2].min())
         settled_height = top_now - floor_now
         centre = press_shape.plate_over(q)      # press where the asset now lies, not where it was
@@ -255,8 +268,9 @@ for frame in range(frames):
               f"will indent it {depth * 1000:.1f} mm")
     if start_top is None:
         continue
-    lowest_top = min(lowest_top, top_now)
-    deepest = max(deepest, -float(q[:, 2].min()))
+    if top_now < lowest_top:
+        lowest_top, lowest_q = top_now, q.copy()
+    deepest = max(deepest, press_shape.below_floor(float(q[:, 2].min()), offset))
     if frame >= recover_at:
         recovered = top_now
     if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
@@ -265,16 +279,17 @@ for frame in range(frames):
 
 compressed = (start_top - lowest_top) if start_top is not None else 0.0
 recovery = press_shape.recovery_fraction(recovered, lowest_top, compressed, offset)
-# PhysX exposes no soft-contact count, so this is not one: it records only whether the plate's
-# underside ever got below the asset's top. Reported as a plain yes/no rather than as a count,
-# which a "1" in a column of thousands would be read as.
-touched = 1 if (bottom_z is not None and bottom_z - thickness / 2.0 < start_top) else 0
-print(press_shape.result_line("physx", start_top or 0.0, lowest_top or 0.0, compressed, height,
-                              recovery, max(0.0, deepest - offset), "yes" if touched else "no",
-                              press_shape.verdict(touched, compressed, height,
-                                                  max(0.0, deepest - offset), recovery,
-                                                  settled_height=settled_height,
-                                                  contact_size=offset),
+# Whether the plate met the asset is measured from the nodes, the same way Newton measures it:
+# PhysX exposes no soft-contact count, and a flag computed from the plate's schedule was true
+# whenever the plate was told to go down.
+plate_half = (footprint[0] * press_shape.PLATE_FOOTPRINT, footprint[1] * press_shape.PLATE_FOOTPRINT)
+pressed = (press_shape.pressed_nodes(settled, lowest_q, centre, plate_half, offset)
+           if settled is not None else 0)
+print(f"[physx] {pressed} node(s) under the plate moved down a contact size")
+print(press_shape.result_line("physx", start_top or 0.0, lowest_top or 0.0, compressed,
+                              settled_height or 0.0, recovery, deepest, pressed,
+                              press_shape.verdict(finite, pressed, compressed,
+                                                  settled_height or 0.0, deepest, recovery, margin),
                               indent=depth))
 if tape is not None:
     tape.close()

@@ -2,7 +2,7 @@
 
     python asset_checks/native/run.py <asset.usda> --out <dir>
         [--envs newton12_vbd,newton15_vbd,newton12_xpbd,newton15_xpbd,physx]
-        [--experiments drop,press] [--seconds 2] [--size 768] [--no-render]
+        [--experiments drop,press] [--size 768] [--no-render]
 
 One asset, one experiment, one engine, one solver -- the four things the user names -- and this
 turns them into a measured run and a video. It is the deformable counterpart of the Kit runner:
@@ -27,6 +27,8 @@ import agreement
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from asset_checks import envs as rigid_envs, experiments as rigid_experiments, video  # noqa: E402
+from asset_checks.kit.scene import SOLVER_SIMULATES  # noqa: E402
+import usd_deformable  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -36,7 +38,7 @@ BENCH = pathlib.Path("/home/wongyun/Workspace/Research/Robotics/simready-bench")
 # header text a comparison video prints. Only the solvers that can move particles are here:
 # `kit/scene.py::SOLVER_SIMULATES` records that MuJoCo refuses a stage whose bodies are particles,
 # measured rather than assumed, so the two `mujoco` environments are not offered for a deformable.
-PARTICLE_SOLVERS = ("physx", "vbd", "xpbd")
+PARTICLE_SOLVERS = tuple(sorted(s for s, kinds in SOLVER_SIMULATES.items() if "deformable" in kinds))
 ENVIRONMENTS = {name: (e.venv, e.engine, e.solver) for name, e in rigid_envs.ENVIRONMENTS.items()
                 if e.solver in PARTICLE_SOLVERS}
 # Which experiments a deformable asset has, and what drives each under each engine, from the one
@@ -66,7 +68,7 @@ def physx_asset(asset):
     a second copy of the same statement. A cell whose asset failed it must not run at all: a
     number from it would look exactly like a number from a good one.
     """
-    converted = pathlib.Path(asset).with_name(pathlib.Path(asset).stem + "_physx.usda")
+    converted = pathlib.Path(asset).with_name(pathlib.Path(asset).stem + usd_deformable.PHYSX_COPY_SUFFIX + ".usda")
     if not converted.exists():
         # Made here rather than demanded of the caller: it is a mechanical re-authoring of the
         # asset, the parity check below is what makes it trustworthy, and a run should need
@@ -126,9 +128,13 @@ def read_result(log):
             found["last_frame"] = marker
         elif "diverged" in marker:
             found["diverged"] = marker
-        elif marker.startswith("most soft contacts"):
-            found["soft_contacts"] = marker.rsplit(": ", 1)[-1]
     return found
+
+
+def ending(log_path):
+    """How a run ended, from its log's last lines: the last few non-empty ones, trimmed."""
+    lines = [l.strip() for l in log_path.read_text(errors="replace").splitlines() if l.strip()]
+    return "\n".join(l[:300] for l in lines[-4:])
 
 
 def run(command, log_path, timeout):
@@ -152,7 +158,7 @@ COLUMNS = {
     "press": [("verdict", "verdict"), ("indented_mm", "plate went in (mm)"),
               ("compressed_mm", "asset gave (mm)"),
               ("compressed_frac", "of height"), ("recovered_frac", "recovered"),
-              ("below_floor_mm", "below floor (mm)"), ("soft_contacts", "plate contacts")],
+              ("below_floor_mm", "below floor (mm)"), ("pressed_nodes", "nodes pressed")],
 }
 
 
@@ -190,8 +196,6 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--envs", default="newton12_vbd,newton12_xpbd,newton15_vbd,newton15_xpbd,physx")
     ap.add_argument("--experiments", default=",".join(EXPERIMENTS))
-    ap.add_argument("--seconds", type=float, default=2.0)
-    ap.add_argument("--press-seconds", type=float, default=4.0)
     ap.add_argument("--timeout", type=int, default=1200)
     ap.add_argument("--no-render", action="store_true")
     args = ap.parse_args()
@@ -218,7 +222,7 @@ def main():
             cell_dir = out / stem / env / experiment
             cell_dir.mkdir(parents=True, exist_ok=True)
             usd = cell_dir / "recording.usda"
-            seconds = args.press_seconds if experiment == "press" else args.seconds
+            seconds = rigid_experiments.get(experiment).SECONDS   # the experiment's, nobody else's
             row = {"env": env, "experiment": experiment}
             try:
                 command, refusal = cell_command(env, experiment, asset, usd, seconds)
@@ -241,6 +245,11 @@ def main():
                         found = read_result(log_path.read_text(errors="replace"))
                         row.update({"exit": code, "seconds": seconds_taken,
                                     "usd": usd.name if usd.exists() else None, **found})
+                        if "verdict" not in found:
+                            # No RESULT line: the run ended some other way, and how is in its
+                            # last lines -- a refusal's sentence, a traceback's last line, a
+                            # kernel fault. Kept with the record so the report need not guess.
+                            row["error"] = ending(log_path)
                         print(f"[run] {cell}: exit {code} in {seconds_taken}s -- "
                               f"{found or 'nothing reported'}", flush=True)
             results[cell] = row
@@ -257,9 +266,12 @@ def main():
             # What `asset_checks.compare` reads: a verdict it can colour, the experiment's own word
             # for what happened after FAIL, and the videos by role.
             said = row.get("verdict") or row.get("skipped") or row.get("error") or row.get("diverged")
+            # `verdict` is pass/fail for the compositor's colour; `outcome` is the experiment's own
+            # word (`through-the-floor`, `did-not-spring-back`, ...), which is what a table wants.
             (cell_dir / "result.json").write_text(json.dumps(
                 {**row, "verdict": "pass" if row.get("verdict") == "pass" else "fail",
-                 "message": said or "no result", "media": media}, indent=1))
+                 "outcome": row.get("verdict"), "message": said or "no result", "media": media},
+                indent=1))
 
     if not args.no_render:
         for view in video.VIEWS:

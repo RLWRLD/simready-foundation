@@ -8,14 +8,16 @@ nowhere else, and both runners read them.
 
 Nothing here imports a physics engine, so either can read it.
 """
+import numpy as np
 
-# Fractions of the asset's own settled height, so the same thresholds mean the same thing for a
-# grape and for a melon.
+# The floor is the same floor in both experiments: one definition of "below it".
+from drop_shape import below_floor  # noqa: F401
+
+# Fractions of the asset's own *settled* height -- what it is once it lies on the floor, which is
+# what the plate meets -- so the same thresholds mean the same thing for a grape and for a melon.
 MIN_COMPRESSION = 0.05       # it has to give at least this much
 MIN_RECOVERY = 0.5           # and get back at least this much of what it gave
-TUNNEL_DEPTH_OF_HEIGHT = 0.05
 INDENT_OF_HEIGHT = 0.2       # the plate goes this far into the asset, whatever is simulating it
-FLAT_OF_HEIGHT = 0.1         # below this much of its authored height, the asset is a sheet
 
 
 def press_depth(height):
@@ -117,38 +119,42 @@ def recovery_frame(frames):
     return 4 * phase + phase // 2
 
 
-def verdict(contacts, compressed, height, deepest, recovery, settled_height=None,
-            contact_size=None):
-    """What the run showed. `nothing-to-press` is not a physics failure -- it says the experiment
-    does not apply, which is a different thing and must not be read as one.
+def pressed_nodes(settled, lowest, plate_xy, plate_half, contact_size):
+    """How many nodes under the plate's footprint the plate pushed down by at least one contact
+    size, between the asset settling and its lowest point.
 
-    Whether there is anything to press is asked of the asset, and of the *indent this experiment
-    would apply to it*: press_depth of what the asset settled to. If that is no deeper than the
-    asset's own contact band, the plate's whole travel happens inside the band and whatever comes
-    back is the band, not the material.
-
-    This replaces a threshold written as a fraction of the asset's authored height, which was the
-    same mistake the drop made with its settling speed: for a sheet the height is ~0, so the
-    threshold was ~0 and the rule that was supposed to exempt sheets never fired for one. Measured,
-    a cloth and an empty polybag -- neither of which can be pressed, and one of which is the
-    user's own example of the case -- were graded `pushed-through-floor` on one engine and `pass`
-    on another. `contact_size` is the asset's declared particle radius or shell thickness, the one
-    number every engine here is given, so this does not make an asset pressable in one and not
-    another. Without it the old height rule still applies, so an older caller is not silently
-    changed into a stricter one.
+    Whether the plate met the asset is measured the same way on every engine: from the nodes.
+    Newton can count its soft contacts and PhysX cannot, and the PhysX runner once answered with
+    a flag computed from the plate's schedule -- true whenever the plate was told to go down --
+    so `no-contact` could not happen there and a plate that missed read `did-not-deform`.
+    `settled` and `lowest` are the nodes at the settle frame and at the frame the top was lowest;
+    `plate_xy` and `plate_half` are the plate's centre and half-extents in x-y.
     """
-    # Before asking whether the experiment applies: did the run stay physical? `nothing-to-press`
-    # is an answer about the asset, and it must not be given for a run where the asset went
-    # through the floor or left the scene -- measured, it was, for a cloth that ended 37 m in the
-    # air after the plate had dragged it 38 mm under the floor.
-    if deepest > max(TUNNEL_DEPTH_OF_HEIGHT * height, 2.0 * (contact_size or 0.0)):
+    under = ((np.abs(settled[:, 0] - plate_xy[0]) <= plate_half[0])
+             & (np.abs(settled[:, 1] - plate_xy[1]) <= plate_half[1]))
+    pushed = (settled[:, 2] - lowest[:, 2]) >= contact_size
+    return int((under & pushed).sum())
+
+
+def verdict(finite, pressed, compressed, height, deepest, recovery, band):
+    """What the run showed.
+
+    `height` is the asset's settled height, the one the plate met and the one `press_depth` was
+    taken from; the same number is the scale of every fraction here. `deepest` is `below_floor`
+    at the asset's lowest node, in the same definition the drop uses, and past `band` -- the
+    contact band the run set, which under a press covers the indentation -- the node has left the
+    contact's reach. `pressed` is `pressed_nodes`.
+
+    Whether the experiment applies at all is not asked here any more: press means something for
+    a body with thickness, the experiment declares that (`experiments/press.py: BODIES`), and an
+    asset with only a surface is refused before anything is launched.
+    """
+    if not finite:
+        return "diverged"
+    # Before anything about the material: did the run stay physical?
+    if deepest > band:
         return "pushed-through-floor"
-    if settled_height is not None and contact_size:
-        if press_depth(settled_height) <= 2.0 * contact_size:
-            return "nothing-to-press"
-    elif settled_height is not None and settled_height < FLAT_OF_HEIGHT * height:
-        return "nothing-to-press"
-    if contacts == 0:
+    if pressed == 0:
         return "no-contact"          # the plate never met the asset: not a measurement at all
     if compressed < MIN_COMPRESSION * height:
         return "did-not-deform"
@@ -169,7 +175,7 @@ def recovery_fraction(recovered_top, lowest_top, compressed, scale):
     return (recovered_top - lowest_top) / compressed
 
 
-def result_line(tag, start_top, lowest_top, compressed, height, recovery, deepest, contacts,
+def result_line(tag, start_top, lowest_top, compressed, height, recovery, deepest, pressed,
                 decision, indent=None):
     """One token per measurement, no spaces inside a value: the runner reads this line, and a
     value whose end it has to guess is a value it will read wrong."""
@@ -185,4 +191,4 @@ def result_line(tag, start_top, lowest_top, compressed, height, recovery, deepes
     return (f"[{tag}] RESULT {indented}start_top_m={start_top:.4f} lowest_top_m={lowest_top:.4f} "
             f"compressed_mm={compressed * 1000:.1f} {fraction}"
             f"{recovered}below_floor_mm={deepest * 1000:.1f} "
-            f"soft_contacts={contacts} verdict={decision}")
+            f"pressed_nodes={pressed} verdict={decision}")

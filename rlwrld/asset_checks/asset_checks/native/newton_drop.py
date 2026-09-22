@@ -42,26 +42,12 @@ import recording
 # are numerics, not material: the two solvers need different numbers to express the same contact,
 # and `ke` without its matching `kd` is a different simulation.
 #
-# `mu` is deliberately NOT here. Friction is a property of the materials in the scene, and giving
-# VBD 0.3 and XPBD 1.0 because two examples happened to use those would mean the two solvers were
-# never rubbing the same banana on the same floor. It comes from the asset, or from one stated
-# default shared by every solver.
-# ...and they depend on what the asset is made of, not only on which solver runs it. Newton's own
-# examples are explicit about this: a volumetric soft body gets ke ~1e5
-# (multiphysics/example_rigid_soft_contact.py) and a cloth gets ke ~1e2
-# (cloth/example_cloth_hanging.py, which splits its contact stiffness by solver in this shape). Using the
-# soft-body numbers on a sheet is a thousandfold too stiff and it diverges in two hundredths of a
-# second -- measured.
-# The floor under the contact stiffness, per solver, from that solver's own shipped examples --
-# XPBD's from `example_rigid_soft_contact`, VBD's from the cloth and gripper examples. It is only a
-# floor: `material_stiffness` raises it to twice what the asset declares wherever the asset is
-# stiffer, which is what decides it for anything but a limp sheet. Measured: with that rule in
-# place one set serves a banana and a cloth alike (banana 30.97 mm either way, cloth 0.01-0.03),
-# so there is no branch here on what the asset is shaped like.
-CONTACT = {
-    "xpbd": {"soft_contact_ke": 1.0e2},
-    "vbd": {"soft_contact_ke": 1.0e2},
-}
+# There is no table of contact numbers here. Friction is the asset's, or one stated default shared
+# by every solver; the contact's stiffness is the asset's own material at the contact's own scale
+# (`contact_stiffness`); its damping is critical for that stiffness and the asset's own mass
+# (`contact_damping`). Newton's examples set these per scene -- ke 1e2 for a cloth, 1e5 for a
+# soft body, 2e6 for a duck in a gripper -- and each of those numbers is right for its scene and
+# wrong for the next asset, which is what a copied constant is.
 # The contact spring is critically damped for the typical particle: c = 2 * zeta * sqrt(ke * m).
 # It was a constant per solver before (100 for VBD, 1 for XPBD, read off two shipped examples), and
 # Newton's own examples use 1, 10 and 100 for scenes of different mass, so the number was a
@@ -78,6 +64,35 @@ def contact_damping(model):
     mass = model.particle_mass.numpy()
     mass = mass[mass > 0.0]
     return 2.0 * CONTACT_DAMPING_RATIO * math.sqrt(float(model.soft_contact_ke) * float(np.median(mass)))
+
+
+def element_damping_as_the_kernel_reads_it(solver_name):
+    """-> convert(kind, value, stiffness): the number this solver's element kernels need so that
+    a material damping *is* `value` in Pa.s.
+
+    Newton 1.5.0's VBD scales the elastic force by `rest_volume * damping` and its XPBD uses
+    `gamma = k_damp / (stiffness * dt)`: absolute. 1.2.1's VBD multiplies the elastic Hessian by
+    `(1.0 + damping * inv_dt)`, a Rayleigh multiplier in seconds, so there the value is divided
+    by the element's own stiffness. Read off the kernel source, never a version number.
+    """
+    module = sys.modules[solver_class(solver_name).__module__]
+    package = module.__name__.rsplit(".", 1)[0]
+    import importlib
+    kernels = importlib.import_module(package + (".particle_vbd_kernels" if solver_name == "vbd" else ".kernels"))
+    source = "\n".join(line for line in inspect.getsource(kernels).splitlines()
+                       if not line.lstrip().startswith("#"))
+    if "rest_volume * damping" in source or "k_damp / (stiffness * dt)" in source:
+        return lambda kind, value, stiffness: value
+    if "(1.0 + damping * inv_dt)" in source or "hessian * (damping / dt)" in source:
+        return lambda kind, value, stiffness: value / stiffness if stiffness > 0.0 else 0.0
+    if "materials[tid, 2]" not in source:
+        # This solver's element kernels never read the material's damping column (1.2.1's XPBD
+        # has the line commented out). The value is carried unchanged, for the record only.
+        print(f"[baseline] {solver_name}'s element kernels read no material damping; the asset's is "
+              f"carried for the record only")
+        return lambda kind, value, stiffness: value
+    raise SystemExit(f"{solver_name}'s element kernels read damping in a way this runner does not "
+                     f"know; read {kernels.__name__} and say which")
 
 
 def damping_as_the_kernel_reads_it(value, ke):
@@ -99,18 +114,55 @@ def damping_as_the_kernel_reads_it(value, ke):
                      "read _compute_body_particle_contact_force and say which")
 
 
-def material_stiffness(model):
-    """The stiffness the contact has to match, from whichever array this model keeps it in.
+def contact_stiffness(model):
+    """The contact spring in N/m per particle contact: the asset's material at the contact's scale.
 
-    A tetrahedral body states a shear modulus in Pa; a membrane states a stretch stiffness in N/m.
-    They are not the same quantity and the model holds them in different arrays, so the rule reads
-    whichever is there -- it is one rule about the asset's own material, not two about its shape.
+    A particle contact stands in for one element's worth of material -- a patch of the asset's
+    own resolution l (two particle radii) across and l deep. A column of a volume that size has
+    stiffness E*A/h = E*l, so a tetrahedral body gives k_mu * l; a membrane patch resists out of
+    plane through its tension E*t, which is `tri_ke` already, so a surface gives tri_ke as it is.
+    Both are N/m, both come from the USD, and the stiffest body the contact touches decides,
+    because a contact softer than the material gives where the material should. Under a plate
+    the N contacts act in parallel (E*A/l) against the body beneath them (E*A/h), h/l ~ 12-20
+    here, so the body still gives first.
+
+    This replaces `2 x median(k_mu)`: a Pa quantity times a ratio, stored as N/m. It was the ratio
+    of two numbers of different dimension in one shipped example (k_mu 1e6, soft_contact_ke 2e6)
+    and on this banana it made the contact 3.4e6 N/m, a thousand times its material at its own
+    resolution; `contact_damping`, critical for that stiffness, inherited the error.
     """
-    import numpy as np
-
+    radius = model.particle_radius.numpy()
+    candidates = []
     if model.tet_count:
-        return float(np.median(model.tet_materials.numpy()[:, 0]))
-    return float(np.median(model.tri_materials.numpy()[:, 0]))
+        tets = model.tet_indices.numpy().reshape(-1, 4)
+        spacing = 2.0 * radius[tets].mean(axis=1)
+        candidates.append(float((model.tet_materials.numpy()[:, 0] * spacing).max()))
+    if model.tri_count:
+        tri_ke = model.tri_materials.numpy()[:, 0]
+        if (tri_ke > 0.0).any():
+            candidates.append(float(tri_ke[tri_ke > 0.0].max()))
+    if not candidates:
+        raise SystemExit("this model has no element with a stiffness to set a contact against")
+    return max(candidates)
+
+
+def solver_reads(solver_name, name):
+    """Does this solver's own module ever reference `name`? A solver that never mentions
+    `tri_materials` has no triangle kernel; one that never mentions `soft_contact_ke` cannot be
+    tuned by it. Read from the source, so it stays true on a version nobody has looked at."""
+    module = sys.modules[solver_class(solver_name).__module__]
+    return name in inspect.getsource(module)
+
+
+def full_surface_contact(solver_name, wanted):
+    """Whether this run generates edge/face soft contacts, not only particle ones.
+
+    They exist where the pipeline offers the switch (Newton 1.4.0+), and only standalone
+    SolverVBD consumes them: the 1.5.0 changelog says every other solver rejects them, and
+    SolverXPBD raises NotImplementedError on one. That is a capability of the solver, stated in
+    one place with its reason, and the run says which it used.
+    """
+    return bool(wanted and solver_name == "vbd" and _pipeline_takes_full_surface())
 
 
 # Self-collision is not here: it is a property of the asset, read by
@@ -136,9 +188,6 @@ def colour_for_vbd(builder):
     print(f"[baseline] VBD colouring: {bending} bending edge(s) in the graph")
 
 
-def deformable_kind(model):
-    """What this asset is made of, asked of the model rather than assumed."""
-    return "volume" if model.tet_count else "surface"
 # There is no separate stiffness for the floor or the plate. Newton's grasping example sets the
 # shapes' material to the very same number it sets the soft contact to
 # (`shape_material_ke.fill_(self.soft_contact_ke)`), because for a rigid-soft contact VBD reads
@@ -162,11 +211,6 @@ CONTACT_MARGIN_OF_RADIUS = 2.0
 # ever meeting them. The experiment says how deep it presses; this is how an engine is made able
 # to feel that, which is the engine's side of the bargain and not the experiment's.
 #
-# Newton's own grasping example sets a contact stiffness twice its duck's shear modulus
-# (softbody/example_softbody_franka.py: k_mu 1e6, soft_contact_ke 2e6). The ratio is the point: a
-# contact softer than the material yields instead of the material, and the plate then sinks in
-# while the asset barely moves -- measured, 9.5 mm in and 2 mm of give, with 2276 contacts.
-CONTACT_STIFFNESS_OF_MATERIAL = 2.0
 
 
 def contact_margin(radius, substeps, fps, drop, depth=0.0, gravity=9.81):
@@ -297,16 +341,94 @@ def contact_material(declared, chosen):
     reasonable thing for it to do and a terrible thing for us to leave unexamined -- the number
     ends up in the results looking like it came from the banana.
     """
-    friction = declared.get("friction")
-    if friction is None:
-        friction = asset_properties.DEFAULT_FRICTION
-        chosen["soft_contact_mu"] = (friction, "the asset declares no friction; one value for every "
-                                               "solver so they rub the same floor")
+    friction, why = asset_properties.friction(declared)
+    if declared.get("friction") is None:
+        chosen["soft_contact_mu"] = (friction, why)
     restitution = declared.get("restitution")
     if restitution is None:
         restitution = 0.0
         chosen["soft_contact_restitution"] = (restitution, "the asset declares no restitution")
     return friction, restitution
+
+
+def solver_class(solver_name):
+    """The Newton solver this name means. One place, so the runners and the rules agree."""
+    return {"vbd": newton.solvers.SolverVBD, "xpbd": newton.solvers.SolverXPBD}[solver_name]
+
+
+# What Newton's own XPBD cloth example (`cloth/example_cloth_hanging.py`) runs its springs at:
+# spring_ke 1e3 on 0.1 kg particles, 10 substeps at 60 fps -> ke*dt^2/m = 1e3 * (1/600)^2 / 0.1.
+# Printed beside every membrane's own ratio, as the scale the solver is known to hold.
+XPBD_EXAMPLE_SPRING_RATIO = 1.0e3 * (1.0 / 600.0) ** 2 / 0.1
+
+
+def membrane_as_springs(builder, solver_name, dt, report=None):
+    """Give a solver with no triangle kernel the membrane as edge springs, from the same numbers.
+
+    SolverXPBD solves springs, bending edges and tetrahedra, and nothing for a triangle: a cloth
+    built for it from `add_cloth_mesh` alone has bending and no in-plane stiffness at all, and the
+    asset's stretch stiffness is silently gone. Newton's `example_cloth_hanging.py` gives XPBD
+    `add_springs=True`; this is that, as a rule.
+
+    Van Gelder (J. Graphics Tools 3(2), 1998): an edge spring standing in for a membrane of
+    stiffness E*t carries k = E*t * (adjacent triangle areas) / length^2. `tri_ke` is E*t (the
+    importer has already multiplied the authored stretch stiffness by the thickness). Triangles
+    with no stretch stiffness -- the surface of a tetrahedral body -- get no spring.
+
+    The spring's damping is not carried: there is no sourced mapping from a triangle's damping
+    to a spring's, and XPBD's own cloth example runs its springs at kd*dt/m = 0.005, near zero.
+    A declared triangle damping is reported as dropped for this solver.
+
+    What XPBD can hold is printed with the springs. `solve_springs` applies each spring's full
+    correction and `apply_particle_deltas` sums them with no Jacobi relaxation (the tetrahedral
+    path has `soft_body_relaxation` for this), so with ~6 springs per particle each moving it by
+    r/(2r+1) of the error, r = ke*dt^2/m, the sum overshoots once r is of order one. Newton's
+    cloth example runs at r = 0.003; a 3 mm film of 3 mg particles at 1920 Hz is at r = 13, and
+    measured, it leaves the scene in its first frame at every substep count up to 384 and with
+    any damping. The ratio is printed against the example's so that cell's log says why.
+    """
+    if solver_reads(solver_name, "tri_materials") or not builder.tri_count:
+        return 0
+    q = np.asarray(builder.particle_q, dtype=np.float64)
+    tris = np.asarray(builder.tri_indices, dtype=np.int64).reshape(-1, 3)
+    mats = np.asarray(builder.tri_materials, dtype=np.float64)   # (ke, ka, kd, drag, lift) per triangle
+    area = 0.5 * np.linalg.norm(np.cross(q[tris[:, 1]] - q[tris[:, 0]], q[tris[:, 2]] - q[tris[:, 0]]), axis=1)
+    weighted_ke = {}
+    for t, (i, j, k) in enumerate(tris):
+        if mats[t, 0] <= 0.0:
+            continue
+        for a, b in ((i, j), (j, k), (k, i)):
+            edge = (min(a, b), max(a, b))
+            weighted_ke[edge] = weighted_ke.get(edge, 0.0) + mats[t, 0] * area[t]
+    mass = np.asarray(builder.particle_mass, dtype=np.float64)
+    ratios = []
+    for (a, b), ke_area in weighted_ke.items():
+        length2 = float(((q[a] - q[b]) ** 2).sum())
+        if length2 <= 0.0:
+            continue
+        ke = ke_area / length2
+        builder.add_spring(int(a), int(b), ke, 0.0, 0.0)
+        ratios.append(ke * dt * dt / max(min(mass[a], mass[b]), 1e-12))
+    made = len(weighted_ke)
+    if not made:
+        return 0
+    ratios = np.asarray(ratios)
+    print(f"[baseline] membrane as springs: {made} edge spring(s) from {int((mats[:, 0] > 0).sum())} "
+          f"triangle(s) with stretch stiffness, because {solver_name} reads no triangle material "
+          f"(Van Gelder: k = tri_ke * adjacent area / length^2); damping not carried")
+    print(f"[baseline] XPBD spring stiffness ratio ke*dt^2/m: median {np.median(ratios):.3g}, "
+          f"max {ratios.max():.3g}; Newton's cloth example runs at {XPBD_EXAMPLE_SPRING_RATIO:.3g}, "
+          f"and the Jacobi sum of ~6 springs per particle overshoots once this is of order one")
+    if report is not None:
+        report["membrane_springs"] = (made, f"{solver_name} has no triangle kernel; the asset's "
+                                             f"stretch stiffness carried to edge springs")
+        report["spring_ratio_median"] = (float(np.median(ratios)),
+                                         f"ke*dt^2/m; {solver_name} holds springs only well below 1 "
+                                         f"(its own example: {XPBD_EXAMPLE_SPRING_RATIO:.3g})")
+        if (mats[:, 2] > 0.0).any():
+            report["tri_kd"] = (float(np.max(mats[:, 2])), f"dropped: {solver_name} reads no triangle "
+                                                            f"damping and no spring mapping is sourced")
+    return made
 
 
 def build(asset, solver_name, iterations, radius, drop, margin, full_surface, substeps, fps):
@@ -353,7 +475,12 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     # volume deformable takes `default_particle_radius`; a cloth's constructor sets its own from
     # the declared shell thickness and ignores it. Reading it back is the only way the contact
     # margin, the plate's size and the landing tolerance are all talking about the same number.
-    radius = float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
+    sizes = usd_deformable.assign_particle_radii(builder, stage, radius, chosen)
+    usd_deformable.carry_material_damping(builder, stage,
+                                          element_damping_as_the_kernel_reads_it(solver_name), chosen)
+    # Every scene length below -- the contact band, the plate, the landing tolerance -- is sized
+    # from the coarsest body, so that no body's contact is narrower than its own particles.
+    radius = max(sizes.values()) if sizes else float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
     if built:
         print(f"[baseline] this Newton's importer did not build {len(built)} of the asset's "
               f"bodies; built from the asset's declaration instead: {built}")
@@ -382,20 +509,16 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     if ghosts:
         print(f"[baseline] hid {len(ghosts)} visual-only shape(s) the USD import added: {ghosts}")
 
+    membrane_as_springs(builder, solver_name, 1.0 / (fps * substeps), chosen)
     if solver_name == "vbd":
         colour_for_vbd(builder)
     model = builder.finalize()
-    kind = deformable_kind(model)
-    for name, value in CONTACT[solver_name].items():
-        setattr(model, name, value)
-        chosen[name] = (value, f"penalty numerics for {solver_name}, from its own shipped examples")
-    # The contact has to be at least as stiff as what it is pressing, or it is the contact that
-    # gives. The asset's own material is the scale and the ratio is the grasping example's.
-    model.soft_contact_ke = max(model.soft_contact_ke,
-                                CONTACT_STIFFNESS_OF_MATERIAL * material_stiffness(model))
+    model.soft_contact_ke = contact_stiffness(model)
     chosen["soft_contact_ke"] = (model.soft_contact_ke,
-                                 f"{CONTACT_STIFFNESS_OF_MATERIAL:g}x the asset's own stiffness where that is "
-                                 f"higher than {solver_name}'s example floor")
+                                 "N/m per contact: the asset's own material at its own resolution "
+                                 "(k_mu * 2r for a volume, tri_ke for a membrane), stiffest body; "
+                                 + (f"{solver_name} reads it" if solver_reads(solver_name, "soft_contact_ke")
+                                    else f"{solver_name} reads no contact stiffness at all"))
     damping = contact_damping(model)
     model.soft_contact_kd = damping_as_the_kernel_reads_it(damping, model.soft_contact_ke)
     chosen["soft_contact_kd"] = (model.soft_contact_kd,
@@ -423,15 +546,10 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     margin = margin or contact_margin(radius, substeps, fps, drop)
     print(f"[baseline] soft contact margin {margin * 1000:.2f} mm "
           f"(rest offset {radius * 1000:.2f} mm, {substeps} substeps)")
-    print(f"[baseline] soft contact margin {margin * 1000:.2f} mm "
-          f"(rest offset {radius * 1000:.2f} mm, {substeps} substeps)")
     kwargs = {"broad_phase": "nxn", "soft_contact_margin": margin}
-    if full_surface and solver_name == "vbd" and _pipeline_takes_full_surface():
-        # Newton 1.5, and VBD only: SolverXPBD raises NotImplementedError on an edge/face soft
-        # contact, saying so in as many words. Without the flag a rigid shape only ever meets the
-        # particles, never the surface between them, and the gripper example's docstring says the
-        # mesh then slips out of the jaws. It is a capability of this engine+solver pair, so it is
-        # on where it exists and reported where it does not.
+    if full_surface_contact(solver_name, full_surface):
+        # Without it a rigid shape only ever meets the particles, never the surface between them,
+        # and the gripper example's docstring says the mesh then slips out of the jaws.
         kwargs["enable_rigid_soft_full_surface_contact"] = True
     pipeline = newton.CollisionPipeline(model, **kwargs)
     print(f"[baseline] full-surface soft contact: {kwargs.get('enable_rigid_soft_full_surface_contact', False)}")
@@ -452,7 +570,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
         solver = newton.solvers.SolverVBD(
             model, iterations=iterations,
             particle_enable_self_contact=self_collision,
-            particle_self_contact_radius=radius, particle_self_contact_margin=radius * 2.0,
+            particle_self_contact_radius=radius, particle_self_contact_margin=margin,
             rigid_body_particle_contact_buffer_size=max(256, model.particle_count))
     else:
         if relaxation_is_a_jacobi_factor():
@@ -464,7 +582,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
             print(f"[baseline] soft_body_relaxation left at {relaxation} -- this Newton's tet kernel "
                   f"spends it as the compliance and never reads the material")
         solver = newton.solvers.SolverXPBD(model, iterations=iterations, soft_body_relaxation=relaxation)
-    return model, solver, pipeline, radius, lift, sim_path, kinds
+    return model, solver, pipeline, radius, lift, sim_path, kinds, margin
 
 
 def main():
@@ -474,8 +592,9 @@ def main():
     ap.add_argument("--iterations", type=int, default=ITERATIONS)
     ap.add_argument("--substeps", type=int, default=0,
                     help="0 = the count every engine is given (stepping.SUBSTEPS)")
-    ap.add_argument("--fps", type=float, default=60.0)
-    ap.add_argument("--seconds", type=float, default=3.0)
+    ap.add_argument("--fps", type=float, default=stepping.FPS)
+    ap.add_argument("--seconds", type=float, required=True,
+                help="simulated seconds: the experiment's own SECONDS, which run.py passes")
     ap.add_argument("--radius", default="auto")
     ap.add_argument("--drop", type=float, default=drop_shape.DROP_HEIGHT)
     ap.add_argument("--margin", type=float, default=0.0,
@@ -485,7 +604,7 @@ def main():
     args = ap.parse_args()
 
     substeps = args.substeps or stepping.SUBSTEPS
-    model, solver, pipeline, radius, lift, sim_path, kinds = build(
+    model, solver, pipeline, radius, lift, sim_path, kinds, band = build(
         args.asset, args.solver, args.iterations, args.radius, args.drop, args.margin,
         not args.no_full_surface, substeps, args.fps)
     frames = int(args.seconds * args.fps)
@@ -497,7 +616,8 @@ def main():
         tape = recording.Recording(args.usd, int(args.fps), frames,
                                    np.asarray(model.particle_q.numpy()),
                                    solver_elements(model, kinds), asset=args.asset,
-                                   sim_prim_path=sim_path)
+                                   sim_prim_path=sim_path,
+                                   ground_half=recording.ground_half(model.particle_q.numpy()))
 
     state_0, state_1, control = model.state(), model.state(), model.control()
     contacts = pipeline.contacts()
@@ -541,7 +661,7 @@ def main():
     q = np.asarray(state_0.particle_q.numpy())
     qd = np.asarray(state_0.particle_qd.numpy())
     fell = float(start[:, 2].min() - q[:, 2].min())
-    below = float(max(0.0, -q[:, 2].min() - radius))
+    below = drop_shape.below_floor(float(q[:, 2].min()), radius)
     speed = float(np.percentile(np.abs(qd), 99))
     peak = float(np.abs(qd).max())
     height = float(start[:, 2].max() - start[:, 2].min())
@@ -550,7 +670,7 @@ def main():
     # in both drop runners, and a pair of copies is a pair waiting to drift.
     decision = drop_shape.verdict(bool(np.isfinite(q).all()), fell,
                                   float(start[:, 2].min()), below, height,
-                                  speed, radius,
+                                  speed, radius, band,
                                   extent=float(q[:, 2].max() - q[:, 2].min()))
     kept = drop_shape.height_kept(float(q[:, 2].max() - q[:, 2].min()), height, radius)
     print(drop_shape.result_line("baseline", fell, float(q[:, 2].min()), float(q[:, 2].max()),

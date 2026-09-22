@@ -31,9 +31,21 @@ from asset_checks.kit.reading import copy_gprim  # noqa: E402  -- the one way ge
 COLLISION = "/root/collision"
 VISUAL = "/root/visual"
 GROUND = "/root/ground"
-# How far the floor reaches from the origin. The simulated floor and the drawn one are the
-# same floor, so `physx_scene` builds its collision box to this as well.
+# How far the floor reaches from the origin, for the rigid recordings, which pass nothing else.
 GROUND_HALF = 2.0
+# For a deformable run the floor is sized from the asset: this many times its largest
+# horizontal extent, from the origin. The simulated floor and the drawn one are the same floor
+# -- `physx_scene.floor` builds its collision box to the same number -- and it was an absolute
+# 4 m box before, which a large asset, or one that slides, would have left on one engine only.
+GROUND_OF_EXTENT = 4.0
+
+
+def ground_half(points):
+    """Half-extent of the floor for an asset with these points: `GROUND_OF_EXTENT` times its
+    largest horizontal extent, so the floor is the asset's, not a constant's."""
+    points = np.asarray(points, dtype=np.float64)
+    extent = float((points[:, :2].max(axis=0) - points[:, :2].min(axis=0)).max())
+    return GROUND_OF_EXTENT * max(extent, 1e-3)
 PLATE = "/root/plate"
 FIXTURES = "/root/fixtures"
 COLLISION_COLOUR = (0.92, 0.78, 0.25)

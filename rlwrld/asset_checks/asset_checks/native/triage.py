@@ -19,6 +19,7 @@ from pxr import Usd, UsdGeom, UsdPhysics  # noqa: E402
 
 import asset_properties  # noqa: E402
 from asset_checks import envs, experiments  # noqa: E402
+import usd_deformable  # noqa: E402  (the PhysX copy's naming)
 from asset_checks.kit.scene import SOLVER_SIMULATES, asset_kinds  # noqa: E402
 
 
@@ -147,9 +148,7 @@ def report(path):
 def _engines():
     out = {}
     for env in envs.ENVIRONMENTS.values():
-        name = "physx" if env.engine == "physx" else "newton" + env.newton.rstrip(".")
-        if env.engine == "physx" and env.isaac != "6.1.0":
-            name = f"physx{env.isaac}"
+        name = envs.engine_name(env)
         out.setdefault(name, {})[env.solver] = env
     return out
 
@@ -163,7 +162,7 @@ def main():
     for given in args.paths:
         p = pathlib.Path(given)
         files += sorted(q for q in (p.rglob("*.usd*") if p.is_dir() else [p])
-                        if q.is_file() and "_physx" not in q.stem)
+                        if q.is_file() and not q.stem.endswith(usd_deformable.PHYSX_COPY_SUFFIX))
     if not files:
         raise SystemExit("no USD files found")
     for path in files:

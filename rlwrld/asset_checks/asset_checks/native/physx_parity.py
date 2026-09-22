@@ -21,6 +21,8 @@ import sys
 import numpy as np
 from pxr import Usd, UsdGeom
 
+import usd_deformable
+
 # What the two schema families call the same physics. Volume deformables are described by a
 # modulus and a Poisson ratio; surface ones by three stiffnesses and a thickness, which PhysX
 # takes one for one under a `surface` prefix. Nothing here is per-asset.
@@ -28,10 +30,9 @@ SHARED = {"density": "density", "staticFriction": "staticFriction", "dynamicFric
 VOLUME = {"youngsModulus": "youngsModulus", "poissonsRatio": "poissonsRatio"}
 SURFACE = {"stretchStiffness": "surfaceStretchStiffness", "shearStiffness": "surfaceShearStiffness",
            "bendStiffness": "surfaceBendStiffness", "thickness": "surfaceThickness"}
-SIM_SCHEMA = {"volume": ("PhysicsVolumeDeformableSimAPI", "OmniPhysicsVolumeDeformableSimAPI"),
-              "surface": ("PhysicsSurfaceDeformableSimAPI", "OmniPhysicsSurfaceDeformableSimAPI")}
-MATERIAL_SCHEMA = {"volume": ("PhysicsVolumeDeformableMaterialAPI", "OmniPhysicsDeformableMaterialAPI"),
-                   "surface": ("PhysicsSurfaceDeformableMaterialAPI", "OmniPhysicsSurfaceDeformableMaterialAPI")}
+# (AOUSD name, PhysX name) per kind, from the one place the names and the rule live.
+SIM_SCHEMA = {k: (v, usd_deformable.physx_name(v)) for k, v in usd_deformable.SIM.items()}
+MATERIAL_SCHEMA = {k: (v, usd_deformable.physx_name(v)) for k, v in usd_deformable.MATERIAL.items()}
 RELATIVE_TOLERANCE = 1e-4
 
 
@@ -46,6 +47,16 @@ def find(stage, wanted):
     for prim in stage.Traverse():
         if prim.IsActive() and wanted in schemas(prim):
             return prim
+    return None
+
+
+def bound_material(prim):
+    """The physics material bound to `prim` or the nearest ancestor that binds one, as a path."""
+    while prim and prim.IsValid():
+        rel = prim.GetRelationship("material:binding:physics")
+        if rel and rel.GetTargets():
+            return rel.GetTargets()[0]
+        prim = prim.GetParent()
     return None
 
 
@@ -142,8 +153,16 @@ def compare(original, converted):
 
     wanted = dict(SHARED, **(VOLUME if kind == "volume" else SURFACE))
     said = numbers(find(first, MATERIAL_SCHEMA[kind][0]), "physics")
-    got = numbers(find(second, MATERIAL_SCHEMA[kind][1])
-                  or find(second, MATERIAL_SCHEMA["volume"][1]), "omniphysics")
+    carried = find(second, MATERIAL_SCHEMA[kind][1]) or find(second, MATERIAL_SCHEMA["volume"][1])
+    got = numbers(carried, "omniphysics")
+    # The numbers being right is half of it: the body has to be *bound* to the prim that carries
+    # them, or PhysX runs its own default and the copy only looks like the asset.
+    bound = bound_material(target)
+    if bound is None:
+        complaints.append("material: the copy binds no physics material to its body")
+    elif carried is not None and bound != carried.GetPath():
+        complaints.append(f"material: the body is bound to {bound}, not to {carried.GetPath()} "
+                          f"where the carried numbers are")
     for ours, theirs in wanted.items():
         if ours not in said:
             if theirs in got:

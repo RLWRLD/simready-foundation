@@ -36,11 +36,11 @@ import sys  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import asset_properties  # noqa: E402
+import usd_deformable  # noqa: E402  (the schema names, and PhysX's spelling of them)
 from pxr import Sdf, Usd, UsdGeom, UsdShade  # noqa: E402
 
 SOURCE, OUT = sys.argv[1], sys.argv[2]
-VOLUME_SIM = "PhysicsVolumeDeformableSimAPI"
-SURFACE_SIM = "PhysicsSurfaceDeformableSimAPI"
+VOLUME_SIM, SURFACE_SIM = usd_deformable.VOLUME_SIM, usd_deformable.SURFACE_SIM
 # What each kind of deformable material is made of. A volume deformable is described by a
 # modulus and a Poisson ratio; a surface one by three stiffnesses and a thickness. PhysX takes
 # the surface quantities one-for-one under an `omniphysics:surface*` prefix -- and, unlike
@@ -136,7 +136,7 @@ material_path = "/Asset/PhysicsMaterial"
 # Friction the asset did not declare must not come from this helper's own defaults (0.5 static,
 # 0.25 dynamic): Newton would run the same silent asset at 0.5, and the two engines would be
 # sliding on different floors while every other number matched.
-friction = values.get("dynamicFriction", asset_properties.DEFAULT_FRICTION)
+friction, _friction_why = asset_properties.friction(asset_properties.read(SOURCE))
 shared = {"density": values.get("density"), "static_friction": values.get("staticFriction", friction),
           "dynamic_friction": friction}
 if volume:
