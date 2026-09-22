@@ -351,7 +351,7 @@ def main():
     compressed = start_top - lowest_top
     recovery = press_shape.recovery_fraction(recovered, lowest_top, compressed, radius)
     verdict = press_shape.verdict(plate_peak, compressed, height, deepest, recovery,
-                                  settled_height=settled_height)
+                                  settled_height=settled_height, contact_size=radius)
     print(f"[press] most soft contacts in any frame: {contact_peak}, of which {plate_peak} "
           f"were with the plate")
     # Both runners print through press_shape, so the two engines' results are the same line with

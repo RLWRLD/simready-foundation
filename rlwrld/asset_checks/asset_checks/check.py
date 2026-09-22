@@ -18,6 +18,7 @@ a rigid-body engine and will not simulate a deformable, and not every experiment
 for both kinds.
 """
 import argparse
+import json
 import os
 import pathlib
 import shutil
@@ -116,7 +117,19 @@ def main():
     env = known[args.engine][args.solver]
     experiment = experiments.get(args.experiment)
 
-    kinds = read_asset(bench, asset)
+    out_for_refusal = pathlib.Path(args.out).resolve() if args.out else pathlib.Path("results").resolve()
+    try:
+        kinds = read_asset(bench, asset)
+    except SystemExit as refusal:
+        # A refusal that leaves nothing behind is a refusal nobody reading the run can see: the
+        # asset simply has no directory, and the report counts the assets that do. Write the
+        # reason where the report looks, then refuse as before.
+        record = out_for_refusal / asset.stem / "refused.json"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"asset": str(asset), "experiment": args.experiment,
+                                      "engine": args.engine, "solver": args.solver,
+                                      "reason": str(refusal)}, indent=1))
+        raise
     if not kinds:
         raise SystemExit(f"{asset.name} declares neither a rigid body nor a deformable; there is "
                          f"nothing here to simulate")

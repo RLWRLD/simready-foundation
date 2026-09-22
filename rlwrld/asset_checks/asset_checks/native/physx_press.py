@@ -269,7 +269,8 @@ print(press_shape.result_line("physx", start_top or 0.0, lowest_top or 0.0, comp
                               recovery, max(0.0, deepest - offset), "yes" if touched else "no",
                               press_shape.verdict(touched, compressed, height,
                                                   max(0.0, deepest - offset), recovery,
-                                                  settled_height=settled_height),
+                                                  settled_height=settled_height,
+                                                  contact_size=offset),
                               indent=depth))
 if tape is not None:
     tape.close()

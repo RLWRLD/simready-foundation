@@ -29,8 +29,10 @@ WITHOUT_A_VERDICT = (
      "the solver faulted and took the process with it"),
     ("illegal memory access", "solver crash",
      "the solver faulted and took the process with it"),
+    # Last, because an allocation failing right after a kernel fault is the fault, not the
+    # machine: the patterns above claim it first when both are in the log.
     ("Failed to allocate", "out of memory",
-     "the device could not allocate; this is the machine, not the asset"),
+     "the device could not allocate, with no fault before it: the machine, not the asset"),
 )
 
 
@@ -115,7 +117,7 @@ def main():
     if not found:
         raise SystemExit(f"{run} holds no cell with a result.json")
 
-    assets = sorted({a for a, _, _ in found})
+    assets = sorted({a for a, _, _ in found} | {p.parent.name for p in run.glob("*/refused.json")})
     envs = sorted({e for _, e, _ in found})
     experiments = sorted({x for _, _, x in found})
     tally = collections.Counter(v for v, _ in found.values())
@@ -139,11 +141,24 @@ def main():
             out.append(f"- `{a}` / `{e}` / `{x}`: **{v}** -- {why.get(v, 'see its run.log')}")
         out.append("")
 
-    missing = sorted({(a, e, x) for a in assets for e in envs for x in experiments} - set(found))
+    refused = sorted(run.glob("*/refused.json"))
+    if refused:
+        out += ["## assets this pipeline refused", "",
+                "Refused before anything was launched, so they have no cells. The reason is the "
+                "one the runner would have given.", ""]
+        for path in refused:
+            r = json.loads(path.read_text())
+            out += [f"- `{path.parent.name}`: {r['reason']}", ""]
+
+    # A refused asset has no cells by design and is listed above; anything else missing is a cell
+    # that was meant to run and did not, which is the thing worth seeing here.
+    turned_away = {p.parent.name for p in refused}
+    missing = sorted({(a, e, x) for a in assets if a not in turned_away
+                      for e in envs for x in experiments} - set(found))
     if missing:
-        out += ["## cells with nothing at all", "",
-                "An asset refused before launch leaves no directory; so does a cell that was never "
-                "run. Both are here, and the refusal is in the launching log.", ""]
+        out += ["## cells that were meant to run and did not", "",
+                "Not refused and not recorded: a launch that never finished. Its run.log, if there "
+                "is one, says how far it got.", ""]
         out += [f"- `{a}` / `{e}` / `{x}`" for a, e, x in missing] + [""]
 
     strips = sorted((run / "compare").glob("*.mp4"))
