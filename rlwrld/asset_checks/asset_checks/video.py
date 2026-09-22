@@ -13,10 +13,10 @@ import shutil
 import subprocess
 
 CAPTURE_FPS = 60           # frames rendered per simulated second
-# Each view is encoded at both speeds from the one set of frames: real time is what the asset
-# actually did, and the slow one is where a landing or a pinch can be seen at all. Encoding twice
-# costs an ffmpeg pass; rendering twice would cost a Kit launch.
-SPEEDS = {"realtime": 1.0, "4xslower": 4.0}
+# Every speed a view is encoded at, from the one set of frames -- encoding again costs an ffmpeg
+# pass where rendering again would cost a Kit launch. Real time is what the asset actually did;
+# adding `"4xslower": 4.0` here is the whole of what it takes to have a slow one beside it.
+SPEEDS = {"realtime": 1.0}
 SIZE = 640                 # px, square: the rigid comparison panels
 VIEWS = ("visual", "collision")
 NATIVE = pathlib.Path(__file__).resolve().parent / "native"
