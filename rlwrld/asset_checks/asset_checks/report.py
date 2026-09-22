@@ -43,6 +43,12 @@ def cells(run):
         asset, env, experiment = path.parts[-4], path.parts[-3], path.parts[-2]
         record = json.loads(path.read_text())
         out[(asset, env, experiment)] = (verdict_of(record, path.parent), record)
+    # A cell refused before launch is a cell too: `check` wrote the reason where the result would
+    # have gone. It is one word in the box and one line under the table, never a verdict.
+    for path in sorted(run.glob("*/*/*/refused.json")):
+        key = tuple(path.parts[-4:-1])
+        if key not in out:
+            out[key] = ("refused", json.loads(path.read_text()))
     return out
 
 
@@ -117,7 +123,7 @@ def main():
     if not found:
         raise SystemExit(f"{run} holds no cell with a result.json")
 
-    assets = sorted({a for a, _, _ in found} | {p.parent.name for p in run.glob("*/refused.json")})
+    assets = sorted({a for a, _, _ in found})
     envs = sorted({e for _, e, _ in found})
     experiments = sorted({x for _, _, x in found})
     tally = collections.Counter(v for v, _ in found.values())
@@ -141,20 +147,17 @@ def main():
             out.append(f"- `{a}` / `{e}` / `{x}`: **{v}** -- {why.get(v, 'see its run.log')}")
         out.append("")
 
-    refused = sorted(run.glob("*/refused.json"))
+    refused = {k: rec for k, (v, rec) in found.items() if v == "refused"}
     if refused:
-        out += ["## assets this pipeline refused", "",
-                "Refused before anything was launched, so they have no cells. The reason is the "
-                "one the runner would have given.", ""]
-        for path in refused:
-            r = json.loads(path.read_text())
-            out += [f"- `{path.parent.name}`: {r['reason']}", ""]
+        out += ["## cells refused before launch", "",
+                "Nothing was simulated: the asset, the engine and the experiment cannot mean "
+                "anything together, and the reason is the one the runner would have given.", ""]
+        for (a, e, x), rec in sorted(refused.items()):
+            out += [f"- `{a}` / `{e}` / `{x}`: {rec['reason']}"]
+        out.append("")
 
-    # A refused asset has no cells by design and is listed above; anything else missing is a cell
-    # that was meant to run and did not, which is the thing worth seeing here.
-    turned_away = {p.parent.name for p in refused}
-    missing = sorted({(a, e, x) for a in assets if a not in turned_away
-                      for e in envs for x in experiments} - set(found))
+    # Anything missing is a cell that was meant to run and did not, which is worth seeing.
+    missing = sorted({(a, e, x) for a in assets for e in envs for x in experiments} - set(found))
     if missing:
         out += ["## cells that were meant to run and did not", "",
                 "Not refused and not recorded: a launch that never finished. Its run.log, if there "

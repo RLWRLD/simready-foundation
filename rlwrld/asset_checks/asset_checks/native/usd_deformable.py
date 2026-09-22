@@ -117,7 +117,7 @@ def bodies(stage):
     return out
 
 
-def why_not_runnable(stage, asset_name="", most=None):
+def why_not_runnable(stage, asset_name="", most=None, needs=None):
     """-> the reason this asset cannot be run as it is, or None.
 
     `most` is how many simulated meshes the caller can drive. Newton builds them all into one
@@ -125,6 +125,10 @@ def why_not_runnable(stage, asset_name="", most=None):
     PhysX runners drive one body and say so. An asset with more meshes than the caller can drive
     is refused rather than run, because running it would simulate the first and report it under
     the whole asset's name -- an empty bag reported as a loaded one.
+
+    `needs` is the set of body kinds the experiment means anything for (an experiment's `BODIES`).
+    An asset with none of them is refused: pressing a surface, which has no thickness to give,
+    would produce a verdict about nothing.
 
     Separated from the raising so that `check` can refuse before it launches anything, and the
     runners can refuse if they are called directly: one rule, asked in two places.
@@ -139,6 +143,10 @@ def why_not_runnable(stage, asset_name="", most=None):
         return (f"{name} declares {len(found)} simulated meshes and this runner drives "
                 f"{most}: {listed}. They are one object, so running it would simulate the first "
                 f"and report it under the whole asset's name")
+    if needs is not None and not any(kind in needs for kind, _ in found):
+        declared = ", ".join(sorted({kind for kind, _ in found}))
+        return (f"{name} declares a {declared} body only, and this experiment means something for "
+                f"a {' or '.join(sorted(needs))} body; refused rather than answered about nothing")
     return None
 
 

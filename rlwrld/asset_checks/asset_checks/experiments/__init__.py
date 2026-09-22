@@ -11,6 +11,9 @@ To add an experiment, add a file here. It declares what it is and who drives it:
     RIGID       ("module", "function") of the NVIDIA test that is this experiment for a rigid
                 asset, or None if it has none
     DEFORMABLE  {engine: "runner.py"} under `native/`, or {} if it has none
+    BODIES      optional: the deformable body kinds the experiment means anything for, as
+                `usd_deformable` names them ({"volume"}, {"surface"}). An asset that declares no
+                body of these kinds is refused before launch. Absent means any body.
 
 Nothing else in the package keeps a list of experiments: `kit/nvidia_test.py` asks here which
 NVIDIA test an experiment is, and the deformable runner asks here which script drives it. A file
