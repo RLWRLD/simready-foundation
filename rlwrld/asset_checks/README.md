@@ -1,12 +1,51 @@
 # asset_checks
 
-Physics checks of one SimReady asset in three Isaac Sim environments, side by side:
+One experiment, on one asset, in one engine. You name four things and nothing else has to be:
 
-| env | Isaac Sim | engine |
+```bash
+PYTHONPATH=rlwrld/asset_checks python3 -m asset_checks.check <asset.usd> \
+    --experiment drop --engine newton1.5 --solver vbd
+```
+
+Everything else is read. Whether the asset is rigid or deformable comes from its own schemas;
+which runner drives it follows from that; what it is made of comes from the USD. A combination
+that cannot work is refused before anything launches, and says what can:
+
+```
+mujoco cannot simulate a deformable asset: it does rigid only.
+For a deformable asset on newton1.5, the solvers are vbd, xpbd
+```
+
+**The engine carries its version**, because a Newton version is an Isaac build -- `isaacsim-core`
+pins `newton[sim]==1.2.1` to Isaac 6.0.1 and `==1.5.0` to 6.1.0:
+
+| `--engine` | Isaac Sim | engine | `--solver` |
+|---|---|---|---|
+| `physx` | 6.1.0 | PhysX | `physx` |
+| `physx6.0.1` | 6.0.1 | PhysX | `physx` |
+| `newton1.2` | 6.0.1 | Newton 1.2.1 | `mujoco`, `xpbd`, `vbd` |
+| `newton1.5` | 6.1.0 | Newton 1.5.0 | `mujoco`, `xpbd`, `vbd` |
+
+| `--experiment` | asset kinds | what it does |
 |---|---|---|
-| `physx` | 6.1.0 | PhysX |
-| `newton12` | 6.0.1 | Newton 1.2.1 |
-| `newton15` | 6.1.0 | Newton 1.5.0 |
+| `drop` | rigid, deformable | drop it on the floor: does it fall, land, stay out of the floor and settle? |
+| `slope` | rigid | drop it on a 45-degree slope: does it slide, and stay out of the ground? |
+| `grasp` | rigid | close the gripper on its grasp annotation and lift: does it hold? |
+| `press` | deformable | press a plate into it: how far does it give, and does it come back? |
+
+**To add an experiment, add a file to `asset_checks/experiments/`.** That module is the only place
+an experiment is declared -- its name, the asset kinds it means anything for, how long it runs and
+which runner drives it under each engine -- and everything else reads it. A module that claims a
+kind it has no driver for is refused when the package loads.
+
+A run writes `<out>/<asset>/<env>/<experiment>/`: the recording, the logs, the verdict, and two
+videos -- the asset's own textured mesh and the geometry the engine collides with. The
+environments go side by side in `<out>/compare/`. Cells written to one `--out` share one
+comparison, whether they are rigid or deformable.
+
+## The matrix runners underneath
+
+`check.py` runs one cell. The two runners it calls also take a whole matrix at once:
 
 ```bash
 PYTHONPATH=rlwrld/asset_checks python3 -m asset_checks.run \

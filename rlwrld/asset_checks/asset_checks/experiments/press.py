@@ -11,3 +11,5 @@ KINDS = {"deformable"}
 SECONDS = 4.0
 RIGID = None
 DEFORMABLE = {"newton": "newton_press.py", "physx": "physx_press.py"}
+# PR #2's criteria are about an asset falling; they say nothing here.
+PR2_CRITERIA = None

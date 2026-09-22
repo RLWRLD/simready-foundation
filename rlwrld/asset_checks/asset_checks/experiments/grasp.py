@@ -10,3 +10,5 @@ KINDS = {"rigid"}
 SECONDS = None
 RIGID = ("simready_benchmark_kit_suite.fet005_grasp.grasp_and_lift", "grasp_and_lift")
 DEFORMABLE = {}
+# PR #2's criteria are about an asset falling; they say nothing here.
+PR2_CRITERIA = None

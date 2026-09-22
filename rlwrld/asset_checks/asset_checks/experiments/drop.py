@@ -11,3 +11,5 @@ KINDS = {"rigid", "deformable"}
 SECONDS = 2.0
 RIGID = ("simready_benchmark_kit_suite.fet003_physics.ground_drop", "ground_drop")
 DEFORMABLE = {"newton": "newton_drop.py", "physx": "physx_drop.py"}
+# PR #2's own criteria apply, and this experiment expects the asset to come to rest
+PR2_CRITERIA = "rest"
