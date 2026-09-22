@@ -36,6 +36,44 @@ def impact_speed(clearance):
     return (2.0 * GRAVITY * max(clearance, 0.0)) ** 0.5
 
 
+def free_fall(fps):
+    """How far a released asset falls in the first recorded frame: (least, most), in metres.
+
+    A frame is 1/fps of simulated time, and nothing an engine may choose can change what gravity
+    does in it. Integrated in one step from rest the fall is g/fps^2; split into n steps it is
+    g/fps^2 * (n+1)/(2n), which shrinks with n towards the continuous g/(2*fps^2) and never leaves
+    those two bounds. So a fall outside them is not a solver being coarse or fine -- it is the
+    frame not being 1/fps of simulated time at all.
+
+    This is here rather than in a runner because it is the same arithmetic for every engine, and
+    because it is what would have caught the run that made it necessary: PhysX was stepping four
+    times per recorded frame at its own default rate, so each frame held 4/60 s, the videos played
+    four times fast, and the apple fell 27.2 mm in a frame that claimed 1.4 to 2.7. Newton, which
+    integrates 1/(fps*substeps) per substep, passes it unchanged.
+    """
+    one_step = GRAVITY / (fps * fps)
+    return 0.5 * one_step, one_step
+
+
+def check_free_fall(fallen, fps, clearance, tolerance=0.05):
+    """-> a sentence saying the first frame was the length it claims, or raises SystemExit.
+
+    Silent when the asset cannot free-fall for a whole frame -- it is already touching the floor,
+    or it hits inside the frame -- because then the fall says nothing about the frame's length.
+    """
+    least, most = free_fall(fps)
+    if clearance < most * 1.5:
+        return f"started {clearance * 1000:.1f} mm above the floor: too close to time the frame by"
+    if not least * (1.0 - tolerance) <= fallen <= most * (1.0 + tolerance):
+        raise SystemExit(
+            f"the first frame is not 1/{fps:g} s of simulated time: the asset fell "
+            f"{fallen * 1000:.3f} mm in it, where free fall at {GRAVITY:g} m/s^2 is "
+            f"{least * 1000:.3f}..{most * 1000:.3f} mm. It held {fallen / most:.2f} frames' worth "
+            f"of gravity, so every recorded time and every video speed is wrong by that much")
+    return (f"first frame fell {fallen * 1000:.3f} mm, free fall at {fps:g} fps is "
+            f"{least * 1000:.3f}..{most * 1000:.3f} mm: the frame is the time it claims")
+
+
 def verdict(finite, fell, clearance, below, height, speed, contact_size):
     """What the run showed.
 

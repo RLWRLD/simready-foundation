@@ -16,12 +16,14 @@ import isaacsim
 from isaacsim import SimulationApp
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import physx_scene  # noqa: E402  (imports no USD at its top: safe before SimulationApp)
 
 ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 ap.add_argument("asset")
 ap.add_argument("--seconds", type=float, default=4.0)
 ap.add_argument("--fps", type=float, default=60.0)
-ap.add_argument("--substeps", type=int, default=4)
+ap.add_argument("--substeps", type=int, default=physx_scene.SUBSTEPS,
+                help="physics steps inside one recorded frame (physx_scene.SUBSTEPS)")
 ap.add_argument("--margin", type=float, default=0.0, help="0 = the engine's own contact offset")
 ap.add_argument("--usd", default=None)
 ap.add_argument("--visual-asset", default=None,
@@ -36,6 +38,7 @@ app = SimulationApp({"headless": True}, experience=EXPERIENCE)
 # exists initialises USD outside Kit, and Kit can then no longer register its own schema wrappers:
 # the run dies during startup with "extension class wrapper ... has not been created yet".
 import asset_properties  # noqa: E402
+import newton_drop  # noqa: E402  (imports no engine at module level: the contact rule lives there)
 import press_shape  # noqa: E402
 
 import numpy as np  # noqa: E402
@@ -79,20 +82,7 @@ stage.SetDefaultPrim(UsdGeom.Xform.Define(stage, "/World").GetPrim())
 asset = stage.DefinePrim("/World/Asset")
 asset.GetReferences().AddReference(args.asset)
 
-scene = UsdPhysics.Scene.Define(stage, "/World/PhysicsScene")
-scene.CreateGravityDirectionAttr(Gf.Vec3f(0.0, 0.0, -1.0))
-scene.CreateGravityMagnitudeAttr(9.81)
-# A solid floor, not a sheet. Newton's `add_ground_plane` is a half-space -- infinitely thick --
-# and a zero-thickness triangle mesh is a weaker collider by construction: measured, a pressed
-# banana was squeezed 11 mm through the sheet, which says nothing about PhysX and everything
-# about the floor it was given. The box's top face is at z = 0, so the two engines' floors are
-# in the same place.
-half, floor_depth = 2.0, 0.5   # how far the floor extends below z = 0
-ground = UsdGeom.Cube.Define(stage, "/World/Ground")
-ground.CreateSizeAttr(2.0)
-UsdGeom.XformCommonAPI(ground).SetScale(Gf.Vec3f(half, half, floor_depth / 2.0))
-UsdGeom.XformCommonAPI(ground).SetTranslate(Gf.Vec3d(0.0, 0.0, -floor_depth / 2.0))
-UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
+physx_scene.world(stage, args.fps, args.substeps)
 for _ in range(30):
     app.update()
 
@@ -152,7 +142,6 @@ print(f"[physx] self-collision: the asset says {'on' if _declared else 'nothing 
       f"and this schema family has no switch to honour it with")
 collision = PhysxSchema.PhysxCollisionAPI.Apply(geometry)
 collision.CreateRestOffsetAttr(offset)
-
 # Rest on the floor rather than fall onto it: this test is about the plate.
 lift = offset - float(points[:, 2].min())
 points[:, 2] += lift
@@ -166,8 +155,18 @@ rest_shape.Set(raised)
 # The experiment says how deep the plate goes; PhysX's contact band has to cover that, or the
 # nodes past it feel nothing and the plate sweeps through. Same number Newton is given.
 indent = press_shape.press_depth(height)
-margin = args.margin or min(max(offset * 2.0, indent), press_shape.widest_usable_margin(height))
-collision.CreateContactOffsetAttr(max(offset * 2.0, margin))
+# The band, by the rule both engines share -- the asset's own size, the indentation it has to
+# cover, and how far a node moves in one substep -- and then capped, because a band wider than
+# this presses the asset with both faces of the plate at once. The cap is the press experiment's;
+# the rest is `contact_margin`, the same function Newton is given.
+wanted = newton_drop.contact_margin(offset, args.substeps, args.fps, 0.0, depth=indent)
+margin = args.margin or min(wanted, press_shape.widest_usable_margin(height))
+collision.CreateContactOffsetAttr(margin)
+# Reported here rather than added to `chosen`: the band is not known until the asset's height is,
+# and `asset_properties.report` has already run by then. A value that reaches the solver but not
+# the log is the thing this whole file exists to avoid.
+print(f"[physx] ours:  contact_offset = {margin:g}  -- the band Newton is given too, capped at "
+      f"{press_shape.widest_usable_margin(height) * 1000:.2f} mm so the plate does not press with both faces")
 thickness = press_shape.plate_thickness(height)
 start_z = float(points[:, 2].max()) + thickness / 2.0 + offset * 2.0
 plate = UsdGeom.Cube.Define(stage, PLATE)
@@ -225,8 +224,10 @@ deepest = 0.0
 for frame in range(frames):
     plate_z = press_shape.plate_height(frame, frames, start_z, bottom_z)
     plate_prim.set_world_poses(positions=np.array([[centre[0], centre[1], plate_z]], dtype=np.float32))
-    for _ in range(args.substeps):
-        app.update()
+    # One update per recorded frame, holding `args.substeps` steps of physics: the plate's law is
+    # written in frames, so a frame that ran for `substeps` times its own length also drove the
+    # plate at a `substeps`-th of the speed the experiment asks for. See `physx_scene`.
+    app.update()
     q = world_nodes(prim)
     if not np.isfinite(q).all():
         print(f"[physx] diverged at {frame / args.fps:.2f}s")

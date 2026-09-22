@@ -30,6 +30,9 @@ from asset_checks.kit.reading import copy_gprim  # noqa: E402  -- the one way ge
 COLLISION = "/root/collision"
 VISUAL = "/root/visual"
 GROUND = "/root/ground"
+# How far the floor reaches from the origin. The simulated floor and the drawn one are the
+# same floor, so `physx_scene` builds its collision box to this as well.
+GROUND_HALF = 2.0
 PLATE = "/root/plate"
 FIXTURES = "/root/fixtures"
 COLLISION_COLOUR = (0.92, 0.78, 0.25)
@@ -66,7 +69,7 @@ class Recording:
     """
 
     def __init__(self, path, fps, frames, node_points, elements, asset=None,
-                 sim_prim_path=None, ground_half=2.0, plate=None, plate_centre=(0.0, 0.0)):
+                 sim_prim_path=None, ground_half=GROUND_HALF, plate=None, plate_centre=(0.0, 0.0)):
         self.stage = Usd.Stage.CreateNew(str(path))
         UsdGeom.SetStageUpAxis(self.stage, UsdGeom.Tokens.z)
         UsdGeom.SetStageMetersPerUnit(self.stage, 1.0)
@@ -270,7 +273,7 @@ class RigidRecording:
     both views; only the asset changes clothes.
     """
 
-    def __init__(self, path, fps, asset, result, fixtures_layer=None, ground_half=2.0):
+    def __init__(self, path, fps, asset, result, fixtures_layer=None, ground_half=GROUND_HALF):
         traj = result["trajectory"]
         self.times = np.asarray(traj["t"], dtype=np.float64)
         self.poses = {p: np.asarray(v, dtype=np.float64) for p, v in traj["pose"].items()}

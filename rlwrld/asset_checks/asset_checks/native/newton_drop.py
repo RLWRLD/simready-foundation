@@ -454,6 +454,9 @@ def main():
             return
         if tape is not None:
             tape.frame(frame, q)
+        if frame == 0:
+            print("[baseline] " + drop_shape.check_free_fall(
+                float(start[:, 2].min() - q[:, 2].min()), args.fps, float(start[:, 2].min())), flush=True)
         if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
             speed = float(np.abs(np.asarray(state_0.particle_qd.numpy())).max())
             print(f"[baseline] t={frame / args.fps:5.2f}s  z [{q[:, 2].min():8.4f}, {q[:, 2].max():8.4f}]  "
