@@ -22,11 +22,6 @@ physics. The rigid tests have run at 240 Hz all along (`add_physics(fps=240)`), 
 substeps is not a new number, it is that one.
 """
 GRAVITY = 9.81
-# How many physics steps PhysX takes inside one recorded frame, the way `newton_drop.SUBSTEPS`
-# says it for each Newton solver. 4 at 60 fps is 240 Hz, which is the rate the rigid tests have
-# always run at (`add_physics(fps=240)` in `kit/nvidia_test.py`), so this is that number and not
-# a new one. Both runners read it from here; it was written out twice before.
-SUBSTEPS = 4
 GROUND_DEPTH = 0.5     # how far the floor reaches below z = 0; it reaches recording.GROUND_HALF out
 
 
@@ -36,9 +31,8 @@ def world(stage, fps, substeps, path="/World/PhysicsScene", ground_path="/World/
     Raises if PhysX does not take the step rate: a rate that was asked for and not applied is the
     bug this module exists to stop, and a silent default is how it hid the first time.
     """
-    # USD is imported here rather than at the top so that a runner can read SUBSTEPS while
-    # building its command line: importing pxr before Kit starts leaves Kit unable to register
-    # its own schema wrappers, and the run dies during startup.
+    # USD is imported here rather than at the top: importing pxr before Kit starts leaves Kit
+    # unable to register its own schema wrappers, and the run dies during startup.
     from pxr import Gf, PhysxSchema, UsdGeom, UsdPhysics
 
     import recording   # the floor drawn in the video and the floor simulated are one floor

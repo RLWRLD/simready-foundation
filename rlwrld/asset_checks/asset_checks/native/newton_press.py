@@ -39,11 +39,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import asset_properties
+import stepping
 import press_shape
 import recording
 import usd_deformable
 from newton_drop import (CONTACT, ITERATIONS,
-                         CONTACT_STIFFNESS_OF_MATERIAL, SUBSTEPS, material_stiffness,
+                         CONTACT_STIFFNESS_OF_MATERIAL, material_stiffness,
                          colour_for_vbd,
                          XPBD_MAX_RELAXATION, auto_radius,
                          contact_material, contact_margin, deformable_kind,
@@ -54,7 +55,7 @@ PLATE_BODY = 0        # the only body in the scene
 
 
 def build(asset, solver_name, iterations, radius, margin, full_surface=True,
-          substeps=10, fps=60.0):
+          substeps=stepping.SUBSTEPS, fps=60.0):
     measure = newton.ModelBuilder()
     measure.add_usd(Usd.Stage.Open(asset))
     # Where this Newton's importer has no path for what the asset declares -- 1.2.1 knows nothing
@@ -81,6 +82,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     builder = newton.ModelBuilder()
     builder.default_particle_radius = radius
     stage = Usd.Stage.Open(asset)
+    usd_deformable.one_body(stage, asset)   # the same refusal PhysX gives
     builder.add_usd(stage)
     built = usd_deformable.add_missing(builder, asset, chosen)
     # The radius the run uses is the one the builder ended up with, not the one asked for. A
@@ -235,7 +237,7 @@ def main():
     ap.add_argument("--usd", default=None)
     args = ap.parse_args()
 
-    substeps = args.substeps or SUBSTEPS[args.solver]
+    substeps = args.substeps or stepping.SUBSTEPS
     (model, solver, pipeline, radius, height, start_z, thickness, sim_path, plate_half,
      margin, plate_shape, plate_centre) = build(
         args.asset, args.solver, args.iterations, args.radius, args.margin,
