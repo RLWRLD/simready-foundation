@@ -45,17 +45,32 @@ def _bound_material(stage, prim, wanted):
     return next((p for p in stage.Traverse() if wanted in _schemas(p)), None)
 
 
-def is_simulated(prim):
-    """Does this prim carry geometry a solver simulates?
+def simulated_kind(prim):
+    """"surface", "volume", or None: what a solver would simulate this prim as.
 
     Answering by schema rather than by prim path is what lets one file's geometry be recognised
     inside another's reference -- the same asset is /World/banana in the original and /Asset/Body
     in the PhysX copy, and a name carried across files matches neither.
+
+    The schema name is matched by its *ending*, because the same schema is spelled two ways: the
+    Newton-flavour asset authors `PhysicsSurfaceDeformableSimAPI` and the PhysX conversion writes
+    `OmniPhysicsSurfaceDeformableSimAPI`. Listing the spellings anyone has seen is a table of
+    today's data -- measured, a version of this function that held two literal names recognised
+    every volume (they are also typed `TetMesh`) and no surface at all, so the cloth and the
+    polybag reported "nothing here to deform" on PhysX while the fruit ran. A suffix is the rule
+    the renaming actually followed, and it will still hold for the next prefix.
     """
     schemas = _schemas(prim)
-    return (SURFACE_SIM in schemas or VOLUME_SIM in schemas
-            or any(s.startswith("OmniPhysics") and "DeformableSimAPI" in s for s in schemas)
-            or prim.IsA(UsdGeom.TetMesh))
+    if any(s.endswith(SURFACE_SIM) for s in schemas):
+        return "surface"
+    if any(s.endswith(VOLUME_SIM) for s in schemas) or prim.IsA(UsdGeom.TetMesh):
+        return "volume"
+    return None
+
+
+def is_simulated(prim):
+    """Does this prim carry geometry a solver simulates?"""
+    return simulated_kind(prim) is not None
 
 
 def find(stage):
@@ -66,11 +81,9 @@ def find(stage):
     """
     found = []
     for prim in Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()):
-        schemas = _schemas(prim)
-        if SURFACE_SIM in schemas:
-            found.append(("surface", prim))
-        elif VOLUME_SIM in schemas or prim.IsA(UsdGeom.TetMesh):
-            found.append(("volume", prim))
+        kind = simulated_kind(prim)
+        if kind:
+            found.append((kind, prim))
     return found
 
 
