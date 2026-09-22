@@ -83,7 +83,9 @@ def check_free_fall(fallen, fps, clearance, tolerance=0.05):
             f"Nothing an asset or a solver does makes gravity weaker, so this is the frame, and "
             f"every recorded time and every video speed is wrong by that much")
     if fallen > most * (1.0 + tolerance):
-        return (f"first frame moved it {fallen / most:.1f}x further than gravity can",
+        # One word, like every other verdict: the result line is `key=value` separated by spaces
+        # and a verdict with spaces in it came back parsed as seven empty metrics.
+        return (f"first-frame-{fallen / most:.1f}x-gravity",
                 f"{measured}: {fallen / most:.2f} times the furthest gravity can take it in one "
                 f"frame. Either the frame is longer than it claims or the solver put the energy "
                 f"in; this run does not mean what it says either way")
