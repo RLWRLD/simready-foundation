@@ -13,15 +13,17 @@ import shutil
 import subprocess
 
 CAPTURE_FPS = 60           # frames rendered per simulated second
-PLAYBACK_SLOWDOWN = 4.0    # how many times slower than real time the videos play
+# Each view is encoded at both speeds from the one set of frames: real time is what the asset
+# actually did, and the slow one is where a landing or a pinch can be seen at all. Encoding twice
+# costs an ffmpeg pass; rendering twice would cost a Kit launch.
+SPEEDS = {"realtime": 1.0, "4xslower": 4.0}
 SIZE = 640                 # px, square: the rigid comparison panels
 VIEWS = ("visual", "collision")
 NATIVE = pathlib.Path(__file__).resolve().parent / "native"
 FFMPEG = shutil.which("ffmpeg")
 
 
-def slow_tag():
-    return f"{PLAYBACK_SLOWDOWN:g}xslower" if PLAYBACK_SLOWDOWN != 1.0 else "realtime"
+
 
 
 def record_rigid(bench, result_json, asset, usda, log):
@@ -45,11 +47,11 @@ def render(bench, usda, frames_dir, view, log, timeout, size=SIZE):
     return sorted(pathlib.Path(frames_dir).glob("frame_*.png"))
 
 
-def encode(frames_dir, video, keep_frames=False):
-    """Frames -> mp4 at the slowed-down rate; the frames go once the video exists, unless kept."""
+def encode(frames_dir, video, slowdown, keep_frames=True):
+    """Frames -> mp4, played `slowdown` times slower than the capture rate."""
     if FFMPEG is None:
         raise RuntimeError("ffmpeg is not on PATH")
-    subprocess.call([FFMPEG, "-y", "-loglevel", "error", "-framerate", str(CAPTURE_FPS / PLAYBACK_SLOWDOWN),
+    subprocess.call([FFMPEG, "-y", "-loglevel", "error", "-framerate", str(CAPTURE_FPS / slowdown),
                      "-i", str(pathlib.Path(frames_dir) / "frame_%05d.png"),
                      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", str(video)])
     made = pathlib.Path(video).exists()
@@ -59,7 +61,12 @@ def encode(frames_dir, video, keep_frames=False):
 
 
 def draw(bench, cell, usda, stem, timeout, log_prefix, keep_frames=False):
-    """Both views of one cell's recording -> [(view, mp4 name, frame count)], one entry per video made."""
+    """Every view of one cell's recording at every speed.
+
+    -> [(view, speed, mp4 name, frame count)], one entry per video made. A cell's videos are a
+    view and a speed: `visual` and `collision` are two pictures of one run, `realtime` and
+    `4xslower` two readings of one picture.
+    """
     made = []
     for view in VIEWS:
         frames_dir = cell / f"frames_{view}"
@@ -67,7 +74,10 @@ def draw(bench, cell, usda, stem, timeout, log_prefix, keep_frames=False):
         if not frames:
             print(f"[video] {cell.name}: no {view} frames (see {log_prefix}render_{view}.log)", flush=True)
             continue
-        mp4 = cell / f"{stem}__{view}__{slow_tag()}.mp4"
-        if encode(frames_dir, mp4, keep_frames):
-            made.append((view, mp4.name, len(frames)))
+        for speed, slowdown in SPEEDS.items():
+            mp4 = cell / f"{stem}__{view}__{speed}.mp4"
+            if encode(frames_dir, mp4, slowdown, keep_frames=True):
+                made.append((view, speed, mp4.name, len(frames)))
+        if not keep_frames:
+            shutil.rmtree(frames_dir, ignore_errors=True)
     return made

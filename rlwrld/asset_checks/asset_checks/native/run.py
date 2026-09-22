@@ -49,6 +49,10 @@ SCRIPTS = {("newton", "drop"): "newton_drop.py", ("newton", "press"): "newton_pr
 # names, PhysX reads the same physics under an `OmniPhysics` prefix and translates neither -- so
 # a PhysX cell runs a converted copy of the asset. `to_physx.py` makes it from the same
 # tetrahedra and the same declared material; anything else would compare the conversion.
+class ParityFailure(RuntimeError):
+    """The PhysX copy differs from the asset, so its results would not be about the asset."""
+
+
 def physx_asset(asset):
     """The PhysX copy of the asset, but only once it has been shown to still be the asset.
 
@@ -61,8 +65,18 @@ def physx_asset(asset):
     """
     converted = pathlib.Path(asset).with_name(pathlib.Path(asset).stem + "_physx.usda")
     if not converted.exists():
-        raise SystemExit(f"{asset} has no PhysX counterpart at {converted}. Make one with:\n"
-                         f"  {BENCH}/isaac-run isaac610 {HERE / 'to_physx.py'} {asset} {converted}")
+        # Made here rather than demanded of the caller: it is a mechanical re-authoring of the
+        # asset, the parity check below is what makes it trustworthy, and a run should need
+        # nothing but the USD. Kept beside the asset, so a second run reuses it.
+        print(f"[run] no PhysX copy of {pathlib.Path(asset).name} yet; writing {converted.name}", flush=True)
+        made = subprocess.run([str(BENCH / "isaac-run"), "isaac610", str(HERE / "to_physx.py"),
+                               str(asset), str(converted)], capture_output=True, text=True)
+        for line in made.stdout.splitlines():
+            if line.startswith("[to-physx]"):
+                print(f"[run] {line}", flush=True)
+        if made.returncode != 0 or not converted.exists():
+            raise ParityFailure(f"the PhysX copy could not be written (exit {made.returncode}): "
+                                + (made.stdout + made.stderr).strip()[-400:])
     # Run in a venv rather than imported: this runner is plain Python and `pxr` lives in the
     # Isaac environments, the same reason every cell is a subprocess.
     check = subprocess.run([str(BENCH / ".venv-isaac610" / "bin" / "python"),
@@ -76,10 +90,6 @@ def physx_asset(asset):
         raise ParityFailure("the PhysX copy is not the same asset as the one being evaluated: "
                             + "; ".join(s.partition("MISMATCH: ")[2] or s for s in said))
     return str(converted)
-
-
-class ParityFailure(RuntimeError):
-    """The PhysX copy differs from the asset, so its results would not be about the asset."""
 
 
 def cell_command(env, experiment, asset, usd, seconds):
@@ -146,9 +156,9 @@ COLUMNS = {
 def summary(asset, results):
     """One table per experiment, plus where each video is."""
     lines = [f"# {pathlib.Path(asset).name}", "",
-             "Two videos per cell, from one run: `__collision` is the geometry the solver moved and",
-             "collided with, `__visual` is the asset's own textured mesh carried along by it. The",
-             "side-by-side strips are in `compare/`.", ""]
+             "Four videos per cell, from one run: `__collision` is the geometry the solver moved and",
+             "collided with, `__visual` is the asset's own textured mesh carried along by it, each",
+             "at `__realtime` and at `__4xslower`. The side-by-side strips are in `compare/`.", ""]
     for experiment, columns in COLUMNS.items():
         rows = {c: r for c, r in results.items() if r.get("experiment") == experiment}
         if not rows:
@@ -231,27 +241,29 @@ def main():
                         print(f"[run] {cell}: exit {code} in {seconds_taken}s -- "
                               f"{found or 'nothing reported'}", flush=True)
             results[cell] = row
-            row["videos"] = {}
+            row["videos"], media = {}, []
             if not args.no_render and usd.exists():
-                # One run, two videos: the geometry the solver moved and collided with, and the
-                # asset's own textured mesh carried along by it. Frame for frame the same numbers.
-                for view, name, frames in video.draw(BENCH, cell_dir, usd, experiment, args.timeout, ""):
-                    row["videos"][view] = name
+                # One run, four videos: the geometry the solver moved and collided with, and the
+                # asset's own textured mesh carried along by it, each at both speeds. Frame for
+                # frame the same numbers. The role and the speed stay separate fields, because
+                # that is what the compositor selects on.
+                for view, speed, name, frames in video.draw(BENCH, cell_dir, usd, experiment, args.timeout, ""):
+                    row["videos"][f"{view}__{speed}"] = name
+                    media.append({"filename": name, "kind": "video", "role": view, "speed": speed})
                     print(f"[run] {cell}: {frames} {view} frames -> {name}", flush=True)
             # What `asset_checks.compare` reads: a verdict it can colour, the experiment's own word
             # for what happened after FAIL, and the videos by role.
             said = row.get("verdict") or row.get("skipped") or row.get("error") or row.get("diverged")
             (cell_dir / "result.json").write_text(json.dumps(
                 {**row, "verdict": "pass" if row.get("verdict") == "pass" else "fail",
-                 "message": said or "no result",
-                 "media": [{"filename": name, "kind": "video", "role": view}
-                           for view, name in row["videos"].items()]}, indent=1))
+                 "message": said or "no result", "media": media}, indent=1))
 
     if not args.no_render:
         for view in video.VIEWS:
-            subprocess.call([str(BENCH / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare",
-                             str(out), "--role", view, "--envs", ",".join(envs)],
-                            env={**os.environ, "PYTHONPATH": str(HERE.parents[1])})
+            for speed in video.SPEEDS:
+                subprocess.call([str(BENCH / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare",
+                                 str(out), "--role", view, "--speed", speed, "--envs", ",".join(envs)],
+                                env={**os.environ, "PYTHONPATH": str(HERE.parents[1])})
     # Per asset, under its own directory: several assets share one <out>, as they do in a rigid run.
     (out / stem / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
     (out / stem / "summary.md").write_text(summary(asset, results))

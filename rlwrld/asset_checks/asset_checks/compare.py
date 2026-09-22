@@ -47,11 +47,12 @@ def label(path, width, env, result):
     return img.size[1]
 
 
-def video_of(ffmpeg, run_dir, result, role=None):
-    """The run's video -- the one with `role` when asked, else the first -- or one encoded here
-    from its captured frames when the test never wrote one."""
+def video_of(ffmpeg, run_dir, result, role=None, speed=None):
+    """The run's video -- the one with this `role` and `speed` when asked, else the first -- or one
+    encoded here from its captured frames when the test never wrote one."""
     videos = [m["filename"] for m in (result or {}).get("media") or []
-              if m.get("kind") == "video" and (role is None or m.get("role") == role)]
+              if m.get("kind") == "video" and (role is None or m.get("role") == role)
+              and (speed is None or m.get("speed") == speed)]
     if videos:
         return run_dir / videos[0]
     frames = sorted(run_dir / m["filename"] for m in (result or {}).get("media") or [] if m.get("kind") == "image")
@@ -84,6 +85,8 @@ def main():
     ap.add_argument("--role", default=None,
                     help="which of a cell's videos to put in its panel, by media role, e.g. visual or collision "
                          "(default: the first video the cell lists); the strip is named after it")
+    ap.add_argument("--speed", default=None,
+                    help="and at which speed, e.g. realtime or 4xslower (default: any)")
     args = ap.parse_args()
     ffmpeg, root, px = imageio_ffmpeg.get_ffmpeg_exe(), pathlib.Path(args.run_dir), args.panel_px
     wanted = [e.strip() for e in args.envs.split(",") if e.strip()]
@@ -101,7 +104,14 @@ def main():
         panels = []
         for env in wanted:
             result = json.loads(by_env[env].read_text()) if env in by_env else None
-            panels.append((env, result, video_of(ffmpeg, by_env[env].parent, result, args.role) if env in by_env else None))
+            panels.append((env, result, video_of(ffmpeg, by_env[env].parent, result, args.role, args.speed) if env in by_env else None))
+        if not any(v for _, _, v in panels):
+            # Every panel grey is not a comparison, it is a silent miss -- a role or a speed that
+            # matched no video wrote four empty strips before this said so.
+            print(f"[compare] {asset} / {test}: no cell has a video"
+                  + (f" with role={args.role!r}" if args.role else "")
+                  + (f" speed={args.speed!r}" if args.speed else "") + "; no strip written", flush=True)
+            continue
         length = max([duration(ffmpeg, v) for _, _, v in panels if v] or [2.0])
         with tempfile.TemporaryDirectory() as tmp:
             inputs, chains = [], []
@@ -120,7 +130,8 @@ def main():
             joined = (f"[p0]null[out]" if len(panels) == 1 else
                       "".join(f"[p{i}]" for i in range(len(panels))) + f"hstack={len(panels)}[out]")
             graph = ";".join(chains) + ";" + joined
-            target = out_dir / (f"{asset}__{test}__{args.role}.mp4" if args.role else f"{asset}__{test}.mp4")
+            tag = "__".join(x for x in (args.role, args.speed) if x)
+            target = out_dir / (f"{asset}__{test}__{tag}.mp4" if tag else f"{asset}__{test}.mp4")
             subprocess.run([ffmpeg, "-v", "error", "-y", *inputs, "-filter_complex", graph, "-map", "[out]",
                             "-t", f"{length:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", str(target)], check=True)
             written += 1
