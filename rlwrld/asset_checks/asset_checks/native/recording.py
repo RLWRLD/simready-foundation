@@ -347,22 +347,25 @@ class RigidRecording:
         _ground(self.stage, ground_half)
 
     def _collider(self, gprim, under):
-        """The shape the engine collides with, as its own flat-coloured mesh.
+        """The collision shape, as its own flat-coloured mesh.
 
-        Not the render mesh with a colour on it: these assets declare no approximation and apply
-        no `UsdPhysics.MeshCollisionAPI`, so PhysX cannot use their triangle meshes on a dynamic
-        body and cooks a convex hull instead -- it logs that fallback as an error, and drawing the
-        triangle mesh would show a shape nothing collides with. `reading.collider_approximation`
-        decides what the engine uses and `reading.collider_shape` builds it; where the shape is
-        more than geometry can say (a decomposition, an SDF) the mesh is kept and the run says so.
+        Where the asset ships collision geometry of its own -- a collider authored beside the
+        render mesh, `purpose` "guide", as OpenUSD describes -- that geometry is drawn as it is.
+        Where it does not, and declares no approximation, the shape is **ours**: one convex hull
+        per collider, the same in every environment of that asset, so the picture differs only by
+        what the physics did. Drawing the render mesh instead would show a shape no engine here
+        collides with -- PhysX refuses a triangle mesh on a dynamic body and MuJoCo convexifies --
+        and drawing each engine's own answer would put three different objects in one strip.
+        `reading.collider_shape_choice` decides, `reading.collider_shape` builds, and the run
+        prints both, so which is the asset's and which is ours is never in doubt.
         """
-        approximation, why = reading.collider_approximation(gprim)
+        approximation, whose, why = reading.collider_shape_choice(gprim)
         points = UsdGeom.PointBased(gprim).GetPointsAttr().Get() if gprim.IsA(UsdGeom.PointBased) else None
         shape = reading.collider_shape(points, approximation) if points else None
         path = _unique(self.stage, f"{under}/{gprim.GetName()}")
         if shape is None:
             copy = copy_gprim(gprim, self.stage, path)
-            note = f"as authored ({approximation}: {why})"
+            note = f"drawn as authored -- {whose}: {approximation}, {why}"
         else:
             hull, faces = shape
             mesh = UsdGeom.Mesh.Define(self.stage, path)
@@ -370,7 +373,7 @@ class RigidRecording:
             mesh.CreateFaceVertexCountsAttr(Vt.IntArray([len(f) for f in faces]))
             mesh.CreateFaceVertexIndicesAttr(Vt.IntArray([i for f in faces for i in f]))
             copy = mesh.GetPrim()
-            note = f"{approximation} of {len(points)} points -> {len(hull)} ({why})"
+            note = f"{whose}: {approximation} of {len(points)} points -> {len(hull)}, {why}"
         g = UsdGeom.Gprim(copy)
         g.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*COLLISION_COLOUR)]))
         if copy.IsA(UsdGeom.Mesh):

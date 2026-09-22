@@ -286,57 +286,53 @@ def stack_notes(stage, engine, root_path):
     return notes
 
 
-# What PhysX does with a dynamic mesh collider, given what the asset declares. A bare
-# `physics:approximation` without `UsdPhysics.MeshCollisionAPI` applied is ignored, and an
-# approximation PhysX cannot use on a dynamic body falls back to a convex hull -- engine-kit's
-# `physics_utils.report_collision_approximations` says so in as many words, and Isaac logs the
-# fallback as an error. These are the approximations it can use.
-DYNAMIC_APPROXIMATIONS = ("convexHull", "convexDecomposition", "boundingCube", "boundingSphere", "sdf")
+# The shape we draw where the asset ships no collision geometry of its own and declares no
+# approximation. It is ours, not the asset's, so it is one shape used for every engine of that
+# asset: the picture then differs only by what the physics did, which is the whole point. A single
+# convex hull is the one thing every engine here can collide with -- PhysX refuses a triangle mesh
+# on a dynamic body and MuJoCo convexifies -- and it is the hull of the collider's own points, not
+# a re-cooking of any engine's (PhysX simplifies its to `physxConvexHullCollision:hullVertexLimit`,
+# 64 by default; ours is the exact hull).
+OURS = "convexHull"
 
 
-def collider_approximation(prim):
-    """-> (what the engine collides with for this collider, why).
+def collider_shape_choice(prim):
+    """-> (approximation, whose, why) for one collider.
 
-    The names are UsdPhysics': "none" means the mesh itself. A static collider keeps whatever it
-    declares; a dynamic one gets convexHull wherever PhysX would.
+    `approximation` is UsdPhysics' name for the shape to draw, where "none" means this prim's own
+    geometry. `whose` is "asset" when the USD says it and "ours" when the USD is silent.
+
+    OpenUSD states the convention for collision geometry that is not the render mesh: "Collision
+    meshes may be specified explicitly ... by adding the custom collider mesh as a sibling to the
+    original graphics mesh, UsdGeomImageable purpose to 'guide' so it does not render." So a
+    collider the viewer cannot see is one the asset authored on purpose, and it is drawn as it is.
     """
-    from pxr import UsdPhysics
+    from pxr import UsdGeom, UsdPhysics
 
-    declared = "none"
+    purpose = UsdGeom.Imageable(prim).ComputePurpose()
+    if purpose not in (UsdGeom.Tokens.default_, UsdGeom.Tokens.render):
+        return "none", "asset", f"a collider authored beside the render mesh, purpose {purpose}"
     if prim.HasAPI(UsdPhysics.MeshCollisionAPI):
         declared = str(UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get() or "none")
-    elif prim.GetAttribute("physics:approximation") and prim.GetAttribute("physics:approximation").HasAuthoredValue():
-        return ("convexHull",
-                f"physics:approximation={prim.GetAttribute('physics:approximation').Get()!r} is authored without "
-                f"UsdPhysics.MeshCollisionAPI, so PhysX ignores it and falls back to a convex hull")
+        return declared, "asset", "UsdPhysicsMeshCollisionAPI declares it"
     if "PhysxSDFMeshCollisionAPI" in prim.GetAppliedSchemas():
-        declared = "sdf"
-    if not _under_dynamic_body(prim):
-        return declared, "declared, and static so PhysX keeps it"
-    if declared in DYNAMIC_APPROXIMATIONS:
-        return declared, "declared"
-    return "convexHull", f"declared {declared!r}, which PhysX cannot use on a dynamic body, so it falls back"
-
-
-def _under_dynamic_body(prim):
-    from pxr import UsdPhysics
-
-    while prim and prim.IsValid() and not prim.IsPseudoRoot():
-        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
-            enabled = prim.GetAttribute("physics:rigidBodyEnabled")
-            kinematic = prim.GetAttribute("physics:kinematicEnabled")
-            return (enabled.Get() is not False if enabled else True) and not (kinematic and kinematic.Get())
-        prim = prim.GetParent()
-    return False
+        return "sdf", "asset", "PhysxSDFMeshCollisionAPI is applied"
+    orphan = prim.GetAttribute("physics:approximation")
+    if orphan and orphan.HasAuthoredValue():
+        return OURS, "ours", (f"physics:approximation={orphan.Get()!r} is authored without "
+                              f"UsdPhysicsMeshCollisionAPI, so it is not the schema's and engines "
+                              f"disagree about it")
+    return OURS, "ours", "the asset ships no collision mesh of its own and declares no approximation"
 
 
 def collider_shape(points, approximation):
     """The points of the shape the engine collides with, and its triangles.
 
-    `convexHull` is the hull of the collider's own points, which is what PhysX cooks from them;
-    the bounding shapes are built from the same points. `none` is the mesh itself, and anything
-    else (a decomposition, an SDF) is more than a copy of the geometry can say, so the caller is
-    told to keep the mesh and report the approximation's name beside it.
+    `convexHull` is the hull of the collider's own points, and the bounding shapes are built from
+    the same points. `none` is the prim's own geometry -- what the asset means when it says so, and
+    what a collider authored beside the render mesh already is. A decomposition or an SDF is more
+    than a copy of geometry can say, so there the caller is told (None) to keep the mesh and print
+    the approximation's name beside it.
     """
     import numpy as np
 
