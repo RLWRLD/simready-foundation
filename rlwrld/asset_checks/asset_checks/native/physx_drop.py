@@ -27,8 +27,9 @@ from isaacsim import SimulationApp
 
 ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 ap.add_argument("asset")
-ap.add_argument("--seconds", type=float, default=2.0)
-ap.add_argument("--fps", type=float, default=60.0)
+ap.add_argument("--seconds", type=float, required=True,
+                help="simulated seconds: the experiment's own SECONDS, which run.py passes")
+ap.add_argument("--fps", type=float, default=stepping.FPS)
 ap.add_argument("--substeps", type=int, default=stepping.SUBSTEPS,
                 help="physics steps inside one recorded frame (stepping.SUBSTEPS)")
 ap.add_argument("--drop", type=float, default=drop_shape.DROP_HEIGHT)
@@ -49,6 +50,7 @@ app = SimulationApp({"headless": True}, experience=EXPERIENCE)
 import asset_properties  # noqa: E402
 import usd_deformable  # noqa: E402  (which mesh the asset asks to be simulated)
 import newton_drop  # noqa: E402  (imports no engine at module level: the contact rule lives there)
+import recording  # noqa: E402  (the floor's size, and the recording)
 
 import numpy as np  # noqa: E402
 import omni.timeline  # noqa: E402
@@ -58,10 +60,8 @@ from isaacsim.core.experimental.prims import DeformablePrim  # noqa: E402
 from isaacsim.core.simulation_manager import SimulationManager  # noqa: E402
 from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics  # noqa: E402
 
-# PhysX spells a deformable's simulated geometry one of two ways depending on what it is made
-# of. Asking for both is what lets a cloth and a soft body go through the same runner.
-SIM_APIS = ("OmniPhysicsVolumeDeformableSimAPI", "OmniPhysicsSurfaceDeformableSimAPI")
-BODY_API = "OmniPhysicsDeformableBodyAPI"
+# The body schema, as PhysX spells the AOUSD name; the rule lives with the names.
+BODY_API = usd_deformable.physx_name(usd_deformable.BODY)
 # What counts as a pass, as fractions of the asset's own size and its own drop.
 # "Settled" is judged on the 99th percentile of node speed, not the maximum. A maximum over a
 # few thousand nodes is decided by whichever single node is jittering, so an asset that has not
@@ -105,11 +105,15 @@ asset = stage.DefinePrim("/World/Asset")
 asset.GetReferences().AddReference(args.asset)
 
 physx_scene.world(stage, args.fps, args.substeps)
+FIXTURES = ["/World/Ground"]
 for _ in range(30):
     app.update()
 
-# Which mesh this asset asks to be simulated -- one, or a refusal naming the several.
-_refusal = usd_deformable.why_not_runnable(stage, pathlib.Path(args.asset).name,
+# Which mesh this asset asks to be simulated -- one, or a refusal naming the several. Asked of
+# the asset being evaluated (the original, with the AOUSD names and the material the parity check
+# measured), not of the PhysX copy, which spells the same physics under other names.
+_original = Usd.Stage.Open(args.visual_asset or args.asset)
+_refusal = usd_deformable.why_not_runnable(_original, pathlib.Path(args.visual_asset or args.asset).name,
                                           most=physx_scene.BODIES)
 if _refusal:
     raise SystemExit(_refusal)
@@ -158,10 +162,7 @@ rest_shape.Set(raised)
 declared, chosen = asset_properties.read(args.visual_asset or args.asset), {}
 offset, offset_source = asset_properties.contact_size(declared)
 if offset is None:
-    picked = np.random.default_rng(0).choice(len(points), size=min(512, len(points)), replace=False)
-    spacing = np.sqrt(((points[picked][:, None, :] - points[None, :, :]) ** 2).sum(-1))
-    spacing[spacing < 1e-9] = np.inf
-    offset = float(np.median(spacing.min(axis=1)) * 0.5)
+    offset = newton_drop.auto_radius(points)   # the same rule Newton's radius comes from
     chosen["rest_offset"] = (offset, "the asset declares neither a particle radius nor a shell "
                                      "thickness; half the median distance between nodes")
 # The same band Newton is given, by the same rule and from the same function: wide enough for the
@@ -190,6 +191,9 @@ for _ in range(10):
 print(f"[physx] raised the asset {lift * 100:.1f} cm; it is {height * 1000:.1f} mm tall, "
       f"rest offset {offset * 1000:.2f} mm, contact offset {contact_offset * 1000:.2f} mm")
 
+physx_scene.floor(stage, recording.ground_half(points))
+_mu, _mu_why = asset_properties.friction(declared)
+physx_scene.floor_material(stage, _mu, declared.get("restitution") or 0.0, FIXTURES)
 SimulationManager.set_physics_sim_device("cuda")
 timeline = omni.timeline.get_timeline_interface()
 timeline.set_time_codes_per_second(args.fps)
@@ -200,13 +204,16 @@ for _ in range(5):
 prim = DeformablePrim(str(body.GetPath()))
 raw = simulation_mesh(prim.get_element_indices())
 # Three indices per element for a cloth, four for a soft body: the view says which.
-per_element = int(prim.num_nodes_per_element) if hasattr(prim, "num_nodes_per_element") else (
-    4 if raw.size % 4 == 0 and raw.size % 3 else 3)
+if not hasattr(prim, "num_nodes_per_element"):
+    raise SystemExit("[physx] this DeformablePrim reports no num_nodes_per_element; the element "
+                     "shape is not guessed from the index count")
+per_element = int(prim.num_nodes_per_element)
 elements = raw.reshape(-1, per_element)
-try:
-    print(f"[physx] physics material: {prim.get_applied_physics_materials()}")
-except Exception as exc:                                  # noqa: BLE001
-    print(f"[physx] could not read the bound physics material back: {exc}")
+bound_materials = prim.get_applied_physics_materials()
+print(f"[physx] physics material: {bound_materials}")
+if not bound_materials or not all(bound_materials):
+    raise SystemExit("[physx] the body has no physics material bound: PhysX would run its own "
+                     "default (youngs_modulus 5e5) and look like a softer engine")
 
 # Put the asset where the experiment says it starts. Creating the tensor view costs a handful of
 # rendered frames and the body falls through them -- measured, a banana raised to 15 cm reported
@@ -217,7 +224,7 @@ prim.set_nodal_velocities(wp.zeros((1, points.shape[0], 3), dtype=wp.float32))
 start = world_nodes(prim)
 print(f"[physx] placed at z [{start[:, 2].min():.4f}, {start[:, 2].max():.4f}] over {len(elements)} tets, "
       f"asked for {args.drop:.4f}")
-if abs(start[:, 2].min() - args.drop) > 0.002:
+if abs(start[:, 2].min() - args.drop) > offset:
     raise SystemExit(f"[physx] the solver would not take the starting pose: asked {args.drop:.4f}, "
                      f"it holds {start[:, 2].min():.4f}")
 
@@ -230,7 +237,8 @@ tape = None
 if args.usd:
     import recording
     tape = recording.Recording(args.usd, int(args.fps), frames, start, elements,
-                               asset=args.visual_asset, sim_prim_path=str(body.GetPath()))
+                               asset=args.visual_asset, sim_prim_path=str(body.GetPath()),
+                               ground_half=recording.ground_half(points))
 
 q, first_frame = start, None
 for frame in range(frames):
@@ -255,7 +263,7 @@ for frame in range(frames):
 
 v = simulation_mesh(prim.get_nodal_velocities()).reshape(-1, 3)
 fell = float(start[:, 2].min() - q[:, 2].min())
-below = float(max(0.0, -q[:, 2].min()))   # a resting node sits one rest offset above the floor
+below = drop_shape.below_floor(float(q[:, 2].min()), offset)
 speed = float(np.percentile(np.abs(v), 99))
 peak = float(np.abs(v).max())
 # The verdict and the line it is printed on belong to the experiment, which is why
@@ -263,7 +271,7 @@ peak = float(np.abs(v).max())
 # in both drop runners, and a pair of copies is a pair waiting to drift.
 decision = drop_shape.verdict(bool(np.isfinite(q).all()), fell,
                               float(start[:, 2].min()), below, height,
-                              speed, offset,
+                              speed, offset, contact_offset,
                               extent=float(q[:, 2].max() - q[:, 2].min()))
 kept = drop_shape.height_kept(float(q[:, 2].max() - q[:, 2].min()), height, offset)
 print(drop_shape.result_line("physx", fell, float(q[:, 2].min()), float(q[:, 2].max()),

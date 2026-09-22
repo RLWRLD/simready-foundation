@@ -15,14 +15,40 @@ This runs only when the importer produced nothing. Where an importer works, it w
 resolves transforms, mass models and collision gating that are not re-derived here.
 """
 import numpy as np
-from pxr import Usd, UsdGeom
+try:
+    from pxr import Usd, UsdGeom
+except ImportError:
+    # The names and rules in this module are read by tools that have no USD (run.py, the
+    # coordinator); every function here needs it and fails on use, not on import.
+    Usd = UsdGeom = None
 
+# The attribute names an asset may use for each property live in asset_properties. This module
+# is imported bare by the runners (native/ on the path) and as a package member by kit/scene.
+try:
+    import asset_properties
+except ImportError:                                       # pragma: no cover
+    from asset_checks.native import asset_properties
+
+# The AOUSD Deformable Body Physics schema names, as Newton's importer looks for them.
+BODY = "PhysicsDeformableBodyAPI"
 SURFACE_SIM = "PhysicsSurfaceDeformableSimAPI"
 VOLUME_SIM = "PhysicsVolumeDeformableSimAPI"
 SURFACE_MATERIAL = "PhysicsSurfaceDeformableMaterialAPI"
 VOLUME_MATERIAL = "PhysicsVolumeDeformableMaterialAPI"
-# Newton 1.5.0's own fallback when volumetric values are authored without a thickness.
-DEFAULT_CLOTH_THICKNESS = 0.001
+SIM = {"surface": SURFACE_SIM, "volume": VOLUME_SIM}
+MATERIAL = {"surface": SURFACE_MATERIAL, "volume": VOLUME_MATERIAL}
+
+
+def physx_name(name):
+    """What omni.physx calls the same schema: the AOUSD name under an `Omni` prefix. Verified
+    against `omni.physx` 110.3's deformableUtils, which spells all six that way -- except that it
+    has one material schema for a volume, `OmniPhysicsDeformableMaterialAPI`, where AOUSD has
+    `PhysicsVolumeDeformableMaterialAPI`. That one exception is the only table here."""
+    if name == VOLUME_MATERIAL:
+        return "OmniPhysicsDeformableMaterialAPI"
+    return "Omni" + name
+# How a PhysX copy of an asset is named beside it: <stem>_physx.usda. One spelling.
+PHYSX_COPY_SUFFIX = "_physx"
 
 
 def _schemas(prim):
@@ -36,13 +62,164 @@ def _value(prim, name):
 
 
 def _bound_material(stage, prim, wanted):
-    """The material carrying `wanted`, preferring one this prim binds."""
+    """The material this prim (or an ancestor) binds for physics, if it carries `wanted`.
+
+    Bound, not found: a material picked up from anywhere on the stage because the body bound
+    none is a number the asset never attached to this body, and it was taken silently.
+    """
     from pxr import UsdShade
 
-    binding = UsdShade.MaterialBindingAPI(prim).GetDirectBinding("physics").GetMaterial()
-    if binding and wanted in _schemas(binding.GetPrim()):
-        return binding.GetPrim()
-    return next((p for p in stage.Traverse() if wanted in _schemas(p)), None)
+    bound, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(materialPurpose="physics")
+    if bound and wanted in _schemas(bound.GetPrim()):
+        return bound.GetPrim()
+    return None
+
+
+# What a body's material has to state for the experiments to mean anything, per kind, by the
+# AOUSD names. Missing, the asset is refused: Newton's builder, PhysX's helper and this package
+# each had a different silent default for these, and a cloth's bend stiffness was 100 on one
+# engine and 0 on the other, with nothing in either log.
+REQUIRED = {
+    "surface": (("thickness", asset_properties.THICKNESS), ("stretch stiffness", asset_properties.STRETCH),
+                ("bend stiffness", asset_properties.BEND), ("density", asset_properties.DENSITY)),
+    "volume": (("Young's modulus", asset_properties.YOUNGS), ("Poisson's ratio", asset_properties.POISSON),
+               ("density", asset_properties.DENSITY)),
+}
+
+
+def missing_material(stage, kind, prim):
+    """-> the reason this body's material is not enough to simulate it, or None."""
+    material = _bound_material(stage, prim, MATERIAL[kind])
+    if material is None:
+        return f"{prim.GetPath()} binds no {MATERIAL[kind]} material for physics"
+    for label, names in REQUIRED[kind]:
+        if not any(material.GetAttribute(n) and material.GetAttribute(n).HasAuthoredValue() for n in names):
+            return (f"{material.GetPath()} states no {label} ({' or '.join(names)}), which a "
+                    f"{kind} body's physics depends on; refused rather than given a default")
+    return None
+
+
+def contact_size_of(stage, kind, prim):
+    """This body's own contact size: its declared particle radius, else half its shell thickness,
+    else None. Per body, because a loaded polybag's film and filling declare different ones."""
+    material = _bound_material(stage, prim, MATERIAL[kind])
+    prims = [p for p in (material, prim) if p is not None]
+    for p in prims:
+        for name in asset_properties.RADIUS:
+            attr = p.GetAttribute(name)
+            if attr and attr.HasAuthoredValue():
+                return float(attr.Get())
+    for p in prims:
+        for name in asset_properties.THICKNESS:
+            attr = p.GetAttribute(name)
+            if attr and attr.HasAuthoredValue():
+                return 0.5 * float(attr.Get())
+    return None
+
+
+def _authored(prim, names):
+    for name in names:
+        attr = prim.GetAttribute(name)
+        if attr and attr.HasAuthoredValue():
+            return float(attr.Get()), name
+    return None, None
+
+
+def carry_material_damping(builder, stage, convert, report=None):
+    """Put each body's authored damping on its own elements, in the builder.
+
+    Newton's importer takes every stiffness from the USD and no damping: a volume's k_damp comes
+    out 0 and a membrane's tri_kd the builder's default, whatever the asset says. Measured, an
+    undamped 2 kPa cotton rebounds off the floor and kicks the film around it into the floor.
+
+    `convert(kind, value, stiffness)` says what number the running solver's kernel needs for the
+    damping to *be* `value` in Pa.s (the runner reads that off the kernel). Elements are matched
+    to bodies through their particles, which are at the asset's own coordinates at this stage.
+    Where the asset authors nothing the builder's default stays, and is reported as ours.
+    """
+    q = np.asarray(builder.particle_q, dtype=np.float64)
+    where = {tuple(np.round(p, 6)): i for i, p in enumerate(q)}
+    tets = np.asarray(builder.tet_indices, dtype=np.int64).reshape(-1, 4) if builder.tet_indices else np.zeros((0, 4), int)
+    tris = np.asarray(builder.tri_indices, dtype=np.int64).reshape(-1, 3) if builder.tri_indices else np.zeros((0, 3), int)
+    edges = np.asarray(builder.edge_indices, dtype=np.int64).reshape(-1, 4) if builder.edge_indices else np.zeros((0, 4), int)
+    tet_m = [list(m) for m in builder.tet_materials]
+    tri_m = [list(m) for m in builder.tri_materials]
+    edge_m = [list(m) for m in builder.edge_bending_properties]
+    for kind, sim, _render in bodies(stage):
+        material = _bound_material(stage, sim, MATERIAL[kind])
+        points = np.asarray(UsdGeom.PointBased(sim).GetPointsAttr().Get(), dtype=np.float64)
+        mine = {where[tuple(np.round(p, 6))] for p in points if tuple(np.round(p, 6)) in where}
+        path = str(sim.GetPath())
+        if kind == "volume":
+            value, name = _authored(material, asset_properties.TET_DAMPING) if material else (None, None)
+            if value is None:
+                if report is not None:
+                    report[f"tet_damping {path}"] = (tet_m[0][2] if tet_m else 0.0, "the asset authors no "
+                                                     "newton:kDamp; Newton's builder default, ours")
+                continue
+            for t, (a, b, c, d) in enumerate(tets):
+                if a in mine:
+                    tet_m[t][2] = convert("tet", value, tet_m[t][0])
+            if report is not None:
+                report[f"tet_damping {path}"] = (value, f"{name} in Pa.s, handed over as this kernel reads it")
+        else:
+            value, name = _authored(material, asset_properties.TRI_DAMPING) if material else (None, None)
+            bend, bend_name = _authored(material, asset_properties.EDGE_DAMPING) if material else (None, None)
+            if value is None:
+                if report is not None:
+                    report[f"tri_damping {path}"] = (tri_m[0][2] if tri_m else 0.0, "the asset authors no "
+                                                     "newton:triKd; Newton's builder default, ours")
+            else:
+                for t, (a, b, c) in enumerate(tris):
+                    if a in mine:
+                        tri_m[t][2] = convert("tri", value, tri_m[t][0])
+                if report is not None:
+                    report[f"tri_damping {path}"] = (value, f"{name}, handed over as this kernel reads it")
+            if bend is not None:
+                for e, (_, _, a, b) in enumerate(edges):
+                    if a in mine:
+                        edge_m[e][1] = convert("edge", bend, edge_m[e][0])
+                if report is not None:
+                    report[f"edge_damping {path}"] = (bend, f"{bend_name}, handed over as this kernel reads it")
+    builder.tet_materials = [tuple(m) for m in tet_m]
+    builder.tri_materials = [tuple(m) for m in tri_m]
+    builder.edge_bending_properties = [tuple(m) for m in edge_m]
+
+
+def assign_particle_radii(builder, stage, fallback, report=None):
+    """Give every body's particles that body's own contact size, in the builder; -> {body: r}.
+
+    Newton's importer reads neither `newton:particleRadius` nor a thickness, and one
+    `default_particle_radius` covered every body of the asset, so a loaded polybag's filling
+    (2 mm) got its film's 3 mm. Done at the builder stage, before the runner lifts anything:
+    there each body's authored points are in the particle array at their authored coordinates
+    (the fact `_already_built` relies on), and the count has to match, or this refuses rather
+    than sizing some of a body.
+    """
+    q = np.asarray(builder.particle_q, dtype=np.float64)
+    radii = np.asarray(builder.particle_radius, dtype=np.float64)
+    where = {tuple(np.round(p, 6)): i for i, p in enumerate(q)}
+    sizes = {}
+    for kind, sim, _render in bodies(stage):
+        size = contact_size_of(stage, kind, sim)
+        if size is None:
+            size = fallback
+        points = np.asarray(UsdGeom.PointBased(sim).GetPointsAttr().Get(), dtype=np.float64)
+        index = [where.get(tuple(np.round(p, 6))) for p in points]
+        lost = sum(i is None for i in index)
+        if lost:
+            raise SystemExit(f"{sim.GetPath()}: {lost} of its {len(points)} authored points are not "
+                             f"in the builder at their authored coordinates; its contact size cannot "
+                             f"be assigned")
+        radii[index] = size
+        sizes[str(sim.GetPath())] = size
+    builder.particle_radius = [float(r) for r in radii]
+    print("[baseline] particle radius per body: "
+          + "; ".join(f"{path} {size * 1000:.2f} mm" for path, size in sizes.items()))
+    if report is not None:
+        for path, size in sizes.items():
+            report[f"particle_radius {path}"] = (size, "this body's own contact size, from its material")
+    return sizes
 
 
 def simulated_kind(prim):
@@ -147,6 +324,10 @@ def why_not_runnable(stage, asset_name="", most=None, needs=None):
         declared = ", ".join(sorted({kind for kind, _ in found}))
         return (f"{name} declares a {declared} body only, and this experiment means something for "
                 f"a {' or '.join(sorted(needs))} body; refused rather than answered about nothing")
+    for kind, prim in found:
+        reason = missing_material(stage, kind, prim)
+        if reason:
+            return f"{name}: {reason}"
     return None
 
 
@@ -199,10 +380,8 @@ def add_surface(builder, stage, prim, report=None):
     shear = _value(material, "physics:shearStiffness")
     density = _value(material, "physics:density")
     if thickness is None:
-        thickness = DEFAULT_CLOTH_THICKNESS
-        if report:
-            report["thickness"] = (thickness, f"{material.GetPath()} authors none; Newton 1.5.0's "
-                                              f"own default for volumetric values without one")
+        raise SystemExit(f"{material.GetPath()} states no physics:thickness; a surface body is "
+                         f"refused before this, so a caller reached here without asking")
     tri_ke = stretch * thickness if stretch is not None else None
     edge_ke = bend * thickness ** 3 if bend is not None else None
     areal_density = density * thickness if density is not None else None

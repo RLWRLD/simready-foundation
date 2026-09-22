@@ -33,6 +33,9 @@ WITHOUT_A_VERDICT = (
     # machine: the patterns above claim it first when both are in the log.
     ("Failed to allocate", "out of memory",
      "the device could not allocate, with no fault before it: the machine, not the asset"),
+    ("the PhysX copy", "copy refused",
+     "the PhysX copy of the asset failed parity or could not be written; PhysX never ran"),
+    ("timed out", "timed out", "the cell exceeded its time limit"),
 )
 
 
@@ -62,13 +65,19 @@ def verdict_of(record, cell):
     """
     if record.get("diverged"):
         return "diverged"
+    if record.get("outcome"):
+        return record["outcome"]
     if record.get("verdict") not in (None, "fail", "pass"):
         return record["verdict"]
+    # A run that ended without a RESULT line says how in `error` (its log's last lines, or the
+    # harness's own reason); it is classified on that and on nothing else in the log.
     log = cell / "run.log"
-    if record.get("message") == "no result" and log.is_file():
-        text = log.read_text(errors="ignore")
+    ending = record.get("error")
+    if ending is None and record.get("message") == "no result" and log.is_file():
+        ending = "\n".join(l for l in log.read_text(errors="ignore").splitlines() if l.strip())[-1200:]
+    if ending is not None:
         for needle, word, _ in WITHOUT_A_VERDICT:
-            if needle in text:
+            if needle in ending:
                 return word
         return "no result"
     # `pass`/`fail` alone means the runner printed a RESULT line and the harness graded it; the
@@ -109,7 +118,7 @@ def numbers(found, experiment, assets, envs, keys):
 # cell recorded is left out, so one list serves every experiment.
 KEYS = ("fell_mm", "thickness_mm", "height_kept", "below_floor_mm", "first_frame_x",
         "p99_speed", "max_speed", "indented_mm", "compressed_mm", "compressed_frac",
-        "recovered_frac", "soft_contacts", "seconds")
+        "recovered_frac", "pressed_nodes", "seconds")
 
 
 def main():
@@ -138,13 +147,15 @@ def main():
         if rows:
             out += ["<details><summary>measurements</summary>", "", rows, "", "</details>", ""]
 
-    without = {(a, e, x): v for (a, e, x), (v, _) in found.items()
+    without = {(a, e, x): (v, rec) for (a, e, x), (v, rec) in found.items()
                if v in {w for _, w, _ in WITHOUT_A_VERDICT} | {"no result"}}
     if without:
         out += ["## cells that reached no verdict", ""]
         why = dict((w, s) for _, w, s in WITHOUT_A_VERDICT)
-        for (a, e, x), v in sorted(without.items()):
-            out.append(f"- `{a}` / `{e}` / `{x}`: **{v}** -- {why.get(v, 'see its run.log')}")
+        for (a, e, x), (v, rec) in sorted(without.items()):
+            last = (rec.get("error") or "").strip().splitlines()
+            said = f" -- `{last[-1][:160]}`" if last else ""
+            out.append(f"- `{a}` / `{e}` / `{x}`: **{v}** -- {why.get(v, 'see its run.log')}{said}")
         out.append("")
 
     refused = {k: rec for k, (v, rec) in found.items() if v == "refused"}

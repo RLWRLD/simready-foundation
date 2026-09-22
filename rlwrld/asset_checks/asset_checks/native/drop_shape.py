@@ -17,23 +17,37 @@ from the numbers here.
 # the asset, because a sheet has no height and would then never be dropped at all.
 DROP_HEIGHT = 0.05
 
-# What counts as a pass, as fractions of the drop and of the asset's own size.
+# What counts as a pass, as a fraction of the drop and in the asset's own contact sizes.
 MIN_FALL_OF_DROP = 0.5
-TUNNEL_DEPTH_OF_HEIGHT = 0.05
+# Through the floor means past the contact's reach. A penalty contact exists only inside the band
+# the run set around the floor (`contact_margin`: the asset's own size, the indentation to cover,
+# a substep of the fall); a node deeper than that has left it and nothing will bring it back. So
+# the band is the threshold, and the runner passes the one it actually set. It was two contact
+# sizes, and before that a twentieth of the asset's height -- the first called a pressed banana's
+# 1.9 mm of give inside a 6.5 mm band "through", the second was nothing for a sheet.
 # A speed is judged against a speed. The drop itself gives one -- what the asset is travelling at
 # when it arrives -- and that exists for any asset, including a sheet whose height is zero. The
 # height-scaled threshold this replaces collapsed to nothing for a sheet, and then a cloth lying
 # perfectly still at 1 mm/s read as `never-settled`.
 SETTLED_OF_IMPACT = 0.02
 GRAVITY = 9.81
-# Below this much of its authored height the asset is a sheet, and the fraction of height it kept
-# is not a number that means anything.
-FLAT_OF_HEIGHT = 0.1
 
 
 def impact_speed(clearance):
     """How fast a fall through `clearance` leaves the asset travelling when it lands."""
     return (2.0 * GRAVITY * max(clearance, 0.0)) ** 0.5
+
+
+def below_floor(lowest_z, contact_size):
+    """How far the lowest node sits below where a resting node sits.
+
+    A resting node's centre is one contact size above the floor plane -- the particle's radius on
+    Newton, the rest offset on PhysX -- so that is the zero, and the plane itself is one contact
+    size down. One definition for both experiments and both engines, because it was four: each
+    runner subtracted something different, and the same lowest node read 0 on two of them and one
+    contact size on the other two, against one threshold.
+    """
+    return max(0.0, contact_size - lowest_z)
 
 
 def free_fall(fps):
@@ -93,7 +107,7 @@ def check_free_fall(fallen, fps, clearance, tolerance=0.05):
     return ratio, f"{measured}: the frame is the time it claims"
 
 
-def verdict(finite, fell, clearance, below, height, speed, contact_size, extent=None):
+def verdict(finite, fell, clearance, below, height, speed, contact_size, band, extent=None):
     """What the run showed.
 
     `extent` is how tall the asset ended up. A dropped body cannot end taller than the room it was
@@ -109,12 +123,10 @@ def verdict(finite, fell, clearance, below, height, speed, contact_size, extent=
     height is lifted by nothing, and reading the lift as the drop made every threshold built on it
     collapse to zero, so a cloth that had settled perfectly read `never-settled`.
 
-    `contact_size` is the one engine quantity this takes, and only as a floor under the one
-    threshold that is a distance: a depth written purely as a fraction of the asset's height is
-    zero for a sheet, and a resting particle's centre sits one contact size above the floor, so
-    that is the smallest distance the experiment can meaningfully ask about. It is not a floor
-    under the speed -- a distance is not a speed, and using it as one is what made a still cloth
-    fail.
+    `contact_size` scales the room an asset may end up in; `band` is the contact band the run
+    set around the floor, and `below` (from `below_floor`) past it is a node the contact has
+    lost. Neither is a floor under the speed -- a distance is not a speed, and using it as one is
+    what made a still cloth fail.
     """
     if not finite:
         return "diverged"
@@ -122,7 +134,7 @@ def verdict(finite, fell, clearance, below, height, speed, contact_size, extent=
         return "flew-apart"
     if fell < MIN_FALL_OF_DROP * clearance:
         return "never-fell"
-    if below > max(TUNNEL_DEPTH_OF_HEIGHT * height, 2.0 * contact_size):
+    if below > band:
         return "through-the-floor"
     if speed > SETTLED_OF_IMPACT * impact_speed(clearance):
         return "never-settled"
@@ -134,9 +146,10 @@ def height_kept(settled_height, authored_height, contact_size):
 
     Not a pass or a fail: a soft body is supposed to spread under its own weight, and how much is
     the physics. But a solver that reads no material at all flattens to the contact scale, and
-    without this in the table that collapse is invisible beside a verdict of `pass`.
+    without this in the table that collapse is invisible beside a verdict of `pass`. An asset
+    no taller than its own contact band is a sheet, and has no height to keep a fraction of.
     """
-    if authored_height <= max(FLAT_OF_HEIGHT * authored_height, 2.0 * contact_size):
+    if authored_height <= 2.0 * contact_size:
         return None
     return settled_height / authored_height
 

@@ -45,6 +45,19 @@ ENVIRONMENTS = {
     )
 }
 
+def engine_name(env):
+    """What a person types for this environment's engine: `physx`, `newton1.2`, `newton1.5`.
+
+    The PhysX on the newest Isaac is plainly `physx`; a PhysX on an older Isaac carries its
+    Isaac version so it is never mistaken for it. That is the rule, rather than the version
+    literal that was written in two files.
+    """
+    if env.engine == "physx":
+        newest = max(e.isaac for e in ENVIRONMENTS.values() if e.engine == "physx")
+        return "physx" if env.isaac == newest else f"physx{env.isaac}"
+    return "newton" + env.newton.rstrip(".")
+
+
 DEFAULT_ENVIRONMENTS = ("physx", "newton12", "newton15")  # the rigid comparison; the rest are opt-in
 
 

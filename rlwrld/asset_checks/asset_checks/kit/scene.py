@@ -154,9 +154,9 @@ DEFAULT_NEWTON_SOLVER = "mujoco"  # what Isaac's Newton stage builds when no sce
 
 # What an asset declares itself to be, by the API schemas on its geometry. A deformable is not a
 # rigid body with soft settings: it is particles, and only a solver that integrates particles can
-# run it. The sim schemas are the AOUSD proposal's public names, which Newton's importer reads.
-DEFORMABLE_SIM_API = ("PhysicsSurfaceDeformableSimAPI", "PhysicsVolumeDeformableSimAPI",
-                      "PhysicsCurvesDeformableSimAPI")
+# run it. Which prims are simulated deformables is `native/usd_deformable.simulated_kind`'s rule
+# -- one rule, because this file had a name table and that one had a suffix rule, and a bare
+# TetMesh was "nothing to simulate" here and a volume there.
 SOLVER_SIMULATES = {  # measured, not assumed: MuJoCo refuses a stage whose bodies are particles
     "physx": {"rigid", "deformable"},   # one engine, both kinds, no solver to choose
     "mujoco": {"rigid"},                # MuJoCo-Warp is a rigid-body engine
@@ -169,14 +169,13 @@ def asset_kinds(stage, root_path):
     """{"rigid"} / {"deformable"} / both / empty -- what the asset's own schemas declare it to be."""
     from pxr import Usd, UsdPhysics
 
-    from asset_checks.kit.reading import raw_api_schemas
+    from asset_checks.native import usd_deformable
 
     kinds = set()
     for prim in Usd.PrimRange(stage.GetPrimAtPath(root_path), Usd.TraverseInstanceProxies()):
         if prim.HasAPI(UsdPhysics.RigidBodyAPI):
             kinds.add("rigid")
-        applied = set(raw_api_schemas(prim))
-        if applied.intersection(DEFORMABLE_SIM_API):
+        if usd_deformable.simulated_kind(prim) is not None:
             kinds.add("deformable")
     return kinds
 

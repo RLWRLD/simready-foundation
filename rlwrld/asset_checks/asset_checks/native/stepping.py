@@ -30,3 +30,6 @@ graph colouring, XPBD's compliance, PhysX's collision offsets all come from that
 documentation and examples, and are not touched by this.
 """
 SUBSTEPS = 32
+# The recorded frame rate, for every runner: a frame is 1/FPS of simulated time and one video
+# frame. It was the default of four separate `--fps` arguments.
+FPS = 60.0

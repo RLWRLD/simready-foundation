@@ -43,12 +43,13 @@ import stepping
 import press_shape
 import recording
 import usd_deformable
-from newton_drop import (CONTACT, ITERATIONS,
-                         CONTACT_STIFFNESS_OF_MATERIAL, CONTACT_DAMPING_RATIO, material_stiffness,
-                         contact_damping, damping_as_the_kernel_reads_it,
+from newton_drop import (ITERATIONS, CONTACT_DAMPING_RATIO, contact_stiffness, solver_reads,
+                         contact_damping, damping_as_the_kernel_reads_it, membrane_as_springs,
+                         element_damping_as_the_kernel_reads_it,
+                         full_surface_contact,
                          colour_for_vbd,
                          XPBD_MAX_RELAXATION, auto_radius,
-                         contact_material, contact_margin, deformable_kind,
+                         contact_material, contact_margin,
                          relaxation_is_a_jacobi_factor,
                          solver_elements, xpbd_relaxation)
 
@@ -56,7 +57,7 @@ PLATE_BODY = 0        # the only body in the scene
 
 
 def build(asset, solver_name, iterations, radius, margin, full_surface=True,
-          substeps=stepping.SUBSTEPS, fps=60.0):
+          substeps=stepping.SUBSTEPS, fps=stepping.FPS):
     measure = newton.ModelBuilder()
     measure.add_usd(Usd.Stage.Open(asset))
     # Where this Newton's importer has no path for what the asset declares -- 1.2.1 knows nothing
@@ -92,7 +93,12 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # volume deformable takes `default_particle_radius`; a cloth's constructor sets its own from
     # the declared shell thickness and ignores it. Reading it back is the only way the contact
     # margin, the plate's size and the landing tolerance are all talking about the same number.
-    radius = float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
+    sizes = usd_deformable.assign_particle_radii(builder, stage, radius, chosen)
+    usd_deformable.carry_material_damping(builder, stage,
+                                          element_damping_as_the_kernel_reads_it(solver_name), chosen)
+    # Every scene length below -- the contact band, the plate, the landing tolerance -- is sized
+    # from the coarsest body, so that no body's contact is narrower than its own particles.
+    radius = max(sizes.values()) if sizes else float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
     if built:
         print(f"[press] this Newton's importer did not build {len(built)} of the asset's "
               f"bodies; built from the asset's declaration instead: {built}")
@@ -141,22 +147,16 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
                           cfg=newton.ModelBuilder.ShapeConfig(density=1000.0),
                           color=(0.25, 0.45, 0.85))
 
+    membrane_as_springs(builder, solver_name, 1.0 / (fps * substeps), chosen)
     if solver_name == "vbd":
         colour_for_vbd(builder)
     model = builder.finalize()
-    kind = deformable_kind(model)
-    for name, value in CONTACT[solver_name].items():
-        setattr(model, name, value)
-        chosen[name] = (value, f"penalty numerics for {solver_name}, from its own shipped examples")
-    # A contact softer than the material yields instead of the material: the plate sinks in and
-    # the asset barely moves. Newton's grasping example sets the contact to twice its duck's shear
-    # modulus, and this asset's own material is the scale here.
-    model.soft_contact_ke = max(model.soft_contact_ke,
-                                CONTACT_STIFFNESS_OF_MATERIAL * material_stiffness(model))
+    model.soft_contact_ke = contact_stiffness(model)
     chosen["soft_contact_ke"] = (model.soft_contact_ke,
-                                 f"{CONTACT_STIFFNESS_OF_MATERIAL:g}x the asset's own stiffness where that "
-                                 f"is higher than {solver_name}'s example floor, so the contact does not "
-                                 f"give where the material should")
+                                 "N/m per contact: the asset's own material at its own resolution "
+                                 "(k_mu * 2r for a volume, tri_ke for a membrane), stiffest body; "
+                                 + (f"{solver_name} reads it" if solver_reads(solver_name, "soft_contact_ke")
+                                    else f"{solver_name} reads no contact stiffness at all"))
     damping = contact_damping(model)
     model.soft_contact_kd = damping_as_the_kernel_reads_it(damping, model.soft_contact_ke)
     chosen["soft_contact_kd"] = (model.soft_contact_kd,
@@ -188,14 +188,9 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # plane hangs off body -1 and needs no per-body list -- but the plate, which is a body,
     # generates no contact at all and slides straight through the deformable.
     kwargs = {"broad_phase": "nxn", "soft_contact_margin": margin}
-    import inspect
-    # Newton 1.5's VBD can meet the surface between particles, not only the particles; 1.2.1 has
-    # no such parameter and SolverXPBD refuses it. It is the engines' real difference and it is
-    # on by default, but it changes the answer enough that a like-for-like comparison needs to be
-    # able to switch it off -- so the run always says which it used.
-    full = (full_surface and solver_name == "vbd"
-            and "enable_rigid_soft_full_surface_contact" in inspect.signature(
-                newton.CollisionPipeline.__init__).parameters)
+    # It changes the answer enough that a like-for-like comparison needs to be able to switch it
+    # off, so the run always says which it used.
+    full = full_surface_contact(solver_name, full_surface)
     if full:
         kwargs["enable_rigid_soft_full_surface_contact"] = True
     print(f"[press] full-surface soft contact: {full}")
@@ -220,7 +215,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
         solver = newton.solvers.SolverVBD(
             model, iterations=iterations,
             particle_enable_self_contact=self_collision,
-            particle_self_contact_radius=radius, particle_self_contact_margin=radius * 2.0,
+            particle_self_contact_radius=radius, particle_self_contact_margin=margin,
             rigid_body_particle_contact_buffer_size=max(256, model.particle_count))
     else:
         relaxation = (xpbd_relaxation(model.tet_count, model.particle_count)
@@ -239,8 +234,9 @@ def main():
     ap.add_argument("--solver", default="vbd", choices=("vbd", "xpbd"))
     ap.add_argument("--iterations", type=int, default=ITERATIONS)
     ap.add_argument("--substeps", type=int, default=0)
-    ap.add_argument("--fps", type=float, default=60.0)
-    ap.add_argument("--seconds", type=float, default=4.0)
+    ap.add_argument("--fps", type=float, default=stepping.FPS)
+    ap.add_argument("--seconds", type=float, required=True,
+                help="simulated seconds: the experiment's own SECONDS, which run.py passes")
     ap.add_argument("--radius", default="auto")
     ap.add_argument("--margin", type=float, default=0.0,
                     help="soft_contact_margin; 0 derives it from the asset's particle radius")
@@ -255,15 +251,15 @@ def main():
         args.asset, args.solver, args.iterations, args.radius, args.margin,
         not args.no_full_surface, substeps, args.fps)
     frames = int(args.seconds * args.fps)
-    # settle, descend, hold, lift, watch -- in fifths of the run.
-    phase = frames // 5
+    settle_at, recover_at = press_shape.settle_frame(frames), press_shape.recovery_frame(frames)
     tape = None
     if args.usd:
         tape = recording.Recording(args.usd, int(args.fps), frames,
                                    np.asarray(model.particle_q.numpy()),
                                    solver_elements(model, kinds), asset=args.asset,
                                    sim_prim_path=sim_path, plate=plate_half,
-                                   plate_centre=plate_centre)
+                                   plate_centre=plate_centre,
+                                   ground_half=recording.ground_half(model.particle_q.numpy()))
 
     state_0, state_1, control = model.state(), model.state(), model.control()
     contacts = pipeline.contacts()
@@ -286,19 +282,10 @@ def main():
           f"{args.iterations} iterations x {substeps} substeps")
     start_top = lowest_top = bottom_z = None
     deepest, recovered, contact_peak, plate_peak, settled_height = 0.0, None, 0, 0, None
-    depth = None
+    depth, settled, lowest_q, finite = None, None, None, True
     last_plate_z = start_z
     for frame in range(frames):
-        if frame < phase:
-            plate_z = start_z
-        elif frame < 2 * phase:
-            plate_z = start_z + (bottom_z - start_z) * (frame - phase) / phase
-        elif frame < 3 * phase:
-            plate_z = bottom_z
-        elif frame < 4 * phase:
-            plate_z = bottom_z + (start_z - bottom_z) * (frame - 3 * phase) / phase
-        else:
-            plate_z = start_z
+        plate_z = press_shape.plate_height(frame, frames, start_z, bottom_z)
         speed = (plate_z - last_plate_z) * args.fps
         last_plate_z = plate_z
         # Newton's grasping example rebuilds SolverVBD's BVH once per frame, so this does too.
@@ -317,7 +304,8 @@ def main():
         q = np.asarray(state_0.particle_q.numpy())
         if not np.isfinite(q).all():
             print(f"[press] diverged at {frame / args.fps:.2f}s")
-            return
+            finite = False
+            break
         # A press that generated no contact is a different failure from a press the asset
         # resisted, and the two look identical in the heights alone. Counting all soft contacts
         # is not enough either: an asset resting on the floor produces hundreds of them whatever
@@ -330,13 +318,14 @@ def main():
                 shapes = np.asarray(contacts.soft_contact_shape.numpy())[:total]
                 plate_peak = max(plate_peak, int((shapes == plate_shape).sum()))
         top_now = float(q[:, 2].max())
-        if frame == phase - 1:
+        if frame == settle_at:
             # Measure the asset only once it has settled under gravity. Reading its height at
             # frame zero is reading the pose its author happened to save: this banana loses
             # 16 mm just lying down, which a press measured from frame zero would report as
             # compression it never caused -- and it aims the plate at a height the asset no
             # longer has, so the plate stops in the air and presses nothing at all.
             start_top = lowest_top = top_now
+            settled = lowest_q = q.copy()
             floor_now = float(q[:, 2].min())
             settled_height = top_now - floor_now
             # The asset has stopped moving; press where it actually is.
@@ -349,9 +338,10 @@ def main():
                   f"plate will indent it {depth * 1000:.1f} mm, ")
         if start_top is None:
             continue
-        lowest_top = min(lowest_top, top_now)
-        deepest = max(deepest, -float(q[:, 2].min()))
-        if frame >= 4 * phase + phase // 2:
+        if top_now < lowest_top:
+            lowest_top, lowest_q = top_now, q.copy()
+        deepest = max(deepest, press_shape.below_floor(float(q[:, 2].min()), radius))
+        if frame >= recover_at:
             recovered = top_now
         if tape is not None:
             tape.frame(frame, q, plate_z=plate_z)
@@ -361,16 +351,21 @@ def main():
             print(f"[press] t={frame / args.fps:5.2f}s  plate_underside {plate_z - thickness / 2.0:7.4f}  "
                   f"top {top_now:7.4f}  floor {float(q[:, 2].min()):7.4f}", flush=True)
 
-    compressed = start_top - lowest_top
+    compressed = (start_top - lowest_top) if start_top is not None else 0.0
     recovery = press_shape.recovery_fraction(recovered, lowest_top, compressed, radius)
-    verdict = press_shape.verdict(plate_peak, compressed, height, deepest, recovery,
-                                  settled_height=settled_height, contact_size=radius)
+    pressed = (press_shape.pressed_nodes(settled, lowest_q, plate_xy, plate_half[:2], radius)
+               if settled is not None else 0)
+    verdict = press_shape.verdict(finite, pressed, compressed, settled_height or 0.0, deepest,
+                                  recovery, margin)
     print(f"[press] most soft contacts in any frame: {contact_peak}, of which {plate_peak} "
-          f"were with the plate")
+          f"were with the plate; {pressed} node(s) under the plate moved down a contact size")
     # Both runners print through press_shape, so the two engines' results are the same line with
-    # the same names in the same order -- a table built from them compares like with like.
-    print(press_shape.result_line("press", start_top, lowest_top, compressed, height, recovery,
-                                  deepest, plate_peak, verdict, indent=depth))
+    # the same names in the same order -- a table built from them compares like with like. The
+    # line is printed whatever happened, a diverged run included: a run with no RESULT line is a
+    # run the harness has to guess about.
+    print(press_shape.result_line("press", start_top or 0.0, lowest_top or 0.0, compressed,
+                                  settled_height or 0.0, recovery, deepest, pressed, verdict,
+                                  indent=depth))
     if tape is not None:
         tape.close()
         print(f"[press] wrote {args.usd}")
