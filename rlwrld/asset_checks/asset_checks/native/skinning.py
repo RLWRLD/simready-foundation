@@ -29,22 +29,39 @@ def _as_elements(elements):
     return elements
 
 
-def surface_faces(elements):
-    """The triangles to draw for these elements.
+def surface_faces(*element_arrays):
+    """The triangles to draw for these elements, which may be several arrays of either width.
 
     For tetrahedra that is every face exactly one of them owns -- drawing all four faces of every
     tetrahedron draws the inside too, and the result reads as a lump rather than as the object.
     A triangle mesh is already its own surface.
+
+    Several arrays because an asset may be more than one body: a loaded polybag is a film (a
+    surface) around its contents (a volume), and both are in one model indexed off one particle
+    array, so their faces belong in one drawn mesh. A face that two of the arrays both name is
+    drawn once -- Newton's importer already gives a volume's boundary as triangles as well as
+    tetrahedra, so without that the same skin would be drawn twice.
     """
-    elements = _as_elements(elements)
-    if elements.shape[1] == TRI:
-        return [tuple(int(i) for i in tri) for tri in elements]
-    counts = {}
-    for tet in elements:
-        for face in ((0, 1, 2), (0, 2, 3), (0, 3, 1), (1, 3, 2)):
-            key = tuple(sorted(int(tet[i]) for i in face))
-            counts[key] = counts.get(key, 0) + 1
-    return [face for face, n in counts.items() if n == 1]
+    seen, faces = set(), []
+    for elements in element_arrays:
+        if elements is None or len(elements) == 0:
+            continue
+        elements = _as_elements(elements)
+        if elements.shape[1] == TRI:
+            found = [tuple(int(i) for i in tri) for tri in elements]
+        else:
+            counts = {}
+            for tet in elements:
+                for face in ((0, 1, 2), (0, 2, 3), (0, 3, 1), (1, 3, 2)):
+                    key = tuple(sorted(int(tet[i]) for i in face))
+                    counts[key] = counts.get(key, 0) + 1
+            found = [face for face, n in counts.items() if n == 1]
+        for face in found:
+            key = tuple(sorted(face))
+            if key not in seen:
+                seen.add(key)
+                faces.append(face)
+    return faces
 
 
 def _tet_weights(points, corners):

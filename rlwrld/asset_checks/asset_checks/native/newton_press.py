@@ -82,7 +82,9 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     builder = newton.ModelBuilder()
     builder.default_particle_radius = radius
     stage = Usd.Stage.Open(asset)
-    usd_deformable.one_body(stage, asset)   # the same refusal PhysX gives
+    _refusal = usd_deformable.why_not_runnable(stage, asset)   # any number of bodies
+    if _refusal:
+        raise SystemExit(_refusal)
     builder.add_usd(stage)
     built = usd_deformable.add_missing(builder, asset, chosen)
     # The radius the run uses is the one the builder ended up with, not the one asked for. A
@@ -93,7 +95,11 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     if built:
         print(f"[press] this Newton's importer produced nothing; built from the asset's "
               f"declaration instead: {built}")
-    sim_path = next((str(prim.GetPath()) for _, prim in usd_deformable.find(stage)), None)
+    # Which prims the solver simulates and what each is, so the recording can hide the
+    # asset's still copy of each and bind the right render mesh to the right body.
+    simulated = usd_deformable.find(stage)
+    kinds = [kind for kind, _ in simulated]
+    sim_path = next((str(prim.GetPath()) for _, prim in simulated), None)
     # Rest on the floor rather than fall onto it: this test is about the plate, not the drop.
     q = np.asarray(builder.particle_q, dtype=np.float64)
     q[:, 2] += radius - q[:, 2].min()
@@ -215,7 +221,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
                       if relaxation_is_a_jacobi_factor() else XPBD_MAX_RELAXATION)
         print(f"[press] soft_body_relaxation {relaxation:.4f}")
         solver = newton.solvers.SolverXPBD(model, iterations=iterations, soft_body_relaxation=relaxation)
-    return (model, solver, pipeline, radius, height, start_z, thickness, sim_path,
+    return (model, solver, pipeline, radius, height, start_z, thickness, sim_path, kinds,
             (footprint[0] * press_shape.PLATE_FOOTPRINT,
              footprint[1] * press_shape.PLATE_FOOTPRINT, thickness / 2.0), margin, plate_shape,
             centre)
@@ -238,7 +244,7 @@ def main():
     args = ap.parse_args()
 
     substeps = args.substeps or stepping.SUBSTEPS
-    (model, solver, pipeline, radius, height, start_z, thickness, sim_path, plate_half,
+    (model, solver, pipeline, radius, height, start_z, thickness, sim_path, kinds, plate_half,
      margin, plate_shape, plate_centre) = build(
         args.asset, args.solver, args.iterations, args.radius, args.margin,
         not args.no_full_surface, substeps, args.fps)
@@ -248,8 +254,9 @@ def main():
     tape = None
     if args.usd:
         tape = recording.Recording(args.usd, int(args.fps), frames,
-                                   np.asarray(model.particle_q.numpy()), solver_elements(model),
-                                   asset=args.asset, sim_prim_path=sim_path, plate=plate_half,
+                                   np.asarray(model.particle_q.numpy()),
+                                   solver_elements(model, kinds), asset=args.asset,
+                                   sim_prim_path=sim_path, plate=plate_half,
                                    plate_centre=plate_centre)
 
     state_0, state_1, control = model.state(), model.state(), model.control()
