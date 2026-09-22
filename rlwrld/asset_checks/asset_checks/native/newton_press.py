@@ -93,8 +93,8 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # margin, the plate's size and the landing tolerance are all talking about the same number.
     radius = float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
     if built:
-        print(f"[press] this Newton's importer produced nothing; built from the asset's "
-              f"declaration instead: {built}")
+        print(f"[press] this Newton's importer did not build {len(built)} of the asset's "
+              f"bodies; built from the asset's declaration instead: {built}")
     # Which prims the solver simulates and what each is, so the recording can hide the
     # asset's still copy of each and bind the right render mesh to the right body.
     simulated = usd_deformable.find(stage)

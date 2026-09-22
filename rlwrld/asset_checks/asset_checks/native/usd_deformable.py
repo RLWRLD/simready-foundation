@@ -212,16 +212,40 @@ def add_surface(builder, stage, prim, report=None):
             "tri_ke": tri_ke, "edge_ke": edge_ke, "density": areal_density, "particle_radius": radius}
 
 
+def _already_built(builder, points):
+    """Is this body's geometry already in the builder? Asked of its own first vertex.
+
+    At build time the importer has not moved anything, so a body it imported is in the particle
+    array at the coordinates the asset authored. Matching one authored point is enough to tell
+    "this body is in there" from "this body is missing", and it does not care what order the
+    importer used or how many other bodies there are.
+    """
+    if not builder.particle_count or points is None or not len(points):
+        return False
+    q = np.asarray(builder.particle_q, dtype=np.float64)
+    first = np.asarray(points[0], dtype=np.float64)
+    return bool((np.abs(q - first).max(axis=1) < 1e-9).any())
+
+
 def add_missing(builder, asset, report=None):
     """Whatever the importer left out, built the way the engine's own examples build it.
 
     Returns a list of what was added; empty means the importer had already covered everything.
+
+    Asked per body, not once for the whole asset. "The importer produced nothing" was the test,
+    and it is wrong for an asset that is more than one body: Newton 1.2.1 imports the *volume* of
+    a loaded polybag and knows nothing of `PhysicsSurfaceDeformableSimAPI`, so the film was
+    skipped because the filling was there, and the model was a bag of cotton with no bag. That is
+    the silent kind of wrong -- 10932 particles where the asset declares 18704 -- and it was
+    caught downstream by a count, which is a worse place to catch it than here.
     """
-    if builder.particle_count:
-        return []
     stage = Usd.Stage.Open(str(asset))
     added = []
     for kind, prim in find(stage):
-        if kind == "surface":
-            added.append(add_surface(builder, stage, prim, report))
+        if kind != "surface":
+            continue                       # both versions' importers build volumes
+        points = UsdGeom.PointBased(prim).GetPointsAttr().Get()
+        if _already_built(builder, points):
+            continue
+        added.append(add_surface(builder, stage, prim, report))
     return added

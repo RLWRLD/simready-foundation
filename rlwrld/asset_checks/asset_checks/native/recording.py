@@ -14,6 +14,7 @@ can photograph either by hiding the other and the two videos line up frame for f
 Nothing here knows which engine is calling. That is the point: a difference between two videos
 has to be a difference between two solvers, not between two recorders.
 """
+import itertools
 import pathlib
 import sys
 
@@ -184,17 +185,13 @@ class Recording:
         # trusted: if the solver built them in another order, this is where it shows.
         blocks = [np.asarray(UsdGeom.PointBased(s).GetPointsAttr().Get(), dtype=np.float64)
                   for _, s, _ in found]
-        authored = np.concatenate(blocks) if blocks else self.nodes_rest
-        if len(authored) != len(self.nodes_rest):
-            raise SystemExit(f"[recording] the asset's {len(found)} simulated mesh(es) have "
-                             f"{len(authored)} points between them and the solver moved "
-                             f"{len(self.nodes_rest)}: they are not the same mesh, and binding "
-                             f"them would invent a shape")
+        order, authored = self._solver_order(blocks, [str(s.GetPath()) for _, s, _ in found])
+        where = {}
         at = 0
+        for index in order:
+            where[index], at = slice(at, at + len(blocks[index])), at + len(blocks[index])
         for index, (_kind, simulated, render) in enumerate(found):
-            own, start = blocks[index], at
-            at += len(own)
-            mine = slice(start, at)      # this body's nodes inside the one array the solver moves
+            own, mine = blocks[index], where[index]
             elements = self.element_arrays[index] if index < len(self.element_arrays) else self.elements
             if render is None or render.GetPath() == simulated.GetPath():
                 # The asset draws what it simulates -- a cloth. That same mesh, with the asset's
@@ -210,6 +207,49 @@ class Recording:
                                self._binding_for(rest, own, authored, elements, render, simulated),
                                elements, mine))
         self.visual, self.binding = (self.drawn[0][0], self.drawn[0][1]) if self.drawn else (None, None)
+
+    def _solver_order(self, blocks, names):
+        """Which body is which block of the one array the solver moves; -> (order, authored).
+
+        The asset declares its bodies in one order and the solver may build them in another:
+        Newton 1.5.0 imports a loaded polybag's film and then its filling, while 1.2.1 imports the
+        filling and `usd_deformable.add_missing` appends the film, which is the opposite. Reading
+        the declaration order as the solver's put every render mesh on the wrong body.
+
+        So it is measured. The blocks are laid out in whichever order gives every body a span of
+        its own size whose extent matches the one it was authored with -- the runner may have
+        moved the asset, but it moved it rigidly, and a translation leaves extents alone. A body
+        whose span cannot be identified raises here rather than being drawn as another body.
+        """
+        if len(blocks) <= 1:
+            authored = blocks[0] if blocks else self.nodes_rest
+            if len(authored) != len(self.nodes_rest):
+                raise SystemExit(f"[recording] {names[0] if names else 'the asset'} has "
+                                 f"{len(authored)} points and the solver moved "
+                                 f"{len(self.nodes_rest)}: not the same mesh")
+            return [0], authored
+        for order in itertools.permutations(range(len(blocks))):
+            at, ok = 0, True
+            for index in order:
+                span = self.nodes_rest[at:at + len(blocks[index])]
+                if len(span) != len(blocks[index]):
+                    ok = False
+                    break
+                want, got = np.ptp(blocks[index], axis=0), np.ptp(span, axis=0)
+                if np.abs(want - got).max() > max(1e-6, 0.02 * float(max(want.max(), 1e-9))):
+                    ok = False
+                    break
+                at += len(blocks[index])
+            if ok and at == len(self.nodes_rest):
+                print("[recording] the solver built this asset's bodies in the order "
+                      + ", ".join(names[i] for i in order))
+                return list(order), np.concatenate([blocks[i] for i in order])
+        raise SystemExit(
+            f"[recording] the solver moved {len(self.nodes_rest)} nodes and this asset's "
+            f"{len(blocks)} bodies have {sum(len(b) for b in blocks)} points "
+            f"({', '.join(f'{n}: {len(b)}' for n, b in zip(names, blocks))}); no arrangement of "
+            f"them matches what the solver holds, so which nodes belong to which body is not "
+            f"known and drawing them would invent a shape")
 
     def _binding_for(self, rest, own, authored, elements, render, simulated):
         """How each render vertex follows the nodes, or None where the two meshes are the same.

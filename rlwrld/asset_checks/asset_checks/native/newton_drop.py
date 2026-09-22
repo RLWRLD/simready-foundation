@@ -318,8 +318,8 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     # margin, the plate's size and the landing tolerance are all talking about the same number.
     radius = float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
     if built:
-        print(f"[baseline] this Newton's importer produced nothing; built from the asset's "
-              f"declaration instead: {built}")
+        print(f"[baseline] this Newton's importer did not build {len(built)} of the asset's "
+              f"bodies; built from the asset's declaration instead: {built}")
     # Which prim the solver simulates, so the recording can hide the asset's still copy of it.
     # Which prims the solver simulates and what each is, so the recording can hide the
     # asset's still copy of each and bind the right render mesh to the right body.
