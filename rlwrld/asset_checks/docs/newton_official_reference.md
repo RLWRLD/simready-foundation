@@ -267,3 +267,29 @@ volume than the meshes they contain, which is impossible.
 The deformables need none of this: the banana hands PhysX its own tetrahedra, one TetMesh that is
 both simulation and collision mesh, and the cloth is a surface deformable with one mesh. The
 separate `collision_tetmesh` only appears where PhysX has to cook tetrahedra itself.
+
+## Testing "does this solver read the material?" -- soften it, do not stiffen it
+
+The evidence quoted here for years was that multiplying the banana's stiffness by 100 moved
+Newton 1.2.1's answer by 3%. Re-measured, x100 moves *neither* version: 1.2.1 settles 3.86 -> 3.92
+mm and 1.5.0 25.59 -> 25.61. XPBD with a finite iteration count is already at its stiff limit, so
+nothing can get stiffer, and the test separates the two cases not at all.
+
+Softening does. At x0.0001 the asset's shear modulus falls from 1.71 MPa to 171 Pa:
+
+| k_mu | x1 | x0.01 | x0.0001 |
+|---|---|---|---|
+| Newton 1.2.1 XPBD, settled thickness | 4.02 mm | 3.91 | **3.96** |
+| Newton 1.5.0 XPBD, settled thickness | 25.59 mm | 24.60 | **10.89** |
+
+1.5.0 reads it and collapses; 1.2.1 does not move, exactly as its kernel says -- the lines that
+would read `materials[tid, 0]` and `[tid, 1]` are commented out and `stretching_compliance` is
+assigned the relaxation constant instead.
+
+This is why the banana flattens to 3.9 mm under 1.2.1's XPBD and 25.6 mm under 1.5.0's while both
+are handed identical inputs: the two runs log the same asset values (radius 0.00076 m, density
+1010, E 4.8 MPa, nu 0.4, each with the prim and attribute that carried it) and the same contact
+numerics (ke 75, kd 1, kf 1000, mu 0.5). The one thing set per version is `soft_body_relaxation`
+-- 0.9 against 0.0297 -- because the name means a compliance in one and a Jacobi factor in the
+other, and giving 1.2.1 the other version's value makes its tetrahedra thirty times stiffer and
+kills the run. That is a solver numeric, not the asset's material.
