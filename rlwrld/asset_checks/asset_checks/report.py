@@ -79,6 +79,13 @@ def verdict_of(record, cell):
         for needle, word, _ in WITHOUT_A_VERDICT:
             if needle in ending:
                 return word
+        # A Kit run's last lines are its shutdown, not its fault; the fault is a little earlier.
+        # The tail of the log, bounded, before giving up on a word.
+        if log.is_file():
+            tail = "\n".join(l for l in log.read_text(errors="ignore").splitlines() if l.strip())[-20000:]
+            for needle, word, _ in WITHOUT_A_VERDICT:
+                if needle in tail:
+                    return word
         return "no result"
     # `pass`/`fail` alone means the runner printed a RESULT line and the harness graded it; the
     # experiment's own word for a failure is in that line and is the more useful one.
