@@ -240,8 +240,9 @@ def summarize(rows, out):
     strips = sorted(p.name for p in (out / "compare").glob("*.mp4")) if (out / "compare").is_dir() else []
     if strips:
         lines += ["Each run is drawn twice from its recorded poses -- the asset's textured mesh (`visual`) and",
-                  "the colliders it declares (`collision`) -- and `compare/` holds one strip per asset,",
-                  f"experiment and view, environments side by side: {len(strips)} strips.", ""]
+                  "the collision shape (`collision`) -- and encoded at real time and four times slower.",
+                  f"`compare/` holds one strip per asset, experiment, view and speed, environments side",
+                  f"by side: {len(strips)} strips.", ""]
     for experiment in experiments:
         lines += [f"## {experiment}", "", "| asset | " + " | ".join(environments) + " |",
                   "|---" * (len(environments) + 1) + "|"]
@@ -326,9 +327,9 @@ def draw(bench, cell, asset, result, experiment, timeout):
     if code != 0 or not usda.exists():
         print(f"[asset_checks]   no recording written (exit {code}, see recording.log)", flush=True)
         return
-    for view, name, frames in video.draw(bench, cell, usda, experiment, timeout, ""):
-        result.setdefault("media", []).append({"filename": name, "kind": "video", "role": view})
-        print(f"[asset_checks]   {view}: {frames} frames -> {name}", flush=True)
+    for view, speed, name, frames in video.draw(bench, cell, usda, experiment, timeout, ""):
+        result.setdefault("media", []).append({"filename": name, "kind": "video", "role": view, "speed": speed})
+        print(f"[asset_checks]   {view} {speed}: {frames} frames -> {name}", flush=True)
     (cell / "result.json").write_text(json.dumps(result, indent=1))
 
 
@@ -423,11 +424,13 @@ def main():
                                  f"[asset_checks] stopping before the rest of the matrix; fix it and re-run with --resume, "
                                  f"or pass --keep-going to run it anyway")
     if not args.no_video:
+        # `asset_checks.compare`, the compositor that made the 2026-09-19 strips, on the videos
+        # drawn from the recordings: one strip per asset and experiment, per view and speed.
         for view in video.VIEWS:
-            # `asset_checks.compare`, the compositor that made the 2026-09-19 strips, on the videos
-            # drawn from the recordings: one strip per asset and experiment per view.
-            subprocess.call([str(bench / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare", str(out),
-                             "--role", view, "--envs", args.envs], env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT)})
+            for speed in video.SPEEDS:
+                subprocess.call([str(bench / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare",
+                                 str(out), "--role", view, "--speed", speed, "--envs", args.envs],
+                                env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT)})
     summarize(rows, out)
     sys.exit(1 if any(r["invalid"] for _, _, r in rows) else 0)
 
