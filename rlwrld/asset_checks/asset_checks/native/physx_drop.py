@@ -21,13 +21,15 @@ import isaacsim
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import drop_shape  # noqa: E402  (imports nothing; safe before SimulationApp)
+import physx_scene  # noqa: E402  (same: USD is imported inside `world`, not at its top)
 from isaacsim import SimulationApp
 
 ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 ap.add_argument("asset")
 ap.add_argument("--seconds", type=float, default=2.0)
 ap.add_argument("--fps", type=float, default=60.0)
-ap.add_argument("--substeps", type=int, default=4)
+ap.add_argument("--substeps", type=int, default=physx_scene.SUBSTEPS,
+                help="physics steps inside one recorded frame (physx_scene.SUBSTEPS)")
 ap.add_argument("--drop", type=float, default=drop_shape.DROP_HEIGHT)
 ap.add_argument("--usd", default=None)
 ap.add_argument("--visual-asset", default=None,
@@ -44,6 +46,7 @@ app = SimulationApp({"headless": True}, experience=EXPERIENCE)
 # exists initialises USD outside Kit, and Kit can then no longer register its own schema wrappers:
 # the run dies during startup with "extension class wrapper ... has not been created yet".
 import asset_properties  # noqa: E402
+import newton_drop  # noqa: E402  (imports no engine at module level: the contact rule lives there)
 
 import numpy as np  # noqa: E402
 import omni.timeline  # noqa: E402
@@ -99,20 +102,7 @@ stage.SetDefaultPrim(root.GetPrim())
 asset = stage.DefinePrim("/World/Asset")
 asset.GetReferences().AddReference(args.asset)
 
-scene = UsdPhysics.Scene.Define(stage, "/World/PhysicsScene")
-scene.CreateGravityDirectionAttr(Gf.Vec3f(0.0, 0.0, -1.0))
-scene.CreateGravityMagnitudeAttr(9.81)
-# A solid floor, not a sheet. Newton's `add_ground_plane` is a half-space -- infinitely thick --
-# and a zero-thickness triangle mesh is a weaker collider by construction: measured, a pressed
-# banana was squeezed 11 mm through the sheet, which says nothing about PhysX and everything
-# about the floor it was given. The box's top face is at z = 0, so the two engines' floors are
-# in the same place.
-half, depth = 2.0, 0.5
-ground = UsdGeom.Cube.Define(stage, "/World/Ground")
-ground.CreateSizeAttr(2.0)
-UsdGeom.XformCommonAPI(ground).SetScale(Gf.Vec3f(half, half, depth / 2.0))
-UsdGeom.XformCommonAPI(ground).SetTranslate(Gf.Vec3d(0.0, 0.0, -depth / 2.0))
-UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
+physx_scene.world(stage, args.fps, args.substeps)
 for _ in range(30):
     app.update()
 
@@ -167,7 +157,15 @@ if offset is None:
     offset = float(np.median(spacing.min(axis=1)) * 0.5)
     chosen["rest_offset"] = (offset, "the asset declares neither a particle radius nor a shell "
                                      "thickness; half the median distance between nodes")
-chosen["contact_offset"] = (offset * 2.0, "twice the rest offset, as Newton's contact margin is")
+# The same band Newton is given, by the same rule and from the same function: wide enough for the
+# asset's own size *and* for how far a node moves in one substep of this fall. It was twice the
+# rest offset here and `contact_margin` there, and the asymmetry surfaced the first time an asset
+# fell faster than the banana -- a 4035-tetrahedron apple sank 4.8 mm into a floor that Newton's
+# VBD held it out of completely.
+contact_offset = newton_drop.contact_margin(offset, args.substeps, args.fps, args.drop)
+chosen["contact_offset"] = (contact_offset,
+                            f"the band Newton is given too: {newton_drop.CONTACT_MARGIN_OF_RADIUS:g}x the rest "
+                            f"offset, or one substep of this fall, whichever is wider")
 asset_properties.report("physx", declared, chosen)
 # Of the five environments only Newton's VBD has a self-collision switch. The OmniPhysics
 # deformable schemas this conversion applies declare none -- their only self-collision attribute is
@@ -179,11 +177,11 @@ print(f"[physx] self-collision: the asset says {'on' if _declared else 'nothing 
       f"and this schema family has no switch to honour it with")
 collision = PhysxSchema.PhysxCollisionAPI.Apply(geometry)
 collision.CreateRestOffsetAttr(offset)
-collision.CreateContactOffsetAttr(offset * 2.0)
+collision.CreateContactOffsetAttr(contact_offset)
 for _ in range(10):
     app.update()
 print(f"[physx] raised the asset {lift * 100:.1f} cm; it is {height * 1000:.1f} mm tall, "
-      f"rest offset {offset * 1000:.2f} mm")
+      f"rest offset {offset * 1000:.2f} mm, contact offset {contact_offset * 1000:.2f} mm")
 
 SimulationManager.set_physics_sim_device("cuda")
 timeline = omni.timeline.get_timeline_interface()
@@ -229,14 +227,19 @@ if args.usd:
 
 q = start
 for frame in range(frames):
-    for _ in range(args.substeps):
-        app.update()
+    # One update per recorded frame: the scene's step rate is what puts `args.substeps` steps of
+    # physics inside it. Calling update once per substep instead ran the frame for `substeps`
+    # times its own length -- see `physx_scene` for the measurement that found it.
+    app.update()
     q = world_nodes(prim)
     if not np.isfinite(q).all():
         print(f"[physx] diverged at {frame / args.fps:.2f}s")
         break
     if tape is not None:
         tape.frame(frame, q)
+    if frame == 0:
+        print("[physx] " + drop_shape.check_free_fall(
+            float(start[:, 2].min() - q[:, 2].min()), args.fps, float(start[:, 2].min())), flush=True)
     if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
         v = simulation_mesh(prim.get_nodal_velocities()).reshape(-1, 3)
         print(f"[physx] t={frame / args.fps:5.2f}s  z [{q[:, 2].min():8.4f}, {q[:, 2].max():8.4f}]  "
