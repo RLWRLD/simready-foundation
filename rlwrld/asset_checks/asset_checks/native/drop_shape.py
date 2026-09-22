@@ -56,22 +56,38 @@ def free_fall(fps):
 
 
 def check_free_fall(fallen, fps, clearance, tolerance=0.05):
-    """-> a sentence saying the first frame was the length it claims, or raises SystemExit.
+    """Time the first frame against gravity; -> (what invalidates the run or None, a sentence).
 
     Silent when the asset cannot free-fall for a whole frame -- it is already touching the floor,
     or it hits inside the frame -- because then the fall says nothing about the frame's length.
+
+    Falling **less** than free fall is the pipeline's doing and nothing else's: gravity cannot be
+    weaker than gravity, so a short first frame means the frame is not the time it claims. That
+    raises.
+
+    Falling **more** also cannot be gravity, but two different things do it: a frame longer than
+    it claims (PhysX stepping four times per recorded frame did exactly this) and a solver that
+    puts energy in on the first step (a bag of film with no bending stiffness does it too). One
+    run cannot tell them apart, so this reports it as what it is -- a run that does not mean what
+    it says -- and names both, rather than asserting the cause it happens to have seen before.
     """
     least, most = free_fall(fps)
+    measured = (f"first frame fell {fallen * 1000:.3f} mm, free fall at {fps:g} fps is "
+                f"{least * 1000:.3f}..{most * 1000:.3f} mm")
     if clearance < most * 1.5:
-        return f"started {clearance * 1000:.1f} mm above the floor: too close to time the frame by"
-    if not least * (1.0 - tolerance) <= fallen <= most * (1.0 + tolerance):
+        return None, f"started {clearance * 1000:.1f} mm above the floor: too close to time the frame by"
+    if fallen < least * (1.0 - tolerance):
         raise SystemExit(
-            f"the first frame is not 1/{fps:g} s of simulated time: the asset fell "
-            f"{fallen * 1000:.3f} mm in it, where free fall at {GRAVITY:g} m/s^2 is "
-            f"{least * 1000:.3f}..{most * 1000:.3f} mm. It held {fallen / most:.2f} frames' worth "
-            f"of gravity, so every recorded time and every video speed is wrong by that much")
-    return (f"first frame fell {fallen * 1000:.3f} mm, free fall at {fps:g} fps is "
-            f"{least * 1000:.3f}..{most * 1000:.3f} mm: the frame is the time it claims")
+            f"the first frame is shorter than 1/{fps:g} s of simulated time: the asset fell "
+            f"{fallen * 1000:.3f} mm in it, where gravity alone gives at least {least * 1000:.3f} mm. "
+            f"Nothing an asset or a solver does makes gravity weaker, so this is the frame, and "
+            f"every recorded time and every video speed is wrong by that much")
+    if fallen > most * (1.0 + tolerance):
+        return (f"first frame moved it {fallen / most:.1f}x further than gravity can",
+                f"{measured}: {fallen / most:.2f} times the furthest gravity can take it in one "
+                f"frame. Either the frame is longer than it claims or the solver put the energy "
+                f"in; this run does not mean what it says either way")
+    return None, f"{measured}: the frame is the time it claims"
 
 
 def verdict(finite, fell, clearance, below, height, speed, contact_size):

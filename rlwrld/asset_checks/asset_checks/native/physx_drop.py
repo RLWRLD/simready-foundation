@@ -228,7 +228,7 @@ if args.usd:
     tape = recording.Recording(args.usd, int(args.fps), frames, start, elements,
                                asset=args.visual_asset, sim_prim_path=str(body.GetPath()))
 
-q = start
+q, first_frame = start, None
 for frame in range(frames):
     # One update per recorded frame: the scene's step rate is what puts `args.substeps` steps of
     # physics inside it. Calling update once per substep instead ran the frame for `substeps`
@@ -241,8 +241,9 @@ for frame in range(frames):
     if tape is not None:
         tape.frame(frame, q)
     if frame == 0:
-        print("[physx] " + drop_shape.check_free_fall(
-            float(start[:, 2].min() - q[:, 2].min()), args.fps, float(start[:, 2].min())), flush=True)
+        first_frame, said = drop_shape.check_free_fall(
+            float(start[:, 2].min() - q[:, 2].min()), args.fps, float(start[:, 2].min()))
+        print(f"[physx] {said}", flush=True)
     if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
         v = simulation_mesh(prim.get_nodal_velocities()).reshape(-1, 3)
         print(f"[physx] t={frame / args.fps:5.2f}s  z [{q[:, 2].min():8.4f}, {q[:, 2].max():8.4f}]  "
@@ -256,9 +257,11 @@ peak = float(np.abs(v).max())
 # The verdict and the line it is printed on belong to the experiment, which is why
 # they are asked for rather than written out here: the same words were spelled out
 # in both drop runners, and a pair of copies is a pair waiting to drift.
-decision = drop_shape.verdict(bool(np.isfinite(q).all()), fell,
-                              float(start[:, 2].min()), below, height,
-                              speed, offset)
+# A first frame that does not mean what it says makes every number after it unreadable, so it is
+# the verdict rather than a note beside one.
+decision = first_frame or drop_shape.verdict(bool(np.isfinite(q).all()), fell,
+                                             float(start[:, 2].min()), below, height,
+                                             speed, offset)
 kept = drop_shape.height_kept(float(q[:, 2].max() - q[:, 2].min()), height, offset)
 print(drop_shape.result_line("physx", fell, float(q[:, 2].min()), float(q[:, 2].max()),
                              below, speed, peak, decision, kept))

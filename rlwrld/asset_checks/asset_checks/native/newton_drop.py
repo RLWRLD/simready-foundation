@@ -436,6 +436,7 @@ def main():
           f"{substeps} substeps at {args.fps:g} fps")
     print(f"[baseline] contact ke {model.soft_contact_ke:.4g} kd {model.soft_contact_kd:g}")
     print(f"[baseline] starts z [{start[:, 2].min():.4f}, {start[:, 2].max():.4f}]")
+    first_frame = None
     for frame in range(frames):
         # SolverVBD keeps a bounding-volume hierarchy for collision and it does not notice the
         # scene moving on its own: Newton's grasping example rebuilds it once per frame, right
@@ -457,8 +458,9 @@ def main():
         if tape is not None:
             tape.frame(frame, q)
         if frame == 0:
-            print("[baseline] " + drop_shape.check_free_fall(
-                float(start[:, 2].min() - q[:, 2].min()), args.fps, float(start[:, 2].min())), flush=True)
+            first_frame, said = drop_shape.check_free_fall(
+                float(start[:, 2].min() - q[:, 2].min()), args.fps, float(start[:, 2].min()))
+            print(f"[baseline] {said}", flush=True)
         if frame % max(1, int(args.fps / 4)) == 0 or frame == frames - 1:
             speed = float(np.abs(np.asarray(state_0.particle_qd.numpy())).max())
             print(f"[baseline] t={frame / args.fps:5.2f}s  z [{q[:, 2].min():8.4f}, {q[:, 2].max():8.4f}]  "
@@ -473,9 +475,11 @@ def main():
     # The verdict and the line it is printed on belong to the experiment, which is why
     # they are asked for rather than written out here: the same words were spelled out
     # in both drop runners, and a pair of copies is a pair waiting to drift.
-    decision = drop_shape.verdict(bool(np.isfinite(q).all()), fell,
-                              float(start[:, 2].min()), below, height,
-                                  speed, radius)
+    # A first frame that does not mean what it says makes every number after it unreadable, so it
+    # is the verdict rather than a note beside one.
+    decision = first_frame or drop_shape.verdict(bool(np.isfinite(q).all()), fell,
+                                                 float(start[:, 2].min()), below, height,
+                                                 speed, radius)
     kept = drop_shape.height_kept(float(q[:, 2].max() - q[:, 2].min()), height, radius)
     print(drop_shape.result_line("baseline", fell, float(q[:, 2].min()), float(q[:, 2].max()),
                                  below, speed, peak, decision, kept))
