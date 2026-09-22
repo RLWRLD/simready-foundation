@@ -33,11 +33,15 @@ def press_depth(height):
     """
     return INDENT_OF_HEIGHT * height
 PLATE_THICKNESS_OF_HEIGHT = 0.25
+# ...and never thinner than this many of the asset's own contact sizes, so that an asset with no
+# height still gets a plate and a contact band. Four, because the band has to hold the asset's own
+# two-radius contact and still not reach the plate's far face.
+PLATE_OF_CONTACT = 4.0
 PLATE_FOOTPRINT = 0.6        # half-extents, as a fraction of the asset's own footprint
 PHASES = 5                   # settle, descend, hold, lift, watch -- one fifth of the run each
 
 
-def plate_thickness(height):
+def plate_thickness(height, contact_size=None):
     """How thick the plate is: the experiment's own geometry, in the asset's own units.
 
     This used to be derived from the engine's contact margin, because a plate thinner than the
@@ -47,16 +51,24 @@ def plate_thickness(height):
     `press_depth`, and a band between the two is what an engine has to arrange: wide enough for
     the indentation (0.2 of the height), no wider than the plate itself (0.25), so it never
     reaches the far face. Thicker than that and the plate is most of what the video shows.
+
+    **A fraction of the height is nothing when the asset has no height.** A cloth is 0.0 mm tall,
+    so the plate came out 0.0 mm thick and -- through `widest_usable_margin` -- capped the contact
+    band at 0.0 mm too, which is not a narrow band, it is no contact at all. Measured: the cloth
+    sank 38 mm through the floor before the plate moved, the plate chased it down to -18.4 mm, and
+    lifting flung the cloth to 37 m at 15 m/s. The asset's own contact size is the floor under
+    both, because it is the one length a sheet still has.
     """
-    return PLATE_THICKNESS_OF_HEIGHT * height
+    from_height = PLATE_THICKNESS_OF_HEIGHT * height
+    return max(from_height, PLATE_OF_CONTACT * contact_size) if contact_size else from_height
 
 
-def widest_usable_margin(height):
+def widest_usable_margin(height, contact_size=None):
     """The widest contact band an engine may use and still meet only one face of the plate."""
     # The band must not reach the plate's far face, or the asset is pushed up from above as hard
     # as down from below. One thickness is the limit, not half of one: the asset only ever meets
     # the underside, and the far face is a whole thickness beyond it.
-    return plate_thickness(height)
+    return plate_thickness(height, contact_size)
 
 
 def plate_height(frame, frames, start_z, bottom_z):
@@ -125,6 +137,12 @@ def verdict(contacts, compressed, height, deepest, recovery, settled_height=None
     another. Without it the old height rule still applies, so an older caller is not silently
     changed into a stricter one.
     """
+    # Before asking whether the experiment applies: did the run stay physical? `nothing-to-press`
+    # is an answer about the asset, and it must not be given for a run where the asset went
+    # through the floor or left the scene -- measured, it was, for a cloth that ended 37 m in the
+    # air after the plate had dragged it 38 mm under the floor.
+    if deepest > max(TUNNEL_DEPTH_OF_HEIGHT * height, 2.0 * (contact_size or 0.0)):
+        return "pushed-through-floor"
     if settled_height is not None and contact_size:
         if press_depth(settled_height) <= 2.0 * contact_size:
             return "nothing-to-press"
@@ -134,8 +152,6 @@ def verdict(contacts, compressed, height, deepest, recovery, settled_height=None
         return "no-contact"          # the plate never met the asset: not a measurement at all
     if compressed < MIN_COMPRESSION * height:
         return "did-not-deform"
-    if deepest > TUNNEL_DEPTH_OF_HEIGHT * height:
-        return "pushed-through-floor"
     if recovery is not None and recovery < MIN_RECOVERY:
         return "did-not-spring-back"
     return "pass"

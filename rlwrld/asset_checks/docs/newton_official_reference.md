@@ -293,3 +293,37 @@ numerics (ke 75, kd 1, kf 1000, mu 0.5). The one thing set per version is `soft_
 -- 0.9 against 0.0297 -- because the name means a compliance in one and a Jacobi factor in the
 other, and giving 1.2.1 the other version's value makes its tetrahedra thirty times stiffer and
 kills the run. That is a solver numeric, not the asset's material.
+
+## How a frame advances, and how many steps are in it (2026-09-22)
+
+**In Kit, `app.update()` does not mean "one substep".** Isaac's documentation: *"PhysX determines
+how many physics steps to calculate based on the TimeStepsPerSecond and the variable elapsed time
+since the last call."* One update advances the timeline by `1/timeCodesPerSecond` and PhysX takes
+`timeStepsPerSecond x elapsed` steps inside it. With the scene's rate left at its default of 60,
+calling update N times per recorded frame runs **N/60 s of simulation per frame at dt = 1/60**, not
+one frame at dt = 1/(60N).
+
+Measured, on the apple: 27.245 mm of fall in the first recorded frame, where four steps of 1/60 s
+from rest give `g*dt^2*n(n+1)/2` = 27.25 mm and the 1/60 s the frame claimed would give 1.4 to 2.7.
+Every PhysX deformable video before this played four times fast and every contact was solved on a
+step four times coarser than Newton's. `asset_checks/native/physx_scene.py` sets
+`PhysxSchema.PhysxSceneAPI.CreateTimeStepsPerSecondAttr(fps * substeps)`, reads it back, and calls
+`app.update()` **once** per recorded frame.
+
+**One step rate for every engine**, `asset_checks/native/stepping.py`: `SUBSTEPS = 32`, the finest
+any of these solvers' own examples ask for (the rigid-soft example above). Per-solver counts made
+the same experiment three different amounts of work -- measured on the apple press, PhysX walked
+towards Newton's answer as its step shrank (below floor 4.0 -> 2.6 -> 1.4 mm at 240 -> 480 -> 960 Hz
+against Newton VBD's 0.0), so a failing verdict at 240 Hz measured the number we chose. It costs
+almost nothing: 39 s at 1920 Hz against 32 s at 240 Hz, because a run is bound by what surrounds
+the step.
+
+Only the step is shared. Colouring, compliance and contact offsets still come from each engine's
+own examples.
+
+**The guard.** `drop_shape.free_fall(fps)` is what a released asset falls in one frame: between
+`g/(2*fps^2)` (infinitely many substeps) and `g/fps^2` (one), for any solver. Every drop records
+`first_frame_x`, the measured fall over `g/fps^2`. Falling *short* of that raises -- nothing an
+asset or a solver does makes gravity weaker, so only the pipeline can. Falling *long* is recorded
+and not judged: XPBD moves a bag of film 11.2x further than gravity can in its first frame, on both
+Newton versions, and then settles it perfectly.
