@@ -163,14 +163,14 @@ indent = press_shape.press_depth(height)
 # this presses the asset with both faces of the plate at once. The cap is the press experiment's;
 # the rest is `contact_margin`, the same function Newton is given.
 wanted = newton_drop.contact_margin(offset, args.substeps, args.fps, 0.0, depth=indent)
-margin = args.margin or min(wanted, press_shape.widest_usable_margin(height))
+margin = args.margin or min(wanted, press_shape.widest_usable_margin(height, offset))
 collision.CreateContactOffsetAttr(margin)
 # Reported here rather than added to `chosen`: the band is not known until the asset's height is,
 # and `asset_properties.report` has already run by then. A value that reaches the solver but not
 # the log is the thing this whole file exists to avoid.
 print(f"[physx] ours:  contact_offset = {margin:g}  -- the band Newton is given too, capped at "
-      f"{press_shape.widest_usable_margin(height) * 1000:.2f} mm so the plate does not press with both faces")
-thickness = press_shape.plate_thickness(height)
+      f"{press_shape.widest_usable_margin(height, offset) * 1000:.2f} mm so the plate does not press with both faces")
+thickness = press_shape.plate_thickness(height, offset)
 start_z = float(points[:, 2].max()) + thickness / 2.0 + offset * 2.0
 plate = UsdGeom.Cube.Define(stage, PLATE)
 plate.CreateSizeAttr(2.0)

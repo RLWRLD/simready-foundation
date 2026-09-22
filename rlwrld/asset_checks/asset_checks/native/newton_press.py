@@ -123,8 +123,8 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # is the asset's authored height, an upper bound on what it will settle to, so the band is
     # never narrower than the indentation that is coming.
     margin = margin or min(contact_margin(radius, substeps, fps, 0.0, press_shape.press_depth(height)),
-                       press_shape.widest_usable_margin(height))
-    thickness = press_shape.plate_thickness(height)
+                       press_shape.widest_usable_margin(height, radius))
+    thickness = press_shape.plate_thickness(height, radius)
     start_z = top + thickness / 2.0 + radius * 2.0
     plate = builder.add_body(xform=wp.transform(wp.vec3(centre[0], centre[1], start_z), wp.quat_identity()),
                              mass=1.0, is_kinematic=True)
