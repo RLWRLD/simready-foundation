@@ -78,21 +78,29 @@ class Recording:
         self.stage.SetFramesPerSecond(fps)
         self.stage.SetStartTimeCode(0)
         self.stage.SetEndTimeCode(max(0, frames - 1))
-        self.elements = np.asarray(elements, dtype=np.int64)
+        # One array or several: an asset may be more than one body, and they are all indexed off
+        # one particle array, so `elements` is a list of whatever each body is made of.
+        self.element_arrays = [np.asarray(e, dtype=np.int64)
+                               for e in (elements if isinstance(elements, (list, tuple)) else [elements])
+                               if e is not None and len(e)]
+        self.elements = self.element_arrays[0] if self.element_arrays else np.zeros((0, 4), np.int64)
 
-        faces = skinning.surface_faces(self.elements)
+        faces = skinning.surface_faces(*self.element_arrays)
         self.collision = UsdGeom.Mesh.Define(self.stage, COLLISION)
         self.collision.CreateFaceVertexCountsAttr(Vt.IntArray([3] * len(faces)))
         self.collision.CreateFaceVertexIndicesAttr(Vt.IntArray([i for face in faces for i in face]))
         self.collision.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*COLLISION_COLOUR)]))
         self.collision.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
 
-        self.visual = self.binding = None
+        # One entry per body that has a render mesh of its own: (the mesh to write, its binding,
+        # the elements it was bound against). A cloth draws what it simulates and has no binding.
+        self.drawn = []
+        self.visual = self.binding = None      # the first of them, for anything still asking
         # The asset's own rest pose is what a binding is made in, and it is read back from the
         # reference rather than taken from the runner, which has usually moved the nodes already.
         self.nodes_rest = np.asarray(node_points, dtype=np.float64)
         if asset:
-            self._bind_visual(asset, sim_prim_path, None)
+            self._bind_visual(asset, sim_prim_path)
 
         _ground(self.stage, ground_half)
 
@@ -136,99 +144,105 @@ class Recording:
             self.plate_edges_api = UsdGeom.XformCommonAPI(self.plate_edges)
             self.plate_api = UsdGeom.XformCommonAPI(self.plate)
 
-    def _bind_visual(self, asset, sim_prim_path, _unused):
+    def _bind_visual(self, asset, sim_prim_path=None):
+        """Reference the asset and make each simulated body carry its own render mesh.
+
+        One body or several, the same way: `usd_deformable.bodies` says what the asset asks to be
+        simulated and what it draws for each, pairing them by the parent they share -- which is
+        where UsdPhysics puts geometry belonging to one object, "a sibling to the original graphics
+        mesh". A loaded polybag is a film around its contents, two bodies in one model off one
+        particle array; picking the largest drawable in the whole asset, which is all one body ever
+        needed, would have given both of them the film.
+        """
         # A typed Xform, not a bare prim: USD's visibility computation walks ancestors through
         # UsdGeomImageable, and skips one that has no type -- an `invisible` authored there was
         # honoured by one renderer and not by another.
         source = UsdGeom.Xform.Define(self.stage, VISUAL).GetPrim()
         source.GetReferences().AddReference(str(asset))
-        # The asset's own simulated prim comes along with the reference and would sit inside the
-        # moving mesh at its rest pose. The recording already draws that geometry, moving, as
-        # /root/collision.
-        if sim_prim_path:
-            simulated = self.stage.GetPrimAtPath(f"{VISUAL}/{Sdf.Path(sim_prim_path).name}")
-            if simulated:
-                UsdGeom.Imageable(simulated).MakeInvisible()
 
-        # Which prim under the reference is the one the solver moves, and which is the one with
-        # the textures on it. They are often different -- a soft body is simulated as tetrahedra
-        # and drawn as a finer mesh -- and they are sometimes the same prim, which is what a
-        # cloth is. Both cases are the same question asked of the asset, not a special case for
-        # any one of them.
-        # Find the simulated prim inside the reference by what it *is*, not by a path. A path
-        # belongs to the file it came from: the PhysX runner knows its asset's body as
-        # /Asset/Body while the reference here is the original, where the same geometry is
-        # /World/banana. Looking the name up across files found nothing, the binding fell back to
-        # the runner's already-moved nodes, and the render mesh came out 71 mm from the thing it
-        # was supposed to follow.
-        simulated = next((q for q in Usd.PrimRange(source) if usd_deformable.is_simulated(q)), None)
-        if simulated is None and sim_prim_path:
+        # The bodies are found inside the reference by what they *are*, not by path: the PhysX
+        # runner knows its asset's body as /Asset/Body while the reference here is the original,
+        # where the same geometry is /World/banana. They are matched to the solver's elements by
+        # order, which is the order both files declare them in, and the point counts are checked
+        # rather than trusted.
+        found = usd_deformable.bodies(self.stage)
+        found = [(k, s, r) for k, s, r in found if str(s.GetPath()).startswith(VISUAL)]
+        if not found and sim_prim_path:
             simulated = self.stage.GetPrimAtPath(f"{VISUAL}/{Sdf.Path(sim_prim_path).name}")
-            if not (simulated and simulated.IsValid()):
-                simulated = None
-        drawable = [q for q in Usd.PrimRange(source)
-                    if q.IsA(UsdGeom.PointBased) and UsdGeom.PointBased(q).GetPointsAttr().Get()]
-        others = [q for q in drawable if not (simulated and q.GetPath() == simulated.GetPath())]
-        if not drawable:
+            if simulated and simulated.IsValid():
+                found = [(None, simulated, None)]
+        if not found:
             print("[recording] the asset has no drawable geometry; only the simulated surface is shown")
             self.stage.RemovePrim(source.GetPath())
             return
 
-        if others:
-            render_prim = max(others, key=lambda q: len(UsdGeom.PointBased(q).GetPointsAttr().Get()))
-            if simulated:
-                # Its points are the rest pose; the recording already draws that geometry moving.
-                UsdGeom.Imageable(simulated).MakeInvisible()
-        else:
-            # The asset draws what it simulates -- a cloth, typically. Then the visual version is
-            # that same mesh with the asset's own material on it, moving directly.
-            render_prim = simulated or drawable[0]
+        # The solver indexes every body off one particle array, so a body's elements name nodes
+        # that belong to another body -- Newton gives a volume's boundary as triangles in the same
+        # array as the film's. A binding is therefore made against *all* the nodes, in the pose the
+        # asset authored them in, which is these prims' points concatenated in the order they are
+        # declared. The count is checked against the array the runner handed over rather than
+        # trusted: if the solver built them in another order, this is where it shows.
+        blocks = [np.asarray(UsdGeom.PointBased(s).GetPointsAttr().Get(), dtype=np.float64)
+                  for _, s, _ in found]
+        authored = np.concatenate(blocks) if blocks else self.nodes_rest
+        if len(authored) != len(self.nodes_rest):
+            raise SystemExit(f"[recording] the asset's {len(found)} simulated mesh(es) have "
+                             f"{len(authored)} points between them and the solver moved "
+                             f"{len(self.nodes_rest)}: they are not the same mesh, and binding "
+                             f"them would invent a shape")
+        at = 0
+        for index, (_kind, simulated, render) in enumerate(found):
+            own, start = blocks[index], at
+            at += len(own)
+            mine = slice(start, at)      # this body's nodes inside the one array the solver moves
+            elements = self.element_arrays[index] if index < len(self.element_arrays) else self.elements
+            if render is None or render.GetPath() == simulated.GetPath():
+                # The asset draws what it simulates -- a cloth. That same mesh, with the asset's
+                # own material on it, moves directly. It shows every node, not only its own.
+                self.drawn.append((UsdGeom.PointBased(simulated), None, elements, mine))
+                print(f"[recording] {simulated.GetPath()} draws what it simulates "
+                      f"({len(own)} points), moved directly")
+                continue
+            # Its points are the rest pose; the recording already draws that geometry moving.
+            UsdGeom.Imageable(simulated).MakeInvisible()
+            rest = np.asarray(UsdGeom.PointBased(render).GetPointsAttr().Get(), dtype=np.float64)
+            self.drawn.append((UsdGeom.PointBased(render),
+                               self._binding_for(rest, own, authored, elements, render, simulated),
+                               elements, mine))
+        self.visual, self.binding = (self.drawn[0][0], self.drawn[0][1]) if self.drawn else (None, None)
 
-        rest = np.asarray(UsdGeom.PointBased(render_prim).GetPointsAttr().Get(), dtype=np.float64)
-        self.visual = UsdGeom.PointBased(render_prim)
+    def _binding_for(self, rest, own, authored, elements, render, simulated):
+        """How each render vertex follows the nodes, or None where the two meshes are the same.
 
-        # The simulated mesh's *authored* points, read from the reference rather than taken from
-        # the runner. The runner has already moved its nodes -- lifted to a drop height, or set
-        # down on the floor -- and binding against those puts every render vertex outside the
-        # elements, where they all clamp onto the nearest surface and the asset renders as a flat
-        # smear no solver produced. The authored pose is the one frame the two meshes agree in.
-        #
-        # This was fixed once and then reintroduced by a rewrite that kept the comment and
-        # dropped the code, so it is asserted below rather than trusted.
-        simulated_rest = (np.asarray(UsdGeom.PointBased(simulated).GetPointsAttr().Get(), dtype=np.float64)
-                          if simulated else self.nodes_rest)
-        if len(rest) == len(simulated_rest) and np.allclose(rest, simulated_rest, atol=1e-9):
-            # Same points: nothing to bind, and binding would only add error.
-            self.binding = None
-            print(f"[recording] the asset draws what it simulates ({len(rest)} points), moved directly")
-            return
-
-        # Both meshes are bound in the pose the asset was authored in, the one frame they are
-        # known to agree in. Binding against nodes the runner has already moved -- lifted to a
-        # drop height, or set down on the floor -- puts every vertex outside the elements and
-        # they all clamp to the nearest surface: the banana came out as a flat smear no solver
-        # produced.
-        if len(simulated_rest) <= int(self.elements.max()):
-            raise SystemExit(f"[recording] the asset's simulated mesh has {len(simulated_rest)} "
-                             f"points but the solver indexes {int(self.elements.max()) + 1}: these "
-                             f"are not the same mesh, and binding them would invent a shape")
-        # A binding made in the right pose leaves most vertices inside their element. If nearly
-        # all of them land outside, the two meshes were not in the same pose and the result would
-        # be a smear -- so it fails here rather than rendering something nobody simulated.
-        # Assert the pose directly rather than inferring it from how many vertices landed
-        # outside: that count has its own definition and its own bugs, and this is the thing
-        # that actually has to be true. A render mesh bound against nodes the runner has already
-        # moved produces a flat smear no solver computed.
-        span = max(float(np.ptp(simulated_rest, axis=0).max()), 1e-9)
-        drift = float(np.abs(rest.mean(axis=0) - simulated_rest.mean(axis=0)).max())
+        Both meshes are bound in the pose the asset was authored in, the one frame they are known
+        to agree in. Binding against nodes the runner has already moved -- lifted to a drop height,
+        or set down on the floor -- puts every vertex outside the elements and they all clamp to
+        the nearest surface: the banana came out as a flat smear no solver produced.
+        """
+        if len(rest) == len(own) and np.allclose(rest, own, atol=1e-9):
+            print(f"[recording] {render.GetPath()} is {simulated.GetPath()} ({len(rest)} points), "
+                  f"moved directly")
+            return None
+        if len(elements) and len(authored) <= int(elements.max()):
+            raise SystemExit(f"[recording] the asset has {len(authored)} simulated points but the "
+                             f"solver indexes {int(elements.max()) + 1} for {simulated.GetPath()}: "
+                             f"these are not the same mesh, and binding them would invent a shape")
+        # A binding made in the right pose leaves most vertices inside their element. Assert the
+        # pose directly rather than inferring it from how many vertices landed outside: that count
+        # has its own definition and its own bugs, and this is the thing that has to be true. The
+        # pose is asked of this body's own points -- the whole asset's centre says nothing about
+        # whether the film sits on the film.
+        span = max(float(np.ptp(own, axis=0).max()), 1e-9)
+        drift = float(np.abs(rest.mean(axis=0) - own.mean(axis=0)).max())
         if drift > 0.05 * span:
-            raise SystemExit(f"[recording] the render mesh and the simulated mesh are not in the "
-                             f"same pose -- their centres are {drift * 1000:.1f} mm apart on a "
-                             f"{span * 1000:.1f} mm asset. Binding them would invent a shape.")
-        self.binding = skinning.bind(rest, simulated_rest, self.elements)
-        print(f"[recording] bound {len(rest)} render vertices to {len(self.elements)} "
-              f"{'tetrahedra' if self.elements.shape[1] == 4 else 'triangles'} "
-              f"({self.binding['outside']} outside, carried by their nearest)")
+            raise SystemExit(f"[recording] {render.GetPath()} and {simulated.GetPath()} are not in "
+                             f"the same pose -- their centres are {drift * 1000:.1f} mm apart on a "
+                             f"{span * 1000:.1f} mm body. Binding them would invent a shape.")
+        binding = skinning.bind(rest, authored, elements)
+        print(f"[recording] bound {len(rest)} vertices of {render.GetPath().name} to "
+              f"{len(elements)} {'tetrahedra' if elements.shape[1] == 4 else 'triangles'} "
+              f"({binding['outside']} outside, carried by their nearest)")
+        return binding
 
     @staticmethod
     def _write_points(pointbased, points, time):
@@ -248,9 +262,12 @@ class Recording:
         nodes = np.asarray(node_points, dtype=np.float64)
         time = Usd.TimeCode(index)
         self._write_points(self.collision, nodes, time)
-        if self.visual is not None:
-            moved = nodes if self.binding is None else skinning.deform(self.binding, self.elements, nodes)
-            self._write_points(self.visual, moved, time)
+        for mesh, binding, elements, mine in self.drawn:
+            # A body that draws what it simulates gets its own nodes, not every body's: the film
+            # of a loaded polybag is 7772 of the 18704 the solver moves, and handing it all of
+            # them writes a point array its own faces cannot index.
+            moved = nodes[mine] if binding is None else skinning.deform(binding, elements, nodes)
+            self._write_points(mesh, moved, time)
         if self.plate is not None and plate_z is not None:
             where = Gf.Vec3d(self.plate_centre[0], self.plate_centre[1], float(plate_z))
             self.plate_api.SetTranslate(where, time)

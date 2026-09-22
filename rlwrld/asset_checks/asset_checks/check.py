@@ -58,13 +58,14 @@ stage = Usd.Stage.Open(sys.argv[1])
 kinds = sorted(asset_kinds(stage, stage.GetDefaultPrim().GetPath()))
 print('KINDS', ' '.join(kinds))
 if 'deformable' in kinds:
-    reason = usd_deformable.why_not_one_body(stage, sys.argv[1])
+    most = int(sys.argv[2]) if sys.argv[2] != 'any' else None
+    reason = usd_deformable.why_not_runnable(stage, sys.argv[1], most=most)
     if reason:
         print('REFUSE', reason)
 """
 
 
-def read_asset(bench, asset):
+def read_asset(bench, asset, drives):
     """What the asset is, and whether it is shaped like something this pipeline can run.
 
     Both answers come from the asset's own schemas, read once, in the venv that has USD. The
@@ -73,7 +74,8 @@ def read_asset(bench, asset):
     """
     out = subprocess.run(
         [str(bench / ".venv-isaac610" / "bin" / "python"), "-c",
-         READ_ASSET.format(root=str(PACKAGE_ROOT), native=str(HERE / "native")), str(asset)],
+         READ_ASSET.format(root=str(PACKAGE_ROOT), native=str(HERE / "native")),
+         str(asset), str(drives)],
         capture_output=True, text=True)
     kinds = None
     for line in out.stdout.splitlines():
@@ -118,8 +120,12 @@ def main():
     experiment = experiments.get(args.experiment)
 
     out_for_refusal = pathlib.Path(args.out).resolve() if args.out else pathlib.Path("results").resolve()
+    # How many simulated bodies this engine's runner drives. Newton builds every declared body
+    # into one model; the PhysX runners drive one and say how many that is.
+    from asset_checks.native import physx_scene
+    drives = physx_scene.BODIES if env.engine == "physx" else "any"
     try:
-        kinds = read_asset(bench, asset)
+        kinds = read_asset(bench, asset, drives)
     except SystemExit as refusal:
         # A refusal that leaves nothing behind is a refusal nobody reading the run can see: the
         # asset simply has no directory, and the report counts the assets that do. Write the

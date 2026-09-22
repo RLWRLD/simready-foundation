@@ -109,7 +109,11 @@ for _ in range(30):
     app.update()
 
 # Which mesh this asset asks to be simulated -- one, or a refusal naming the several.
-_kind, target = usd_deformable.one_body(stage, pathlib.Path(args.asset).name)
+_refusal = usd_deformable.why_not_runnable(stage, pathlib.Path(args.asset).name,
+                                          most=physx_scene.BODIES)
+if _refusal:
+    raise SystemExit(_refusal)
+_kind, target = usd_deformable.find(stage)[0]
 body = None
 for prim_ in Usd.PrimRange(asset, Usd.TraverseInstanceProxies()):
     if BODY_API in prim_.GetAppliedSchemas():

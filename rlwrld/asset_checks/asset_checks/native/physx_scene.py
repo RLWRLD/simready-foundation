@@ -22,6 +22,11 @@ physics. The rigid tests have run at 240 Hz all along (`add_physics(fps=240)`), 
 substeps is not a new number, it is that one.
 """
 GRAVITY = 9.81
+# How many simulated bodies these runners drive. One: a PhysX deformable is a
+# `DeformablePrim` over one prim, and the measurements read one nodal array. Newton builds
+# every declared body into one model off one particle array, so its runners take whatever
+# the asset has and this number is not theirs.
+BODIES = 1
 GROUND_DEPTH = 0.5     # how far the floor reaches below z = 0; it reaches recording.GROUND_HALF out
 
 

@@ -161,14 +161,38 @@ XPBD_MAX_RELAXATION = 0.9   # SolverXPBD's own default; never raise it, only low
 # the body is at rest, which is the question.
 
 
-def solver_elements(model):
-    """The elements this model is actually made of: tetrahedra for a soft body, triangles for a
-    cloth. Asking the model beats assuming, and it is the same question for any asset."""
-    if model.tet_count:
-        return model.tet_indices.numpy()
-    if model.tri_count:
-        return model.tri_indices.numpy()
-    raise SystemExit("the solver built particles but no elements; there is no surface to draw")
+def solver_elements(model, kinds=None):
+    """What each of this asset's bodies is made of, in the order the asset declares them.
+
+    Tetrahedra for a volume, triangles for a surface. Asking the model beats assuming, and it is
+    the same question for any asset -- but an asset may be more than one body, and then "the
+    elements" is not one array: a loaded polybag is a film of triangles around a filling of
+    tetrahedra, both indexed off the one particle array Newton builds. `kinds` is what
+    `usd_deformable.bodies` said, so the arrays come back in the order the render meshes do and
+    each is bound to its own.
+
+    Without `kinds` this answers for a single body, which is what a caller that has not been told
+    about several should get.
+    """
+    tets = model.tet_indices.numpy() if model.tet_count else None
+    tris = model.tri_indices.numpy() if model.tri_count else None
+    if kinds is None:
+        if tets is not None:
+            return [tets]
+        if tris is not None:
+            return [tris]
+        raise SystemExit("the solver built particles but no elements; there is no surface to draw")
+    have = {"volume": tets, "surface": tris}
+    if len(set(kinds)) != len(kinds):
+        raise SystemExit(f"this asset declares two bodies of the same kind ({', '.join(kinds)}), "
+                         f"and one element array cannot be split between them by kind alone")
+    out = []
+    for kind in kinds:
+        if have.get(kind) is None:
+            raise SystemExit(f"the asset declares a {kind} body but the solver built no "
+                             f"{'tetrahedra' if kind == 'volume' else 'triangles'} for it")
+        out.append(have[kind])
+    return out
 
 
 def relaxation_is_a_jacobi_factor():
@@ -283,7 +307,9 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     # The stage has to be held in a name: a traversal of one opened inline outlives the stage
     # itself and the iteration dies on an expired prim.
     stage = Usd.Stage.Open(asset)
-    usd_deformable.one_body(stage, asset)   # the same refusal PhysX gives
+    _refusal = usd_deformable.why_not_runnable(stage, asset)   # any number of bodies
+    if _refusal:
+        raise SystemExit(_refusal)
     builder.add_usd(stage)
     built = usd_deformable.add_missing(builder, asset, chosen)
     # The radius the run uses is the one the builder ended up with, not the one asked for. A
@@ -295,7 +321,11 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
         print(f"[baseline] this Newton's importer produced nothing; built from the asset's "
               f"declaration instead: {built}")
     # Which prim the solver simulates, so the recording can hide the asset's still copy of it.
-    sim_path = next((str(prim.GetPath()) for _, prim in usd_deformable.find(stage)), None)
+    # Which prims the solver simulates and what each is, so the recording can hide the
+    # asset's still copy of each and bind the right render mesh to the right body.
+    simulated = usd_deformable.find(stage)
+    kinds = [kind for kind, _ in simulated]
+    sim_path = next((str(prim.GetPath()) for _, prim in simulated), None)
 
     lift = drop - float(points[:, 2].min())          # lowest point starts `drop` above the plane
     q = np.asarray(builder.particle_q, dtype=np.float64)
@@ -392,7 +422,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
             print(f"[baseline] soft_body_relaxation left at {relaxation} -- this Newton's tet kernel "
                   f"spends it as the compliance and never reads the material")
         solver = newton.solvers.SolverXPBD(model, iterations=iterations, soft_body_relaxation=relaxation)
-    return model, solver, pipeline, radius, lift, sim_path
+    return model, solver, pipeline, radius, lift, sim_path, kinds
 
 
 def main():
@@ -413,7 +443,7 @@ def main():
     args = ap.parse_args()
 
     substeps = args.substeps or stepping.SUBSTEPS
-    model, solver, pipeline, radius, lift, sim_path = build(
+    model, solver, pipeline, radius, lift, sim_path, kinds = build(
         args.asset, args.solver, args.iterations, args.radius, args.drop, args.margin,
         not args.no_full_surface, substeps, args.fps)
     frames = int(args.seconds * args.fps)
@@ -423,8 +453,9 @@ def main():
     tape = None
     if args.usd:
         tape = recording.Recording(args.usd, int(args.fps), frames,
-                                   np.asarray(model.particle_q.numpy()), solver_elements(model),
-                                   asset=args.asset, sim_prim_path=sim_path)
+                                   np.asarray(model.particle_q.numpy()),
+                                   solver_elements(model, kinds), asset=args.asset,
+                                   sim_prim_path=sim_path)
 
     state_0, state_1, control = model.state(), model.state(), model.control()
     contacts = pipeline.contacts()

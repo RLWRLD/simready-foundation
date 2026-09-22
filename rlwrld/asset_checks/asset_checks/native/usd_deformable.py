@@ -92,13 +92,39 @@ def _points(prim):
     return 0 if value is None else len(value)
 
 
-def why_not_one_body(stage, asset_name=""):
+def bodies(stage):
+    """What this asset asks to be simulated, and what to draw for each: [(kind, sim, render)].
+
+    `render` is the mesh the asset draws for that body, or None where it draws the simulated mesh
+    itself (a cloth). It is looked for among the sim prim's *siblings*, because that is where
+    UsdPhysics puts geometry that belongs to the same object: the OpenUSD docs describe separate
+    collision geometry as "a sibling to the original graphics mesh". A loaded polybag is
+    /Polybag/Film/{Simulation, ...} beside /Polybag/Contents/{Simulation, ...}, and the sibling
+    rule keeps each film with its own film and each filling with its own filling -- where picking
+    the largest drawable in the whole asset, which is what one body needed, would give both bodies
+    the same mesh.
+    """
+    out = []
+    for kind, sim in find(stage):
+        parent = sim.GetParent()
+        drawable = [q for q in Usd.PrimRange(parent, Usd.TraverseInstanceProxies())
+                    if q != sim and q.IsA(UsdGeom.PointBased)
+                    and simulated_kind(q) is None
+                    and UsdGeom.PointBased(q).GetPointsAttr().Get()]
+        render = max(drawable, key=lambda q: len(UsdGeom.PointBased(q).GetPointsAttr().Get()),
+                     default=None)
+        out.append((kind, sim, render))
+    return out
+
+
+def why_not_runnable(stage, asset_name="", most=None):
     """-> the reason this asset cannot be run as it is, or None.
 
-    An asset may declare several simulated meshes -- a loaded polybag declares its film as a
-    surface and its contents as a volume, and they are one object that has to be solved together
-    and collide with each other. Both runners drive one mesh and a recording draws one, so taking
-    the first would simulate the film alone and report it under the loaded bag's name.
+    `most` is how many simulated meshes the caller can drive. Newton builds them all into one
+    model off one particle array, so its runners pass nothing and take whatever the asset has; the
+    PhysX runners drive one body and say so. An asset with more meshes than the caller can drive
+    is refused rather than run, because running it would simulate the first and report it under
+    the whole asset's name -- an empty bag reported as a loaded one.
 
     Separated from the raising so that `check` can refuse before it launches anything, and the
     runners can refuse if they are called directly: one rule, asked in two places.
@@ -107,20 +133,19 @@ def why_not_one_body(stage, asset_name=""):
     found = find(stage)
     if not found:
         return f"{name} declares no simulated mesh; there is nothing here to deform"
-    if len(found) > 1:
+    if most is not None and len(found) > most:
         listed = "; ".join(f"{prim.GetPath()} ({kind}, {_points(prim)} points)"
                            for kind, prim in found)
-        return (f"{name} declares {len(found)} simulated meshes and this pipeline drives one: "
-                f"{listed}. They are one object, so running it would simulate the first and report "
-                f"it under the whole asset's name. Two coupled bodies is the feature this asset "
-                f"needs; it is refused rather than answered wrongly")
+        return (f"{name} declares {len(found)} simulated meshes and this runner drives "
+                f"{most}: {listed}. They are one object, so running it would simulate the first "
+                f"and report it under the whole asset's name")
     return None
 
 
 def one_body(stage, asset_name=""):
     """The single mesh this asset asks to be simulated; -> (kind, prim), or SystemExit saying why
-    not."""
-    reason = why_not_one_body(stage, asset_name)
+    not. For a caller that drives one body."""
+    reason = why_not_runnable(stage, asset_name, most=1)
     if reason:
         raise SystemExit(reason)
     return find(stage)[0]
