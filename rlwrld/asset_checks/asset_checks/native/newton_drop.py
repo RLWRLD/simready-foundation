@@ -475,14 +475,12 @@ def main():
     # The verdict and the line it is printed on belong to the experiment, which is why
     # they are asked for rather than written out here: the same words were spelled out
     # in both drop runners, and a pair of copies is a pair waiting to drift.
-    # A first frame that does not mean what it says makes every number after it unreadable, so it
-    # is the verdict rather than a note beside one.
-    decision = first_frame or drop_shape.verdict(bool(np.isfinite(q).all()), fell,
-                                                 float(start[:, 2].min()), below, height,
-                                                 speed, radius)
+    decision = drop_shape.verdict(bool(np.isfinite(q).all()), fell,
+                                  float(start[:, 2].min()), below, height,
+                                  speed, radius)
     kept = drop_shape.height_kept(float(q[:, 2].max() - q[:, 2].min()), height, radius)
     print(drop_shape.result_line("baseline", fell, float(q[:, 2].min()), float(q[:, 2].max()),
-                                 below, speed, peak, decision, kept))
+                                 below, speed, peak, decision, kept, first_frame))
     if tape is not None:
         tape.close()
         print(f"[baseline] wrote {args.usd}")

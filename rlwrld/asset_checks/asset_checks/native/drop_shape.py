@@ -67,9 +67,12 @@ def check_free_fall(fallen, fps, clearance, tolerance=0.05):
 
     Falling **more** also cannot be gravity, but two different things do it: a frame longer than
     it claims (PhysX stepping four times per recorded frame did exactly this) and a solver that
-    puts energy in on the first step (a bag of film with no bending stiffness does it too). One
-    run cannot tell them apart, so this reports it as what it is -- a run that does not mean what
-    it says -- and names both, rather than asserting the cause it happens to have seen before.
+    puts energy in on the first step (XPBD does it to a bag of film, on both Newton versions, and
+    then settles the bag perfectly). One run cannot tell them apart, so this measures it and hands
+    the number back as `first_frame_x` rather than deciding what it means. It is not the verdict:
+    the bag's resting shape is a real measurement whatever happened in its first frame, and the
+    frame bug, when it was there, read 10.0 on *every* cell of that engine -- which is what a
+    pipeline fault looks like, and what one asset's solver never does.
     """
     least, most = free_fall(fps)
     measured = (f"first frame fell {fallen * 1000:.3f} mm, free fall at {fps:g} fps is "
@@ -82,14 +85,12 @@ def check_free_fall(fallen, fps, clearance, tolerance=0.05):
             f"{fallen * 1000:.3f} mm in it, where gravity alone gives at least {least * 1000:.3f} mm. "
             f"Nothing an asset or a solver does makes gravity weaker, so this is the frame, and "
             f"every recorded time and every video speed is wrong by that much")
-    if fallen > most * (1.0 + tolerance):
-        # One word, like every other verdict: the result line is `key=value` separated by spaces
-        # and a verdict with spaces in it came back parsed as seven empty metrics.
-        return (f"first-frame-{fallen / most:.1f}x-gravity",
-                f"{measured}: {fallen / most:.2f} times the furthest gravity can take it in one "
-                f"frame. Either the frame is longer than it claims or the solver put the energy "
-                f"in; this run does not mean what it says either way")
-    return None, f"{measured}: the frame is the time it claims"
+    ratio = fallen / most
+    if ratio > 1.0 + tolerance:
+        return ratio, (f"{measured}: {ratio:.2f} times the furthest gravity can take it in one "
+                       f"frame. Either the frame is longer than it claims -- which shows on every "
+                       f"cell of an engine, not one -- or the solver put the energy in")
+    return ratio, f"{measured}: the frame is the time it claims"
 
 
 def verdict(finite, fell, clearance, below, height, speed, contact_size):
@@ -130,11 +131,18 @@ def height_kept(settled_height, authored_height, contact_size):
     return settled_height / authored_height
 
 
-def result_line(tag, fell, low, high, below, speed, peak, decision, kept=None):
+def result_line(tag, fell, low, high, below, speed, peak, decision, kept=None, first_frame=None):
     """One token per measurement, no spaces inside a value: the runner reads this line, and a
-    value whose end it has to guess is a value it will read wrong."""
+    value whose end it has to guess is a value it will read wrong.
+
+    `first_frame` is how far the first recorded frame moved the asset as a multiple of the
+    furthest gravity can move it in one -- 1.00 means the frame is the time it claims. It is a
+    measurement on every drop rather than a warning on a few, because a frame that is not 1/fps of
+    simulated time is invisible in every other number here and was, for a while, in all of them.
+    """
     kept_token = f"height_kept={kept:.2f} " if kept is not None else ""
+    frame_token = f"first_frame_x={first_frame:.2f} " if first_frame is not None else ""
     return (f"[{tag}] RESULT fell_mm={fell * 1000:.1f} rest_low_m={low:.4f} rest_high_m={high:.4f} "
-            f"thickness_mm={(high - low) * 1000:.1f} {kept_token}"
+            f"thickness_mm={(high - low) * 1000:.1f} {kept_token}{frame_token}"
             f"below_floor_mm={below * 1000:.1f} p99_speed={speed:.3f} max_speed={peak:.3f} "
             f"verdict={decision}")
