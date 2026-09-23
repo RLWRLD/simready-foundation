@@ -738,7 +738,11 @@ def resolve_stepping(args):
     """-> (setup, substeps, iterations) from `--setup`, with `--substeps`/`--iterations` allowed
     only over the canon stepping: a number given twice has two owners."""
     setup = setups.parse(args.setup)
-    recipe = asset_properties.read(args.asset)["recipe"]
+    declared = asset_properties.read(args.asset)
+    setup, resolved = setups.resolve(setup, declared)
+    for line in resolved:
+        print(f"[baseline] setup {args.setup}: {line}")
+    recipe = declared["recipe"]
     fps, substeps, iterations, why = setups.stepping_of(setup, recipe, args.fps, stepping.SUBSTEPS, ITERATIONS)
     if fps != args.fps:
         raise SystemExit(f"the {setup['stepping']} stepping is at {fps:g} fps and the run at {args.fps:g}")

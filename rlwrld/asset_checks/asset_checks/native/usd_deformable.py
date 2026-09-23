@@ -161,7 +161,7 @@ def read_surface_stiffness(builder, stage, reading, declared=None, report=None):
     engine-native statement of the same thing, where it makes one) agrees with -- a quantity stated
     twice in two units is a question for whoever authored it, and it must not pass unsaid.
     """
-    if reading not in ("modulus", "stiffness"):
+    if reading not in ("modulus", "stiffness", "auto"):
         raise SystemExit(f"unknown surface reading {reading!r}")
     tris = np.asarray(builder.tri_indices, dtype=np.int64).reshape(-1, 3) if builder.tri_indices else np.zeros((0, 3), int)
     edges = np.asarray(builder.edge_indices, dtype=np.int64).reshape(-1, 4) if builder.edge_indices else np.zeros((0, 4), int)
@@ -196,7 +196,17 @@ def read_surface_stiffness(builder, stage, reading, declared=None, report=None):
         agrees = [name for name, (a, b) in (("modulus", as_modulus), ("stiffness", as_stiffness))
                   if native_tri is not None and native_edge is not None
                   and np.isclose(native_tri, a, rtol=1e-5) and np.isclose(native_edge, b, rtol=1e-4)]
-        tri_ke, edge_ke = as_modulus if reading == "modulus" else as_stiffness
+        used = reading
+        if reading == "auto":
+            if native_tri is None or native_edge is None:
+                used = "modulus"          # the importer's reading, which is what Newton does with it
+            elif agrees:
+                used = agrees[0]
+            else:
+                raise SystemExit(f"{sim.GetPath()}: the asset states its stiffness twice "
+                                 f"(physics:* and newton:triKe/edgeKe) and they agree under neither "
+                                 f"reading; which one it means is a question for its author")
+        tri_ke, edge_ke = as_modulus if used == "modulus" else as_stiffness
         for i in own_tris:
             tri_m[i][0] = tri_ke
         for i in own_edges:
@@ -208,12 +218,12 @@ def read_surface_stiffness(builder, stage, reading, declared=None, report=None):
         print(f"[baseline] surface stiffness {sim.GetPath()}: read as moduli x t (Newton's importer) "
               f"tri_ke {as_modulus[0]:.4g} edge_ke {as_modulus[1]:.4g}; read as stiffnesses "
               f"(OmniPhysics) tri_ke {as_stiffness[0]:.4g} edge_ke {as_stiffness[1]:.4g}; {native}; "
-              f"this run: {reading}")
-        if declared is not None and agrees and agrees[0] == reading:
+              f"this run: {reading}" + (f" -> {used}" if used != reading else ""))
+        if declared is not None and agrees and agrees[0] == used:
             asset_properties.consume(declared, "newton:triKe", "newton:edgeKe")
         if report is not None:
-            report[f"tri_ke {sim.GetPath()}"] = (tri_ke, f"physics:stretchStiffness read as {reading}")
-            report[f"edge_ke {sim.GetPath()}"] = (edge_ke, f"physics:bendStiffness read as {reading}")
+            report[f"tri_ke {sim.GetPath()}"] = (tri_ke, f"physics:stretchStiffness read as {used}")
+            report[f"edge_ke {sim.GetPath()}"] = (edge_ke, f"physics:bendStiffness read as {used}")
     builder.tri_materials = [tuple(m) for m in tri_m]
     builder.edge_bending_properties = [tuple(m) for m in edge_m]
 
