@@ -125,7 +125,20 @@ def numbers(found, experiment, assets, envs, keys):
 # cell recorded is left out, so one list serves every experiment.
 KEYS = ("fell_mm", "thickness_mm", "height_kept", "below_floor_mm", "first_frame_x",
         "p99_speed", "max_speed", "indented_mm", "compressed_mm", "compressed_frac",
-        "recovered_frac", "pressed_nodes", "seconds")
+        "recovered_frac", "pressed_nodes", "seal_median_mm", "seal_max_mm", "escaped_nodes",
+        "seconds")
+# A run directory records one setup (where a soft body's structure, contact and stepping came
+# from; native/setups.py). Cells written before setups existed carry none and are the canon's.
+UNRECORDED_SETUP = "none-derived-canon (unrecorded)"
+
+
+def setup_of(found):
+    """The one setup every cell in this run directory ran, or a refusal to report a mixture."""
+    seen = sorted({rec.get("setup") or UNRECORDED_SETUP for _, rec in found.values()})
+    if len(seen) > 1:
+        raise SystemExit(f"this run directory mixes setups ({', '.join(seen)}); one directory "
+                         f"holds one setup, and a table over two would compare nothing")
+    return seen[0]
 
 
 def main():
@@ -143,10 +156,12 @@ def main():
     envs = sorted({e for _, e, _ in found})
     experiments = sorted({x for _, _, x in found})
     tally = collections.Counter(v for v, _ in found.values())
+    setup = setup_of(found)
 
     out = [f"# {run.name}", "",
            f"{len(found)} cells: {len(assets)} asset(s) x {len(envs)} environment(s) "
-           f"x {len(experiments)} experiment(s).", "",
+           f"x {len(experiments)} experiment(s). Setup `{setup}` (structure-contact-stepping; "
+           f"native/setups.py).", "",
            "  ".join(f"`{word}` {n}" for word, n in tally.most_common()), ""]
     for experiment in experiments:
         out += [f"## {experiment}", "", table(found, experiment, assets, envs), ""]

@@ -447,3 +447,117 @@ def add_missing(builder, asset, report=None):
             continue
         added.append(add_surface(builder, stage, prim, report))
     return added
+
+
+# ---------------------------------------------------------------- the structure an asset authors
+def builder_index(builder, prim):
+    """The builder's particle index of each of `prim`'s authored points, matched in world
+    coordinates -- refuses if any point is not there, because half a structure is none."""
+    q = np.asarray(builder.particle_q, dtype=np.float64)
+    where = {tuple(np.round(p, 6)): i for i, p in enumerate(q)}
+    points = _world_points(prim)
+    index = [where.get(tuple(np.round(p, 6))) for p in points]
+    lost = sum(i is None for i in index)
+    if lost:
+        raise SystemExit(f"{prim.GetPath()}: {lost} of its {len(points)} authored points are not in "
+                         f"the builder at their authored coordinates")
+    return np.asarray(index, dtype=np.int64)
+
+
+def seal_pairs(builder, stage):
+    """Every seal pair the asset authors, as builder particle indices: (n, 2), possibly empty.
+
+    Read whether or not the run builds springs from them: the gap across a seal is the one
+    measurement that says whether a bag stayed a bag, and it is measured in every setup.
+    """
+    found = []
+    for _kind, sim, _render in bodies(stage):
+        attr = sim.GetAttribute(asset_properties.SEAL_PAIRS)
+        if not (attr and attr.HasAuthoredValue()):
+            continue
+        local = np.asarray(attr.Get(), dtype=np.int64).reshape(-1, 2)
+        found.append(builder_index(builder, sim)[local])
+    return np.concatenate(found) if found else np.zeros((0, 2), dtype=np.int64)
+
+
+def add_seal_springs(builder, stage, declared, report=None):
+    """Build the asset's seal as springs; -> the (n, 2) pairs added, for the colouring.
+
+    A spring per authored pair at the stiffness the asset states -- on the prim
+    (`rlwrld:sealStiffness`) or on the root (`rlwrld:contact:seal_spring_ke_n_m`); both, if they
+    disagree, is two owners and refused. Newton's `add_spring` takes the pair's current distance
+    as the rest length, so a seal authored 2 mm open stays 2 mm open and does not pull shut. The
+    asset authors no seal damping and none is invented: the spring's kd is 0 and reported as ours.
+    """
+    root = stage.GetDefaultPrim()
+    root_ke, root_where = _authored(root, asset_properties.RECIPE["seal_ke"]) if root else (None, None)
+    pairs, made = [], 0
+    for _kind, sim, _render in bodies(stage):
+        attr = sim.GetAttribute(asset_properties.SEAL_PAIRS)
+        if not (attr and attr.HasAuthoredValue()):
+            continue
+        prim_ke, prim_where = _authored(sim, (asset_properties.SEAL_KE,))
+        if prim_ke is not None and root_ke is not None and abs(prim_ke - root_ke) > 1e-9 * max(prim_ke, root_ke):
+            raise SystemExit(f"{sim.GetPath()} states a seal stiffness of {prim_ke:g} and the root "
+                             f"{root_ke:g}: two owners for one number; refused")
+        ke = prim_ke if prim_ke is not None else root_ke
+        if ke is None:
+            raise SystemExit(f"{sim.GetPath()} authors {asset_properties.SEAL_PAIRS} but no seal "
+                             f"stiffness ({asset_properties.SEAL_KE} or "
+                             f"{asset_properties.RECIPE['seal_ke'][0]}); the seal cannot be built")
+        where = f"{sim.GetPath()}.{prim_where}" if prim_ke is not None else f"{root.GetPath()}.{root_where}"
+        index = builder_index(builder, sim)
+        local = np.asarray(attr.Get(), dtype=np.int64).reshape(-1, 2)
+        for a, b in index[local]:
+            builder.add_spring(int(a), int(b), float(ke), 0.0, 0.0)
+        pairs.append(index[local]); made += len(local)
+        asset_properties.consume(declared, asset_properties.SEAL_PAIRS, prim_where or "", root_where or "")
+        if report is not None:
+            report[f"seal_springs {sim.GetPath()}"] = (len(local), f"springs at {ke:g} N/m ({where}), "
+                                                       f"rest length = authored gap; kd 0, the asset authors none")
+    print(f"[baseline] seal: {made} spring(s) from the asset's seal pairs" if made
+          else "[baseline] seal: the asset authors no seal pairs")
+    return np.concatenate(pairs) if pairs else np.zeros((0, 2), dtype=np.int64)
+
+
+def vertex_triangle_exclusions(builder, stage, declared, report=None):
+    """The asset's (vertex, triangle) self-contact exclusions as builder ids: {vertex: {tri}}.
+
+    Local vertex ids go through the point match; local triangle ids are the prim's face order,
+    matched to the builder's triangles by their vertex triple -- a triple the builder does not
+    have means the numbering is not what it looks like, and refuses. Edge-edge exclusions are
+    authored in an edge numbering the asset does not state, so they cannot be mapped and are
+    reported as such rather than guessed.
+    """
+    triple_of = {}
+    for t, tri in enumerate(np.asarray(builder.tri_indices, dtype=np.int64).reshape(-1, 3)):
+        triple_of[tuple(sorted(tri.tolist()))] = t
+    out, dropped_edges = {}, 0
+    for _kind, sim, _render in bodies(stage):
+        attr = sim.GetAttribute(asset_properties.VERTEX_TRIANGLE_EXCLUSIONS)
+        edges = sim.GetAttribute(asset_properties.EDGE_EXCLUSIONS)
+        if edges and edges.HasAuthoredValue():
+            dropped_edges += len(edges.Get())
+        if not (attr and attr.HasAuthoredValue()):
+            continue
+        index = builder_index(builder, sim)
+        faces = np.asarray(UsdGeom.Mesh(sim).GetFaceVertexIndicesAttr().Get(), dtype=np.int64)
+        counts = np.asarray(UsdGeom.Mesh(sim).GetFaceVertexCountsAttr().Get(), dtype=np.int64)
+        if (counts != 3).any():
+            raise SystemExit(f"{sim.GetPath()}: contact exclusions name triangles, but the mesh has "
+                             f"{(counts != 3).sum()} non-triangle face(s); the numbering is undefined")
+        faces = faces.reshape(-1, 3)
+        for v, t in np.asarray(attr.Get(), dtype=np.int64).reshape(-1, 2):
+            triple = tuple(sorted(index[faces[t]].tolist()))
+            if triple not in triple_of:
+                raise SystemExit(f"{sim.GetPath()}: exclusion names face {t}, whose vertices are not a "
+                                 f"triangle of the builder; the face numbering does not match")
+            out.setdefault(int(index[v]), set()).add(triple_of[triple])
+        asset_properties.consume(declared, asset_properties.VERTEX_TRIANGLE_EXCLUSIONS)
+        if report is not None:
+            report[f"contact_exclusions {sim.GetPath()}"] = (
+                len(attr.Get()), "vertex-triangle self-contact pairs the asset excludes, handed to the solver")
+    if dropped_edges:
+        print(f"[baseline] {dropped_edges} edge-edge contact exclusion(s) are authored in an edge "
+              f"numbering the asset does not state; not mappable, not applied")
+    return out

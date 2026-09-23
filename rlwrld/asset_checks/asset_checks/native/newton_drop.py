@@ -33,6 +33,8 @@ import newton
 from pxr import Usd
 
 import asset_properties
+import integrity
+import setups
 import stepping
 import drop_shape
 import usd_deformable
@@ -174,8 +176,14 @@ def full_surface_contact(solver_name, wanted):
 # what the deformable schema itself defaults to.
 
 
-def colour_for_vbd(builder):
-    """Give SolverVBD its colour groups, with the bending edges in the graph.
+def colour_for_vbd(builder, springs=()):
+    """Give SolverVBD its colour groups, with the bending edges -- and any springs -- in the graph.
+
+    `builder.color` builds its graph from triangles, tetrahedra and (asked) bending edges, and
+    from nothing else: a spring's two particles can land in one colour and then move in the same
+    Gauss-Seidel sweep, each blind to the other. Where the run added springs (an asset's seal),
+    the graph is built the way `builder.color` builds it, with the springs appended, and coloured
+    with Newton's own `color_graph`.
 
     VBD sweeps one colour at a time and treats the other colours as fixed, so two
     particles joined by a constraint must never share a colour.  `builder.color`
@@ -187,8 +195,35 @@ def colour_for_vbd(builder):
     colouring for one.
     """
     bending = len(builder.edge_indices)
-    builder.color(include_bending=bending > 0)
-    print(f"[baseline] VBD colouring: {bending} bending edge(s) in the graph")
+    if len(springs) == 0:
+        builder.color(include_bending=bending > 0)
+        print(f"[baseline] VBD colouring: {bending} bending edge(s) in the graph")
+        return
+    try:
+        from newton._src.sim.graph_coloring import color_graph, construct_particle_graph
+    except ImportError as e:
+        raise SystemExit(f"this Newton keeps its colouring elsewhere ({e}); springs cannot be coloured")
+    tri = np.array(builder.tri_indices, dtype=np.int32) if builder.tri_indices else None
+    tri_m = np.array(builder.tri_materials)
+    tet = np.array(builder.tet_indices, dtype=np.int32) if builder.tet_indices else None
+    tet_m = np.array(builder.tet_materials)
+    bend = np.array(builder.edge_indices, dtype=np.int32) if bending else None
+    bend_props = np.array(builder.edge_bending_properties) if bending else None
+    bend_mask = ((bend_props[:, 0] != 0.0) | (bend_props[:, 1] != 0.0)) if bending else None
+    edges = construct_particle_graph(tri, tri_m[:, 0] * tri_m[:, 1] if len(tri_m) else None,
+                                     bend, bend_mask, tet, tet_m[:, 0] * tet_m[:, 1] if len(tet_m) else None)
+    edges = np.asarray(edges.numpy() if hasattr(edges, "numpy") else edges, dtype=np.int32).reshape(-1, 2)
+    edges = np.concatenate([edges, np.asarray(springs, dtype=np.int32).reshape(-1, 2)])
+    builder.particle_color_groups = color_graph(builder.particle_count,
+                                                wp.array(edges, dtype=wp.int32, device="cpu"))
+    colour_of = np.full(builder.particle_count, -1, dtype=np.int64)
+    for c, group in enumerate(builder.particle_color_groups):
+        colour_of[np.asarray(group, dtype=np.int64)] = c
+    same = int((colour_of[np.asarray(springs)[:, 0]] == colour_of[np.asarray(springs)[:, 1]]).sum())
+    if same:
+        raise SystemExit(f"{same} spring(s) still have both ends in one colour after colouring")
+    print(f"[baseline] VBD colouring: {bending} bending edge(s) and {len(springs)} spring(s) in the "
+          f"graph, {len(builder.particle_color_groups)} colours")
 
 
 # There is no separate stiffness for the floor or the plate. Newton's grasping example sets the
@@ -434,9 +469,11 @@ def membrane_as_springs(builder, solver_name, dt, report=None):
     return made
 
 
-def build(asset, solver_name, iterations, radius, drop, margin, full_surface, substeps, fps):
-    """`margin` and `radius` of 0/"auto" mean: take it from the asset, and say where it came from."""
-    """`margin` of 0 means: take it from the asset."""
+def build(asset, solver_name, iterations, radius, drop, margin, full_surface, substeps, fps,
+          setup=None):
+    """`margin` and `radius` of 0/"auto" mean: take it from the asset, and say where it came from.
+    `setup` is `setups.parse(...)`: where the structure and the contact numbers come from."""
+    setup = setup or setups.parse(setups.DEFAULT)
     # add_usd stamps `default_particle_radius` onto every particle it imports, so the radius
     # has to be known first. Import once cheaply to measure the asset, then again to build it.
     measure = newton.ModelBuilder()
@@ -481,6 +518,10 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     sizes = usd_deformable.assign_particle_radii(builder, stage, radius, chosen)
     usd_deformable.carry_material_damping(builder, stage,
                                           element_damping_as_the_kernel_reads_it(solver_name), chosen)
+    recipe = declared["recipe"]
+    if setup["stepping"] == "asset":
+        asset_properties.consume(declared, *asset_properties.RECIPE["dt"], *asset_properties.RECIPE["iterations"])
+    seal, exclusions, bag = structure(builder, stage, setup, declared, chosen, sizes)
     # Every scene length below -- the contact band, the plate, the landing tolerance -- is sized
     # from the coarsest body, so that no body's contact is narrower than its own particles.
     radius = max(sizes.values()) if sizes else float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
@@ -513,8 +554,9 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
         print(f"[baseline] hid {len(ghosts)} visual-only shape(s) the USD import added: {ghosts}")
 
     membrane_as_springs(builder, solver_name, 1.0 / (fps * substeps), chosen)
+    elements_report("baseline", builder)
     if solver_name == "vbd":
-        colour_for_vbd(builder)
+        colour_for_vbd(builder, seal)
     model = builder.finalize()
     model.soft_contact_ke = contact_stiffness(model)
     chosen["soft_contact_ke"] = (model.soft_contact_ke,
@@ -541,6 +583,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     chosen["particle_radius_used"] = (radius, "read back from the model, whatever set it")
     chosen["floor_ke"] = (model.soft_contact_ke, "the floor is as stiff as the contact, because "
                                                  "it is the same contact")
+    contact_source("baseline", model, solver_name, setup, recipe, declared, chosen, [ground_shape])
     asset_properties.report("baseline", declared, chosen)
 
     # Pipeline first, then the solver: SolverVBD sizes its per-body contact state from the
@@ -557,7 +600,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     pipeline = newton.CollisionPipeline(model, **kwargs)
     print(f"[baseline] full-surface soft contact: {kwargs.get('enable_rigid_soft_full_surface_contact', False)}")
 
-    self_collision, why = asset_properties.self_collision(declared)
+    self_collision, self_radius, self_margin, why = self_contact(setup, recipe, declared, radius, margin)
     print(f"[baseline] self-collision {'on' if self_collision else 'off'} -- {why}")
     if solver_name == "vbd" and not self_collision and not model.tet_count:
         # Context for a cell that dies here. Every cloth example Newton ships that has a ground
@@ -573,9 +616,11 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
         solver = newton.solvers.SolverVBD(
             model, iterations=iterations,
             particle_enable_self_contact=self_collision,
-            particle_self_contact_radius=radius, particle_self_contact_margin=margin,
-            rigid_body_particle_contact_buffer_size=max(256, model.particle_count))
+            particle_self_contact_radius=self_radius, particle_self_contact_margin=self_margin,
+            rigid_body_particle_contact_buffer_size=max(256, model.particle_count),
+            **exclusion_kwargs("baseline", exclusions, self_collision))
     else:
+        particle_contact_report("baseline", model)
         if relaxation_is_a_jacobi_factor():
             relaxation = xpbd_relaxation(model.tet_count, model.particle_count)
             print(f"[baseline] soft_body_relaxation {relaxation:.4f} from "
@@ -585,16 +630,128 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
             print(f"[baseline] soft_body_relaxation left at {relaxation} -- this Newton's tet kernel "
                   f"spends it as the compliance and never reads the material")
         solver = newton.solvers.SolverXPBD(model, iterations=iterations, soft_body_relaxation=relaxation)
-    return model, solver, pipeline, radius, lift, sim_path, kinds, margin
+    return model, solver, pipeline, radius, lift, sim_path, kinds, margin, bag
+
+
+# ---------------------------------------------------------------- what a setup adds, shared by the runners
+def structure(builder, stage, setup, declared, chosen, sizes):
+    """Build what the setup's structure source says joins the bodies; -> (seal pairs added,
+    exclusions, bag). Called before anything is lifted: the match is at authored coordinates.
+
+    `bag` is what `integrity` measures in every setup: the authored seal pairs (springs or not),
+    each body's particles, and the reach (the coarsest contact size, doubled)."""
+    authored_seal = usd_deformable.seal_pairs(builder, stage)
+    bodies = [(usd_deformable.builder_index(builder, sim), usd_deformable._world_points(sim))
+              for _kind, sim, _render in usd_deformable.bodies(stage)]
+    bag = {"seal": authored_seal, "bodies": bodies,
+           "reach": 2.0 * (max(sizes.values()) if sizes else float(builder.default_particle_radius))}
+    if setup["structure"] != "asset":
+        if len(authored_seal):
+            print(f"[baseline] the asset authors {len(authored_seal)} seal pair(s); this setup's "
+                  f"structure source is '{setup['structure']}', so no seal is built")
+        return np.zeros((0, 2), dtype=np.int64), {}, bag
+    seal = usd_deformable.add_seal_springs(builder, stage, declared, chosen)
+    exclusions = usd_deformable.vertex_triangle_exclusions(builder, stage, declared, chosen)
+    asset_properties.consume(declared, *asset_properties.RECIPE["self_contact_radius"],
+                             *asset_properties.RECIPE["self_contact_margin"])
+    return seal, exclusions, bag
+
+
+def self_contact(setup, recipe, declared, radius, margin):
+    """-> (on, radius, margin, why): the asset's own self-contact under structure=asset, the
+    schema's answer otherwise (at the run's contact size and band)."""
+    if setup["structure"] == "asset":
+        self_radius, self_margin, where = setups.self_contact_of(setup, recipe)
+        asset_properties.consume(declared, *asset_properties.RECIPE["self_contact_radius"],
+                                 *asset_properties.RECIPE["self_contact_margin"])
+        return True, self_radius, self_margin, (f"the asset's own structure: radius "
+                                                f"{self_radius * 1e3:.2f} mm, margin {self_margin * 1e3:.2f} mm ({where})")
+    on, why = asset_properties.self_collision(declared)
+    return on, radius, margin, why
+
+
+def exclusion_kwargs(tag, exclusions, self_collision):
+    """SolverVBD's keyword for the asset's vertex-triangle exclusions, if this Newton has it."""
+    if not exclusions:
+        return {}
+    if not self_collision:
+        print(f"[{tag}] contact exclusions are authored but self-contact is off; nothing to exclude")
+        return {}
+    name = "particle_external_vertex_contact_filtering_map"
+    if name not in inspect.signature(newton.solvers.SolverVBD.__init__).parameters:
+        raise SystemExit(f"this Newton's SolverVBD takes no {name}; the asset's contact exclusions "
+                         f"cannot be applied here")
+    print(f"[{tag}] {sum(len(v) for v in exclusions.values())} vertex-triangle exclusion(s) on "
+          f"{len(exclusions)} vertices handed to SolverVBD")
+    return {name: exclusions}
+
+
+def contact_source(tag, model, solver_name, setup, recipe, declared, chosen, fixtures):
+    """Replace the derived contact numbers with the setup's source, where it is not `derived`."""
+    source = setups.contact_of(setup, solver_name, recipe)
+    if source is None:
+        return
+    model.soft_contact_ke, model.soft_contact_kd, model.soft_contact_mu = source["ke"], source["kd"], source["mu"]
+    for array, value in ((model.shape_material_ke, source["shape_ke"]),
+                         (model.shape_material_kd, source["kd"]),
+                         (model.shape_material_mu, source["mu"])):
+        values = array.numpy()
+        values[fixtures] = value
+        array.assign(wp.array(values, dtype=float))
+    for key, value in (("soft_contact_ke", source["ke"]), ("soft_contact_kd", source["kd"]),
+                       ("soft_contact_mu", source["mu"])):
+        chosen[key] = (value, f"{setup['contact']} contact source: {source['why']}")
+    for key in list(chosen):
+        if key.endswith("_ke") and key not in ("soft_contact_ke",):
+            chosen[key] = (source["shape_ke"], f"the fixtures' stiffness from the same source")
+    if setup["contact"] == "asset":
+        asset_properties.consume(declared, *(n for k in ("contact_ke", "contact_kd", "shape_ke", "friction")
+                                             for n in asset_properties.RECIPE[k]))
+    print(f"[{tag}] contact numbers from the {setup['contact']} source: ke {source['ke']:g} "
+          f"kd {source['kd']:g} mu {source['mu']:g} fixtures ke {source['shape_ke']:g}")
+
+
+def particle_contact_report(tag, model):
+    """XPBD meets particles with particles through `particle_*`, which no asset authors and no
+    run had ever printed."""
+    print(f"[{tag}] particle-particle contact (XPBD): ke {model.particle_ke:g} kd {model.particle_kd:g} "
+          f"kf {model.particle_kf:g} mu {model.particle_mu:g} -- Newton's defaults; the asset "
+          f"authors none and this run sets none")
+
+
+def elements_report(tag, builder):
+    print(f"[{tag}] elements before finalize: {builder.particle_count} particles, "
+          f"{builder.tri_count} triangles, {builder.tet_count} tetrahedra, "
+          f"{len(builder.edge_indices)} bending edges, {builder.spring_count} springs")
+
+
+def resolve_stepping(args):
+    """-> (setup, substeps, iterations) from `--setup`, with `--substeps`/`--iterations` allowed
+    only over the canon stepping: a number given twice has two owners."""
+    setup = setups.parse(args.setup)
+    recipe = asset_properties.read(args.asset)["recipe"]
+    fps, substeps, iterations, why = setups.stepping_of(setup, recipe, args.fps, stepping.SUBSTEPS, ITERATIONS)
+    if fps != args.fps:
+        raise SystemExit(f"the {setup['stepping']} stepping is at {fps:g} fps and the run at {args.fps:g}")
+    if args.substeps or args.iterations is not None:
+        if setup["stepping"] != "canon":
+            raise SystemExit(f"--substeps/--iterations and a '{setup['stepping']}' stepping source: "
+                             f"two owners for the step; give one")
+        substeps = args.substeps or substeps
+        iterations = args.iterations if args.iterations is not None else iterations
+        why = "the command line"
+    print(f"[baseline] setup {args.setup}: {substeps} substeps x {iterations} iterations at "
+          f"{fps:g} fps -- {why}")
+    return setup, substeps, iterations
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("asset")
     ap.add_argument("--solver", default="vbd", choices=("vbd", "xpbd"))
-    ap.add_argument("--iterations", type=int, default=ITERATIONS)
-    ap.add_argument("--substeps", type=int, default=0,
-                    help="0 = the count every engine is given (stepping.SUBSTEPS)")
+    ap.add_argument("--setup", default=setups.DEFAULT, help="structure-contact-stepping; see setups.py")
+    ap.add_argument("--iterations", type=int, default=None, help="default: the setup's")
+    ap.add_argument("--substeps", type=int, default=0, help="0 = the setup's")
     ap.add_argument("--fps", type=float, default=stepping.FPS)
     ap.add_argument("--seconds", type=float, required=True,
                 help="simulated seconds: the experiment's own SECONDS, which run.py passes")
@@ -606,10 +763,11 @@ def main():
     ap.add_argument("--usd", default=None, help="write an animated USD of the run here")
     args = ap.parse_args()
 
-    substeps = args.substeps or stepping.SUBSTEPS
-    model, solver, pipeline, radius, lift, sim_path, kinds, band = build(
+    setup, substeps, iterations = resolve_stepping(args)
+    args.iterations = iterations
+    model, solver, pipeline, radius, lift, sim_path, kinds, band, bag = build(
         args.asset, args.solver, args.iterations, args.radius, args.drop, args.margin,
-        not args.no_full_surface, substeps, args.fps)
+        not args.no_full_surface, substeps, args.fps, setup)
     frames = int(args.seconds * args.fps)
     # The recording is written here rather than by newton.viewer.ViewerUSD: the two Newton
     # versions lay their viewer output out differently, and neither carries the asset's render
@@ -676,8 +834,10 @@ def main():
                                   speed, radius, band,
                                   extent=float(q[:, 2].max() - q[:, 2].min()))
     kept = drop_shape.height_kept(float(q[:, 2].max() - q[:, 2].min()), height, radius)
+    extra = integrity.result_tokens(q, bag["seal"], bag["bodies"], bag["reach"])
     print(drop_shape.result_line("baseline", fell, float(q[:, 2].min()), float(q[:, 2].max()),
-                                 below, speed, peak, decision, kept, first_frame))
+                                 below, speed, peak, decision, kept, first_frame)
+          + (" " + extra if extra else ""))
     if tape is not None:
         tape.close()
         print(f"[baseline] wrote {args.usd}")
