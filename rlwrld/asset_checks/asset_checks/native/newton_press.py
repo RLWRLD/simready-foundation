@@ -99,6 +99,8 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # the declared shell thickness and ignores it. Reading it back is the only way the contact
     # margin, the plate's size and the landing tolerance are all talking about the same number.
     sizes = usd_deformable.assign_particle_radii(builder, stage, radius, chosen)
+    # Before the damping: a Rayleigh kernel's damping is handed over relative to the stiffness.
+    usd_deformable.read_surface_stiffness(builder, stage, setup["surface"], declared, chosen)
     usd_deformable.carry_material_damping(builder, stage,
                                           element_damping_as_the_kernel_reads_it(solver_name), chosen)
     recipe = declared["recipe"]

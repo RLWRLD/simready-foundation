@@ -21,6 +21,7 @@ import sys
 import numpy as np
 from pxr import Usd, UsdGeom
 
+import setups
 import usd_deformable
 
 # What the two schema families call the same physics. Volume deformables are described by a
@@ -153,6 +154,10 @@ def compare(original, converted):
 
     wanted = dict(SHARED, **(VOLUME if kind == "volume" else SURFACE))
     said = numbers(find(first, MATERIAL_SCHEMA[kind][0]), "physics")
+    if kind == "surface":
+        # The copy carries the default setup's reading of the surface stiffnesses, not the raw
+        # authored numbers; the audit applies the same arithmetic, from the same owner.
+        said = dict(said, **usd_deformable.surface_stiffnesses(said, setups.parse(setups.DEFAULT)["surface"]))
     carried = find(second, MATERIAL_SCHEMA[kind][1]) or find(second, MATERIAL_SCHEMA["volume"][1])
     got = numbers(carried, "omniphysics")
     # The numbers being right is half of it: the body has to be *bound* to the prim that carries

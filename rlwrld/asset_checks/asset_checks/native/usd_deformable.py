@@ -133,6 +133,91 @@ def _authored(prim, names):
     return None, None
 
 
+# The power of the shell thickness each authored surface stiffness is multiplied by when it is
+# read as a modulus (membrane ~ E*t, bending ~ E*t^3). One table, read by the Newton runners, the
+# PhysX conversion and the parity check that audits it.
+SURFACE_THICKNESS_POWER = {"stretchStiffness": 1, "shearStiffness": 1, "bendStiffness": 3}
+
+
+def surface_stiffnesses(values, reading):
+    """{name: stiffness} for authored surface values (physics:* names without the prefix,
+    `thickness` among them), read as `reading` ("modulus" or "stiffness")."""
+    if reading not in ("modulus", "stiffness"):
+        raise SystemExit(f"unknown surface reading {reading!r}")
+    t = values.get("thickness")
+    if reading == "modulus" and t is None:
+        raise SystemExit("reading a surface stiffness as a modulus needs physics:thickness")
+    return {name: (value * t ** SURFACE_THICKNESS_POWER[name] if reading == "modulus" else value)
+            for name, value in values.items() if name in SURFACE_THICKNESS_POWER}
+
+
+def read_surface_stiffness(builder, stage, reading, declared=None, report=None):
+    """Put each surface body's stretch and bend stiffness on its own elements, read as `reading`.
+
+    `modulus`: the authored numbers are moduli, times the thickness (tri_ke = s*t, edge_ke = b*t^3),
+    which is what Newton 1.5.0's importer and `add_surface` already built -- checked, not assumed.
+    `stiffness`: the authored numbers are the stiffnesses themselves, OmniPhysics' definition.
+    Every run prints both, and which of them the asset's own `newton:triKe` / `newton:edgeKe` (its
+    engine-native statement of the same thing, where it makes one) agrees with -- a quantity stated
+    twice in two units is a question for whoever authored it, and it must not pass unsaid.
+    """
+    if reading not in ("modulus", "stiffness"):
+        raise SystemExit(f"unknown surface reading {reading!r}")
+    tris = np.asarray(builder.tri_indices, dtype=np.int64).reshape(-1, 3) if builder.tri_indices else np.zeros((0, 3), int)
+    edges = np.asarray(builder.edge_indices, dtype=np.int64).reshape(-1, 4) if builder.edge_indices else np.zeros((0, 4), int)
+    tri_m = [list(m) for m in builder.tri_materials]
+    edge_m = [list(m) for m in builder.edge_bending_properties]
+    for kind, sim, _render in bodies(stage):
+        if kind != "surface":
+            continue
+        material = _bound_material(stage, sim, MATERIAL[kind])
+        t = _value(material, "physics:thickness")
+        stretch = _value(material, "physics:stretchStiffness")
+        bend = _value(material, "physics:bendStiffness")
+        if t is None or stretch is None or bend is None:
+            raise SystemExit(f"{sim.GetPath()}: a surface body needs physics:thickness, "
+                             f"physics:stretchStiffness and physics:bendStiffness to be read either way")
+        authored = {"thickness": t, "stretchStiffness": stretch, "bendStiffness": bend}
+        as_modulus = tuple(surface_stiffnesses(authored, "modulus")[k] for k in ("stretchStiffness", "bendStiffness"))
+        as_stiffness = tuple(surface_stiffnesses(authored, "stiffness")[k] for k in ("stretchStiffness", "bendStiffness"))
+        mine = set(builder_index(builder, sim).tolist())
+        own_tris = [i for i, tri in enumerate(tris) if all(int(v) in mine for v in tri)]
+        own_edges = [i for i, e in enumerate(edges) if int(e[2]) in mine and int(e[3]) in mine]
+        built_tri = sorted({round(tri_m[i][0], 9) for i in own_tris})
+        built_edge = sorted({round(edge_m[i][0], 12) for i in own_edges})
+        if (len(built_tri) != 1 or not np.isclose(built_tri[0], as_modulus[0], rtol=1e-5)
+                or len(built_edge) != 1 or not np.isclose(built_edge[0], as_modulus[1], rtol=1e-4, atol=1e-15)):
+            raise SystemExit(f"{sim.GetPath()}: the builder holds tri_ke {built_tri[:3]} / edge_ke "
+                             f"{built_edge[:3]}, not the importer's reading {as_modulus[0]:g} / "
+                             f"{as_modulus[1]:g}; the importer changed and this reading no longer "
+                             f"knows what it starts from")
+        native_tri = _value(material, "newton:triKe")
+        native_edge = _value(material, "newton:edgeKe")
+        agrees = [name for name, (a, b) in (("modulus", as_modulus), ("stiffness", as_stiffness))
+                  if native_tri is not None and native_edge is not None
+                  and np.isclose(native_tri, a, rtol=1e-5) and np.isclose(native_edge, b, rtol=1e-4)]
+        tri_ke, edge_ke = as_modulus if reading == "modulus" else as_stiffness
+        for i in own_tris:
+            tri_m[i][0] = tri_ke
+        for i in own_edges:
+            edge_m[i][0] = edge_ke
+        native = ("the asset authors no newton:triKe/edgeKe" if native_tri is None or native_edge is None
+                  else f"the asset's own newton:triKe {native_tri:g} / newton:edgeKe {native_edge:g} "
+                       + (f"agree with the {agrees[0]} reading" if agrees
+                          else "agree with neither reading"))
+        print(f"[baseline] surface stiffness {sim.GetPath()}: read as moduli x t (Newton's importer) "
+              f"tri_ke {as_modulus[0]:.4g} edge_ke {as_modulus[1]:.4g}; read as stiffnesses "
+              f"(OmniPhysics) tri_ke {as_stiffness[0]:.4g} edge_ke {as_stiffness[1]:.4g}; {native}; "
+              f"this run: {reading}")
+        if declared is not None and agrees and agrees[0] == reading:
+            asset_properties.consume(declared, "newton:triKe", "newton:edgeKe")
+        if report is not None:
+            report[f"tri_ke {sim.GetPath()}"] = (tri_ke, f"physics:stretchStiffness read as {reading}")
+            report[f"edge_ke {sim.GetPath()}"] = (edge_ke, f"physics:bendStiffness read as {reading}")
+    builder.tri_materials = [tuple(m) for m in tri_m]
+    builder.edge_bending_properties = [tuple(m) for m in edge_m]
+
+
 def carry_material_damping(builder, stage, convert, report=None):
     """Put each body's authored damping on its own elements, in the builder.
 
@@ -280,6 +365,27 @@ def _points(prim):
     return 0 if value is None else len(value)
 
 
+def _drawables(sim):
+    """Every drawable a body has: the PointBased prims beside its sim prim that are not simulated
+    and that a renderer would draw (a `guide` or `proxy` purpose is not)."""
+    out = []
+    for q in Usd.PrimRange(sim.GetParent(), Usd.TraverseInstanceProxies()):
+        if q == sim or not q.IsA(UsdGeom.PointBased) or simulated_kind(q) is not None:
+            continue
+        if not UsdGeom.PointBased(q).GetPointsAttr().Get():
+            continue
+        if UsdGeom.Imageable(q).ComputePurpose() in (UsdGeom.Tokens.guide, UsdGeom.Tokens.proxy):
+            continue
+        out.append(q)
+    return out
+
+
+def other_drawables(sim, render):
+    """The drawables of a body besides the one `bodies` pairs it with -- a polybag's folded lip
+    beside its film. Each has to be carried too, or it stays where it was authored."""
+    return [q for q in _drawables(sim) if render is None or q.GetPath() != render.GetPath()]
+
+
 def bodies(stage):
     """What this asset asks to be simulated, and what to draw for each: [(kind, sim, render)].
 
@@ -294,12 +400,7 @@ def bodies(stage):
     """
     out = []
     for kind, sim in find(stage):
-        parent = sim.GetParent()
-        drawable = [q for q in Usd.PrimRange(parent, Usd.TraverseInstanceProxies())
-                    if q != sim and q.IsA(UsdGeom.PointBased)
-                    and simulated_kind(q) is None
-                    and UsdGeom.PointBased(q).GetPointsAttr().Get()]
-        render = max(drawable, key=lambda q: len(UsdGeom.PointBased(q).GetPointsAttr().Get()),
+        render = max(_drawables(sim), key=lambda q: len(UsdGeom.PointBased(q).GetPointsAttr().Get()),
                      default=None)
         out.append((kind, sim, render))
     return out

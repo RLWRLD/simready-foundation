@@ -205,6 +205,17 @@ class Recording:
         for index, (_kind, simulated, render) in enumerate(found):
             own, mine = blocks[index], where[index]
             elements = self.element_arrays[index] if index < len(self.element_arrays) else self.elements
+            # A body's render meshes follow that body's own elements. Newton hands a surface body
+            # every triangle in the model -- a loaded polybag's film came with its filling's
+            # boundary -- and a film vertex bound to the filling rode the filling, not the film.
+            inside = np.all((elements >= mine.start) & (elements < mine.stop), axis=1)
+            if not inside.all():
+                print(f"[recording] {simulated.GetPath()}: {int((~inside).sum())} of {len(elements)} "
+                      f"elements belong to another body; its render meshes are bound to its own "
+                      f"{int(inside.sum())}")
+                elements = elements[inside]
+            for extra in usd_deformable.other_drawables(simulated, render):
+                self._carry_extra(extra, own, authored, elements, mine, simulated)
             if render is None or render.GetPath() == simulated.GetPath():
                 # The asset draws what it simulates -- a cloth. That same mesh, with the asset's
                 # own material on it, moves directly. It shows every node, not only its own.
@@ -219,6 +230,30 @@ class Recording:
                                self._binding_for(rest, own, authored, elements, render, simulated),
                                elements, mine))
         self.visual, self.binding = (self.drawn[0][0], self.drawn[0][1]) if self.drawn else (None, None)
+
+    def _carry_extra(self, extra, own, authored, elements, mine, simulated):
+        """A body's second (third, ...) drawable: bound to the same elements, if it sits on them.
+
+        Its centre need not be the body's -- a polybag's folded lip is at one end of the film -- so
+        the pose is judged by how near its vertices are to the body's own points in the authored
+        pose. One that is not near is hidden and said so: drawn, it would float where it was
+        authored while the body moved, which is a shape no solver produced.
+        """
+        from scipy.spatial import cKDTree
+        rest = np.asarray(UsdGeom.PointBased(extra).GetPointsAttr().Get(), dtype=np.float64)
+        span = max(float(np.ptp(own, axis=0).max()), 1e-9)
+        near = float(np.percentile(cKDTree(own).query(rest)[0], 95))
+        if near > 0.05 * span or not len(elements):
+            UsdGeom.Imageable(extra).MakeInvisible()
+            print(f"[recording] {extra.GetPath()} is not on {simulated.GetPath()} (95% of its "
+                  f"vertices within {near * 1000:.1f} mm of a node on a {span * 1000:.1f} mm body); "
+                  f"hidden rather than drawn where it was authored")
+            return
+        binding = skinning.bind(rest, authored, elements)
+        self.drawn.append((UsdGeom.PointBased(extra), binding, elements, mine))
+        print(f"[recording] bound {len(rest)} vertices of {extra.GetPath().name} to "
+              f"{simulated.GetPath().name}'s {len(elements)} elements too "
+              f"({binding['outside']} outside, carried by their nearest)")
 
     def _solver_order(self, blocks, names):
         """Which body is which block of the one array the solver moves; -> (order, authored).

@@ -36,6 +36,7 @@ import sys  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import asset_properties  # noqa: E402
+import setups  # noqa: E402
 import usd_deformable  # noqa: E402  (the schema names, and PhysX's spelling of them)
 from pxr import Sdf, Usd, UsdGeom, UsdShade  # noqa: E402
 
@@ -144,13 +145,19 @@ if volume:
         stage, material_path, youngs_modulus=values["youngsModulus"],
         poissons_ratio=values.get("poissonsRatio"), **shared)
 else:
-    # The surface stiffnesses are passed straight through as overrides. PhysX would otherwise
-    # derive them from a Young's modulus this asset never authored.
+    # PhysX takes these as stiffnesses (`omniphysics:surface*Stiffness`: "override for stretching
+    # stiffness; by default derived from youngsModulus and thickness"); Newton's importer reads the
+    # same authored numbers as moduli times the thickness. PhysX runs the default setup only, so the
+    # copy carries that setup's reading -- the numbers Newton builds. Carried raw, a 3 mm film ran
+    # 333x stiffer on PhysX than on Newton.
+    reading = setups.parse(setups.DEFAULT)["surface"]
+    stiff = usd_deformable.surface_stiffnesses(values, reading)
+    print(f"[to-physx] surface stiffnesses read as {reading} ({setups.DEFAULT}): {stiff}")
     made = deformableUtils.add_surface_deformable_material(
         stage, material_path, surface_thickness=values.get("thickness"),
-        surface_stretch_stiffness=values.get("stretchStiffness"),
-        surface_shear_stiffness=values.get("shearStiffness"),
-        surface_bend_stiffness=values.get("bendStiffness"), **shared)
+        surface_stretch_stiffness=stiff.get("stretchStiffness"),
+        surface_shear_stiffness=stiff.get("shearStiffness"),
+        surface_bend_stiffness=stiff.get("bendStiffness"), **shared)
 if not made:
     raise SystemExit(f"[to-physx] could not author the {'volume' if volume else 'surface'} "
                      f"material at {material_path}")
