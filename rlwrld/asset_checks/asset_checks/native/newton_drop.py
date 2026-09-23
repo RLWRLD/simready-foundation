@@ -195,8 +195,11 @@ def colour_for_vbd(builder, springs=()):
     colouring for one.
     """
     bending = len(builder.edge_indices)
+    # Always: `builder.color` also colours the rigid bodies (a press plate), which SolverVBD
+    # demands whenever a body is present. With springs, the particle groups are then redone
+    # below with the springs in the graph; the body groups stay.
+    builder.color(include_bending=bending > 0)
     if len(springs) == 0:
-        builder.color(include_bending=bending > 0)
         print(f"[baseline] VBD colouring: {bending} bending edge(s) in the graph")
         return
     try:
