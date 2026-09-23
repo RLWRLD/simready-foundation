@@ -129,7 +129,8 @@ KEYS = ("fell_mm", "thickness_mm", "height_kept", "below_floor_mm", "first_frame
         "seconds")
 # A run directory records one setup (where a soft body's structure, contact and stepping came
 # from; native/setups.py). Cells written before setups existed carry none and are the canon's.
-UNRECORDED_SETUP = "none-derived-canon (unrecorded)"
+UNRECORDED_SETUP = ("none-derived-canon-modulus (unrecorded; before 2026-09-23 the PhysX copy "
+                    "carried surface stiffness raw)")
 
 
 def setup_of(found):

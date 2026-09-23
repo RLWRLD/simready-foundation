@@ -519,6 +519,8 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     # the declared shell thickness and ignores it. Reading it back is the only way the contact
     # margin, the plate's size and the landing tolerance are all talking about the same number.
     sizes = usd_deformable.assign_particle_radii(builder, stage, radius, chosen)
+    # Before the damping: a Rayleigh kernel's damping is handed over relative to the stiffness.
+    usd_deformable.read_surface_stiffness(builder, stage, setup["surface"], declared, chosen)
     usd_deformable.carry_material_damping(builder, stage,
                                           element_damping_as_the_kernel_reads_it(solver_name), chosen)
     recipe = declared["recipe"]
@@ -694,16 +696,19 @@ def contact_source(tag, model, solver_name, setup, recipe, declared, chosen, fix
     source = setups.contact_of(setup, solver_name, recipe)
     if source is None:
         return
-    model.soft_contact_ke, model.soft_contact_kd, model.soft_contact_mu = source["ke"], source["kd"], source["mu"]
+    # Stated in N*s/m; handed over the way this kernel reads it, as the derived damping is.
+    kd = damping_as_the_kernel_reads_it(source["kd"], source["ke"])
+    model.soft_contact_ke, model.soft_contact_kd, model.soft_contact_mu = source["ke"], kd, source["mu"]
     for array, value in ((model.shape_material_ke, source["shape_ke"]),
-                         (model.shape_material_kd, source["kd"]),
+                         (model.shape_material_kd, kd),
                          (model.shape_material_mu, source["mu"])):
         values = array.numpy()
         values[fixtures] = value
         array.assign(wp.array(values, dtype=float))
-    for key, value in (("soft_contact_ke", source["ke"]), ("soft_contact_kd", source["kd"]),
+    for key, value in (("soft_contact_ke", source["ke"]), ("soft_contact_kd", kd),
                        ("soft_contact_mu", source["mu"])):
-        chosen[key] = (value, f"{setup['contact']} contact source: {source['why']}")
+        chosen[key] = (value, f"{setup['contact']} contact source: {source['why']}"
+                       + (f"; {source['kd']:g} N*s/m, as this kernel reads it" if key == "soft_contact_kd" else ""))
     for key in list(chosen):
         if key.endswith("_ke") and key not in ("soft_contact_ke",):
             chosen[key] = (source["shape_ke"], f"the fixtures' stiffness from the same source")
@@ -711,7 +716,8 @@ def contact_source(tag, model, solver_name, setup, recipe, declared, chosen, fix
         asset_properties.consume(declared, *(n for k in ("contact_ke", "contact_kd", "shape_ke", "friction")
                                              for n in asset_properties.RECIPE[k]))
     print(f"[{tag}] contact numbers from the {setup['contact']} source: ke {source['ke']:g} "
-          f"kd {source['kd']:g} mu {source['mu']:g} fixtures ke {source['shape_ke']:g}")
+          f"kd {source['kd']:g} N*s/m (this kernel is handed {kd:g}) mu {source['mu']:g} "
+          f"fixtures ke {source['shape_ke']:g}")
 
 
 def particle_contact_report(tag, model):
