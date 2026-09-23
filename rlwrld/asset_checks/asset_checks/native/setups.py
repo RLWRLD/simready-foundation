@@ -37,6 +37,13 @@ surface -- how a surface body's `physics:stretchStiffness` / `physics:bendStiffn
     The two differ by 1/t in stretch and 1/t^3 in bending -- 333x and 3.7e7x for a 3 mm film.
     Nothing reads a volume's modulus two ways, so this changes surface bodies only.
 
+auto, a level of every factor -- the asset's own source where it states one, ours where it does
+not (`resolve`): structure -> asset if it authors any joining structure, else none; contact ->
+asset if it authors ke, kd and friction, derived if none of them; stepping -> asset if it authors
+dt and iterations, canon if neither; surface -> the reading its own newton:triKe/edgeKe agree
+with, the importer's where it states none. Half a recipe is refused, not completed.
+`auto-auto-auto-auto` is the final: "everything the USD says, and only the rest is ours".
+
 Contact damping is stated in N*s/m in every source and handed to the kernel through
 `newton_drop.damping_as_the_kernel_reads_it`, as the derived one always was: Newton 1.2.1's contact
 law multiplies kd by ke, and its own cloth example writes kd = 1.0 where 1.5.0's writes 1e2 for the
@@ -50,10 +57,10 @@ import itertools
 import asset_properties
 
 FACTORS = {
-    "structure": ("none", "asset"),
-    "contact": ("derived", "asset", "example"),
-    "stepping": ("canon", "example", "asset"),
-    "surface": ("modulus", "stiffness"),
+    "structure": ("none", "asset", "auto"),
+    "contact": ("derived", "asset", "example", "auto"),
+    "stepping": ("canon", "example", "asset", "auto"),
+    "surface": ("modulus", "stiffness", "auto"),
 }
 NAMES = tuple("-".join(levels) for levels in itertools.product(*FACTORS.values()))
 DEFAULT = "none-derived-canon-modulus"
@@ -74,6 +81,49 @@ def parse(name):
         raise SystemExit(f"unknown setup {name!r}; a setup is structure-contact-stepping with "
                          + ", ".join(f"{f} in {{{', '.join(l)}}}" for f, l in FACTORS.items()))
     return dict(zip(FACTORS, parts))
+
+
+FINAL = "auto-auto-auto-auto"
+
+
+def resolve(setup, declared):
+    """Replace `auto` in structure, contact and stepping with the level the asset's own authoring
+    picks; -> (setup, [why]). `surface: auto` stays: it is decided per body, where the numbers are
+    (`usd_deformable.read_surface_stiffness`)."""
+    recipe = declared.get("recipe", {})
+    authored = {n for names in declared.get("_authored", {}).values() for n in names}
+    out, why = dict(setup), []
+
+    def all_or_none(factor, keys, if_all, if_none):
+        have = [k for k in keys if k in recipe]
+        if len(have) == len(keys):
+            why.append(f"{factor}: auto -> {if_all} (the asset authors "
+                       + ", ".join(recipe[k][1] for k in keys) + ")")
+            return if_all
+        if not have:
+            why.append(f"{factor}: auto -> {if_none} (the asset authors none of "
+                       + ", ".join(n for k in keys for n in asset_properties.RECIPE[k]) + ")")
+            return if_none
+        missing = [n for k in keys if k not in recipe for n in asset_properties.RECIPE[k]]
+        raise SystemExit(f"{factor}: the asset authors part of its own {factor} "
+                         f"({', '.join(recipe[k][1] for k in have)}) and not {', '.join(missing)}; "
+                         f"half a recipe is refused, not completed with ours")
+
+    if setup["structure"] == "auto":
+        joins = sorted(n for n in (asset_properties.SEAL_PAIRS, asset_properties.VERTEX_TRIANGLE_EXCLUSIONS,
+                                   asset_properties.EDGE_EXCLUSIONS) if n in authored)
+        joins += [recipe[k][1] for k in ("self_contact_radius", "self_contact_margin") if k in recipe]
+        out["structure"] = "asset" if joins else "none"
+        why.append(f"structure: auto -> {out['structure']} ("
+                   + (f"the asset authors {', '.join(joins)}" if joins else "the asset authors no joining structure")
+                   + ")")
+    if setup["contact"] == "auto":
+        out["contact"] = all_or_none("contact", ("contact_ke", "contact_kd", "friction"), "asset", "derived")
+    if setup["stepping"] == "auto":
+        out["stepping"] = all_or_none("stepping", ("dt", "iterations"), "asset", "canon")
+    if setup["surface"] == "auto":
+        why.append("surface: auto -> decided per surface body from the asset's own newton:triKe/edgeKe")
+    return out, why
 
 
 def stepping_of(setup, recipe, canon_fps, canon_substeps, canon_iterations):
