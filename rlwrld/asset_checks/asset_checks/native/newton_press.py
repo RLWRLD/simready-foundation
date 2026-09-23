@@ -39,6 +39,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import asset_properties
+import integrity
+import setups
 import stepping
 import press_shape
 import recording
@@ -51,13 +53,16 @@ from newton_drop import (ITERATIONS, CONTACT_DAMPING_RATIO, contact_stiffness, s
                          XPBD_MAX_RELAXATION, auto_radius,
                          contact_material, contact_margin,
                          relaxation_is_a_jacobi_factor,
-                         solver_elements, xpbd_relaxation)
+                         solver_elements, xpbd_relaxation,
+                         structure, self_contact, exclusion_kwargs, contact_source,
+                         particle_contact_report, elements_report, resolve_stepping)
 
 PLATE_BODY = 0        # the only body in the scene
 
 
 def build(asset, solver_name, iterations, radius, margin, full_surface=True,
-          substeps=stepping.SUBSTEPS, fps=stepping.FPS):
+          substeps=stepping.SUBSTEPS, fps=stepping.FPS, setup=None):
+    setup = setup or setups.parse(setups.DEFAULT)
     measure = newton.ModelBuilder()
     measure.add_usd(Usd.Stage.Open(asset))
     # Where this Newton's importer has no path for what the asset declares -- 1.2.1 knows nothing
@@ -96,6 +101,10 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     sizes = usd_deformable.assign_particle_radii(builder, stage, radius, chosen)
     usd_deformable.carry_material_damping(builder, stage,
                                           element_damping_as_the_kernel_reads_it(solver_name), chosen)
+    recipe = declared["recipe"]
+    if setup["stepping"] == "asset":
+        asset_properties.consume(declared, *asset_properties.RECIPE["dt"], *asset_properties.RECIPE["iterations"])
+    seal, exclusions, bag = structure(builder, stage, setup, declared, chosen, sizes)
     # Every scene length below -- the contact band, the plate, the landing tolerance -- is sized
     # from the coarsest body, so that no body's contact is narrower than its own particles.
     radius = max(sizes.values()) if sizes else float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
@@ -148,8 +157,9 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
                           color=(0.25, 0.45, 0.85))
 
     membrane_as_springs(builder, solver_name, 1.0 / (fps * substeps), chosen)
+    elements_report("press", builder)
     if solver_name == "vbd":
-        colour_for_vbd(builder)
+        colour_for_vbd(builder, seal)
     model = builder.finalize()
     model.soft_contact_ke = contact_stiffness(model)
     chosen["soft_contact_ke"] = (model.soft_contact_ke,
@@ -178,6 +188,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     chosen["particle_radius_used"] = (radius, "read back from the model, whatever set it")
     chosen["fixture_ke"] = (model.soft_contact_ke, "the floor and the plate are as stiff as the "
                                                    "contact, because it is the same contact")
+    contact_source("press", model, solver_name, setup, recipe, declared, chosen, fixtures)
     asset_properties.report("press", declared, chosen)
 
     # The pipeline is built BEFORE the solver, on purpose. SolverVBD sizes its per-body
@@ -196,7 +207,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     print(f"[press] full-surface soft contact: {full}")
     pipeline = newton.CollisionPipeline(model, **kwargs)
 
-    self_collision, why = asset_properties.self_collision(declared)
+    self_collision, self_radius, self_margin, why = self_contact(setup, recipe, declared, radius, margin)
     print(f"[press] self-collision {'on' if self_collision else 'off'} -- {why}")
     if solver_name == "vbd" and not self_collision and not model.tet_count:
         # Context for a cell that dies here. Every cloth example Newton ships that has a ground
@@ -215,9 +226,11 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
         solver = newton.solvers.SolverVBD(
             model, iterations=iterations,
             particle_enable_self_contact=self_collision,
-            particle_self_contact_radius=radius, particle_self_contact_margin=margin,
-            rigid_body_particle_contact_buffer_size=max(256, model.particle_count))
+            particle_self_contact_radius=self_radius, particle_self_contact_margin=self_margin,
+            rigid_body_particle_contact_buffer_size=max(256, model.particle_count),
+            **exclusion_kwargs("press", exclusions, self_collision))
     else:
+        particle_contact_report("press", model)
         relaxation = (xpbd_relaxation(model.tet_count, model.particle_count)
                       if relaxation_is_a_jacobi_factor() else XPBD_MAX_RELAXATION)
         print(f"[press] soft_body_relaxation {relaxation:.4f}")
@@ -225,15 +238,16 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     return (model, solver, pipeline, radius, height, start_z, thickness, sim_path, kinds,
             (footprint[0] * press_shape.PLATE_FOOTPRINT,
              footprint[1] * press_shape.PLATE_FOOTPRINT, thickness / 2.0), margin, plate_shape,
-            centre)
+            centre, bag)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("asset")
     ap.add_argument("--solver", default="vbd", choices=("vbd", "xpbd"))
-    ap.add_argument("--iterations", type=int, default=ITERATIONS)
-    ap.add_argument("--substeps", type=int, default=0)
+    ap.add_argument("--setup", default=setups.DEFAULT, help="structure-contact-stepping; see setups.py")
+    ap.add_argument("--iterations", type=int, default=None, help="default: the setup's")
+    ap.add_argument("--substeps", type=int, default=0, help="0 = the setup's")
     ap.add_argument("--fps", type=float, default=stepping.FPS)
     ap.add_argument("--seconds", type=float, required=True,
                 help="simulated seconds: the experiment's own SECONDS, which run.py passes")
@@ -245,11 +259,12 @@ def main():
     ap.add_argument("--usd", default=None)
     args = ap.parse_args()
 
-    substeps = args.substeps or stepping.SUBSTEPS
+    setup, substeps, iterations = resolve_stepping(args)
+    args.iterations = iterations
     (model, solver, pipeline, radius, height, start_z, thickness, sim_path, kinds, plate_half,
-     margin, plate_shape, plate_centre) = build(
+     margin, plate_shape, plate_centre, bag) = build(
         args.asset, args.solver, args.iterations, args.radius, args.margin,
-        not args.no_full_surface, substeps, args.fps)
+        not args.no_full_surface, substeps, args.fps, setup)
     frames = int(args.seconds * args.fps)
     settle_at, recover_at = press_shape.settle_frame(frames), press_shape.recovery_frame(frames)
     tape = None
@@ -363,9 +378,11 @@ def main():
     # the same names in the same order -- a table built from them compares like with like. The
     # line is printed whatever happened, a diverged run included: a run with no RESULT line is a
     # run the harness has to guess about.
+    q_last = np.asarray(state_0.particle_q.numpy())
+    extra = integrity.result_tokens(q_last, bag["seal"], bag["bodies"], bag["reach"]) if np.isfinite(q_last).all() else ""
     print(press_shape.result_line("press", start_top or 0.0, lowest_top or 0.0, compressed,
                                   settled_height or 0.0, recovery, deepest, pressed, verdict,
-                                  indent=depth))
+                                  indent=depth) + (" " + extra if extra else ""))
     if tape is not None:
         tape.close()
         print(f"[press] wrote {args.usd}")

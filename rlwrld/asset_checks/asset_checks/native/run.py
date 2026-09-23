@@ -28,6 +28,7 @@ import agreement
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from asset_checks import envs as rigid_envs, experiments as rigid_experiments, video  # noqa: E402
 from asset_checks.kit.scene import SOLVER_SIMULATES  # noqa: E402
+import setups  # noqa: E402
 import usd_deformable  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -97,18 +98,24 @@ def physx_asset(asset):
     return str(converted)
 
 
-def cell_command(env, experiment, asset, usd, seconds):
+def cell_command(env, experiment, asset, usd, seconds, setup=setups.DEFAULT):
     venv, engine, solver = ENVIRONMENTS[env]
     script = SCRIPTS.get((engine, experiment))
     if script is None:
         return None, f"{engine} has no {experiment} experiment yet"
     if engine == "physx":
+        if setup != setups.DEFAULT:
+            # Said rather than ignored: a PhysX cell in a sweep would otherwise look like it ran
+            # the setup it was filed under.
+            return None, (f"the PhysX runners read no setup; only {setups.DEFAULT} runs there, "
+                          f"not {setup}")
         # The PhysX copy is what is simulated; the original is where the textures live, and the
         # conversion deactivates the subtree they are on.
         return [str(BENCH / "isaac-run"), venv, str(HERE / script), physx_asset(asset),
                 "--seconds", str(seconds), "--usd", str(usd), "--visual-asset", asset], None
     return [str(BENCH / f".venv-{venv}" / "bin" / "python"), str(HERE / script), asset,
-            "--solver", solver, "--seconds", str(seconds), "--usd", str(usd)], None
+            "--solver", solver, "--seconds", str(seconds), "--usd", str(usd),
+            "--setup", setup], None
 
 
 def read_result(log):
@@ -197,6 +204,8 @@ def main():
     ap.add_argument("--envs", default="newton12_vbd,newton12_xpbd,newton15_vbd,newton15_xpbd,physx")
     ap.add_argument("--experiments", default=",".join(EXPERIMENTS))
     ap.add_argument("--timeout", type=int, default=1200)
+    ap.add_argument("--setup", default=setups.DEFAULT, choices=setups.NAMES,
+                    help="where the structure, contact and stepping come from (setups.py)")
     ap.add_argument("--no-render", action="store_true")
     args = ap.parse_args()
 
@@ -223,9 +232,9 @@ def main():
             cell_dir.mkdir(parents=True, exist_ok=True)
             usd = cell_dir / "recording.usda"
             seconds = rigid_experiments.get(experiment).SECONDS   # the experiment's, nobody else's
-            row = {"env": env, "experiment": experiment}
+            row = {"env": env, "experiment": experiment, "setup": args.setup}
             try:
-                command, refusal = cell_command(env, experiment, asset, usd, seconds)
+                command, refusal = cell_command(env, experiment, asset, usd, seconds, args.setup)
             except ParityFailure as failure:
                 print(f"[run] {cell}: REFUSED -- {failure}", flush=True)
                 row["error"] = str(failure)

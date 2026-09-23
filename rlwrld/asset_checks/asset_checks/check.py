@@ -29,6 +29,8 @@ from asset_checks import envs, experiments
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1]
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE / "native"))
+import setups  # noqa: E402
 
 
 def engines():
@@ -103,8 +105,15 @@ def main():
                         sorted({s for by_solver in known.values() for s in by_solver})))
     ap.add_argument("--out", help="the run directory; the cell lands in "
                      "<out>/<asset>/<env>/<experiment>/ (default: ./results)")
+    ap.add_argument("--setup", default=setups.DEFAULT, choices=setups.NAMES, metavar="SETUP",
+                    help="deformable only: where the structure, the contact numbers and the "
+                         f"stepping come from, as structure-contact-stepping (default {setups.DEFAULT}; "
+                         "see native/setups.py). One run directory holds one setup.")
     ap.add_argument("--bench", default="/home/wongyun/Workspace/Research/Robotics/simready-bench",
                     help="simready-bench: the venvs, isaac-run and the GPU pin")
+    ap.add_argument("--timeout", type=int, default=None,
+                    help="seconds a deformable cell may run before it is recorded as timed out "
+                         "(default: the runner's own)")
     args = ap.parse_args()
 
     bench = pathlib.Path(args.bench).resolve()
@@ -130,7 +139,7 @@ def main():
         cell.mkdir(parents=True, exist_ok=True)
         (cell / "refused.json").write_text(json.dumps(
             {"asset": str(asset), "experiment": args.experiment, "engine": args.engine,
-             "solver": args.solver, "reason": str(reason)}, indent=1))
+             "solver": args.solver, "setup": args.setup, "reason": str(reason)}, indent=1))
         raise SystemExit(reason)
 
     # How many simulated bodies this engine's runner drives. Newton builds every declared body
@@ -146,6 +155,9 @@ def main():
                f"here to simulate")
     kind = "deformable" if "deformable" in kinds else "rigid"
     print(f"[check] {asset.name} is {kind} ({', '.join(sorted(kinds))} declared)", flush=True)
+    if kind == "rigid" and args.setup != setups.DEFAULT:
+        refuse(f"a setup is for deformable assets -- it says where a soft body's structure, contact "
+               f"and stepping come from -- and {asset.name} is rigid")
 
     # Refusals, before anything is launched, each saying what it is that cannot be done.
     from asset_checks.kit.scene import SOLVER_SIMULATES
@@ -163,7 +175,8 @@ def main():
                          + ", ".join(sorted(experiments.for_kind(kind))))
 
     print(f"[check] {experiment.NAME} on {env.name} (Isaac {env.isaac}, {env.engine}"
-          + (f" {env.newton.rstrip('.')}" if env.newton else "") + f", {env.solver}) -> {cell}", flush=True)
+          + (f" {env.newton.rstrip('.')}" if env.newton else "") + f", {env.solver})"
+          + (f", setup {args.setup}" if kind == "deformable" else "") + f" -> {cell}", flush=True)
 
     # This cell is run again whatever is there; every other cell in the run directory is left
     # alone. The rigid runner refuses an existing directory outright, because a *matrix* must not
@@ -173,7 +186,10 @@ def main():
         shutil.rmtree(cell)
     if kind == "deformable":
         command = [sys.executable, str(HERE / "native" / "run.py"), str(asset),
-                   "--out", str(out), "--envs", env.name, "--experiments", experiment.NAME]
+                   "--out", str(out), "--envs", env.name, "--experiments", experiment.NAME,
+                   "--setup", args.setup]
+        if args.timeout is not None:
+            command += ["--timeout", str(args.timeout)]
     else:
         command = [sys.executable, "-m", "asset_checks.run", "--bench", str(bench),
                    "--out", str(out), "--envs", env.name,

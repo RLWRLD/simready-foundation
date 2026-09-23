@@ -59,6 +59,34 @@ EDGE_DAMPING = ("newton:edgeKd",)
 SELF_COLLISION = ("physxDeformableBody:selfCollision", "physxParticle:selfCollision",
                   "newton:selfCollisionEnabled")
 SELF_COLLISION_WHEN_SILENT = False
+# What an asset authors for its own runtime, beside the schemas. The polybag family carries a
+# recipe under `rlwrld:` on its default prim -- the contact's numbers, the stepping, the seal that
+# closes the bag, the self-contact that lets its film meet its filling -- and neither Newton's
+# importer nor PhysX reads a word of it. Which of it a run consumes is the setup's choice
+# (`setups.py`); that it is authored is printed either way, so no run can say "the asset declares
+# none" of a thing the asset declares. Measured before this existed: the canon's log said exactly
+# that of this asset's friction and self-contact, both authored here.
+RECIPE = {
+    "contact_ke": ("rlwrld:contact:soft_contact_ke",),
+    "contact_kd": ("rlwrld:contact:soft_contact_kd",),
+    "shape_ke": ("rlwrld:contact:shape_contact_ke",),
+    "friction": ("rlwrld:simulation:soft_contact_mu",),
+    "dt": ("rlwrld:simulation:dt_s",),
+    "iterations": ("rlwrld:simulation:iterations",),
+    "self_contact_radius": ("rlwrld:contact:self_contact_radius_m",),
+    "self_contact_margin": ("rlwrld:contact:self_contact_margin_m",),
+    "seal_ke": ("rlwrld:contact:seal_spring_ke_n_m",),
+    "particle_radius": ("rlwrld:contact:particle_radius_m",),
+    "damping_s": ("rlwrld:simulation:damping_s",),
+}
+# On a simulated prim: the structure that makes its mesh one object.
+SEAL_PAIRS = "rlwrld:sealPairs"                                # (n, 2) prim-local point indices
+SEAL_KE = "rlwrld:sealStiffness"                               # N/m, the prim's own word for RECIPE["seal_ke"]
+VERTEX_TRIANGLE_EXCLUSIONS = "rlwrld:foldVertexContactExclusions"   # (n, 2) local (vertex, triangle)
+EDGE_EXCLUSIONS = "rlwrld:foldEdgeContactExclusions"                # (n, 2) in a numbering nobody authored
+# Namespaces that are USD's own or the schemas': an authored attribute outside these, on a prim a
+# run reads, is a vendor's word to this pipeline, and one it does not consume is printed as such.
+STANDARD_NAMESPACES = ("primvars", "xformOp", "material", "physics", "inputs", "outputs", "ui")
 
 
 def _first(prims, names):
@@ -104,7 +132,35 @@ def read(asset):
         found[key] = value
         found[key + "_source"] = where
     found["self_collision"], found["self_collision_source"] = _first_flag(prims, SELF_COLLISION)
+    # The recipe lives on the default prim, the one that is the asset.
+    root = stage.GetDefaultPrim()
+    found["recipe"] = {}
+    for key, names in RECIPE.items():
+        value, where = _first([root] if root else [], names)
+        if value is not None:
+            found["recipe"][key] = (value, where)
+    # Every namespaced attribute a vendor authored on the prims a run reads, so that what a run
+    # did not consume can be said. `_consumed` is what the standard reading above took; a runner
+    # adds what its setup took, and `report` prints the difference.
+    found["_authored"] = {}
+    for prim in ([root] if root else []) + prims:
+        names = sorted(a.GetName() for a in prim.GetAttributes()
+                       if a.HasAuthoredValue() and ":" in a.GetName()
+                       and a.GetName().split(":")[0] not in STANDARD_NAMESPACES)
+        if names:
+            found["_authored"][str(prim.GetPath())] = names
+    found["_consumed"] = {found[k + "_source"].rsplit(".", 1)[1] for k in
+                          ("particle_radius", "friction", "restitution", "density", "youngs_modulus",
+                           "poissons_ratio", "thickness", "stretch_stiffness", "bend_stiffness",
+                           "shear_stiffness", "damping") if found.get(k + "_source")}
+    if found.get("self_collision_source"):
+        found["_consumed"].add(found["self_collision_source"].rsplit(".", 1)[1])
     return found
+
+
+def consume(declared, *names):
+    """Mark attribute names a runner's setup read, so `report` does not list them as unread."""
+    declared.setdefault("_consumed", set()).update(names)
 
 
 def report(tag, declared, chosen):
@@ -124,6 +180,14 @@ def report(tag, declared, chosen):
               f"({declared['self_collision_source']})")
     for key, (value, why) in sorted(chosen.items()):
         print(f"[{tag}] ours:  {key} = {value:g}  -- {why}")
+    for key, (value, where) in sorted(declared.get("recipe", {}).items()):
+        print(f"[{tag}] asset recipe: {key} = {value:g}  ({where})")
+    consumed = declared.get("_consumed", set())
+    for path, names in sorted(declared.get("_authored", {}).items()):
+        unread = [n for n in names if n not in consumed]
+        if unread:
+            print(f"[{tag}] authored on {path}, not consumed by this run ({len(unread)}): "
+                  + ", ".join(unread))
 
 
 def friction(declared):
@@ -135,8 +199,13 @@ def friction(declared):
     """
     if declared.get("friction") is not None:
         return declared["friction"], declared.get("friction_source")
-    return DEFAULT_FRICTION, ("the asset declares no friction; one value for every engine and "
-                              "solver so they rub the same floor")
+    recipe = declared.get("recipe", {}).get("friction")
+    if recipe is not None:
+        return DEFAULT_FRICTION, (f"the asset authors {recipe[0]:g} for its own runtime "
+                                  f"({recipe[1]}), which this setup's contact source does not read; "
+                                  f"the default every engine and solver shares")
+    return DEFAULT_FRICTION, ("the asset declares no friction under the schemas; one value for "
+                              "every engine and solver so they rub the same floor")
 
 
 def self_collision(declared):
@@ -147,8 +216,14 @@ def self_collision(declared):
     """
     if declared.get("self_collision") is not None:
         return declared["self_collision"], declared["self_collision_source"]
+    recipe = declared.get("recipe", {}).get("self_contact_radius")
+    if recipe is not None:
+        return (SELF_COLLISION_WHEN_SILENT,
+                f"the asset authors a self-contact radius for its own runtime ({recipe[1]}), which "
+                f"this setup's structure source does not read; the schema default is off")
     return (SELF_COLLISION_WHEN_SILENT,
-            "the asset does not declare it; physxDeformableBody:selfCollision defaults to off")
+            "the asset does not declare it under the schemas; physxDeformableBody:selfCollision "
+            "defaults to off")
 
 
 def contact_size(declared):
