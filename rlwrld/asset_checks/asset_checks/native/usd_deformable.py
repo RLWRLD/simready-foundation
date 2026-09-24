@@ -636,19 +636,14 @@ def vertex_triangle_exclusions(builder, stage, declared, report=None):
 
     Local vertex ids go through the point match; local triangle ids are the prim's face order,
     matched to the builder's triangles by their vertex triple -- a triple the builder does not
-    have means the numbering is not what it looks like, and refuses. Edge-edge exclusions are
-    authored in an edge numbering the asset does not state, so they cannot be mapped and are
-    reported as such rather than guessed.
+    have means the numbering is not what it looks like, and refuses.
     """
     triple_of = {}
     for t, tri in enumerate(np.asarray(builder.tri_indices, dtype=np.int64).reshape(-1, 3)):
         triple_of[tuple(sorted(tri.tolist()))] = t
-    out, dropped_edges = {}, 0
+    out = {}
     for _kind, sim, _render in bodies(stage):
         attr = sim.GetAttribute(asset_properties.VERTEX_TRIANGLE_EXCLUSIONS)
-        edges = sim.GetAttribute(asset_properties.EDGE_EXCLUSIONS)
-        if edges and edges.HasAuthoredValue():
-            dropped_edges += len(edges.Get())
         if not (attr and attr.HasAuthoredValue()):
             continue
         index = builder_index(builder, sim)
@@ -668,7 +663,76 @@ def vertex_triangle_exclusions(builder, stage, declared, report=None):
         if report is not None:
             report[f"contact_exclusions {sim.GetPath()}"] = (
                 len(attr.Get()), "vertex-triangle self-contact pairs the asset excludes, handed to the solver")
-    if dropped_edges:
-        print(f"[baseline] {dropped_edges} edge-edge contact exclusion(s) are authored in an edge "
-              f"numbering the asset does not state; not mappable, not applied")
+    return out
+
+
+# An excluded edge pair is two edges that touch at rest (a fold lying on itself). Under the right
+# numbering their midpoints are far closer than the same edges paired at random; this is how
+# much closer, at least, before the numbering is believed.
+EDGE_EXCLUSION_NEARNESS = 0.25
+
+
+def edge_edge_exclusions(builder, stage, declared, report=None):
+    """The asset's edge-edge self-contact exclusions as builder ids: {edge: {edge}}.
+
+    Edge ids are the ones Newton's own `add_cloth_mesh` gives the prim's authored face list --
+    the numbering the solver's filtering map takes, and the one the vendor's authoring tool
+    produced (it is not stated in the asset; it is measured: see EDGE_EXCLUSION_NEARNESS).
+    Each local edge goes to the builder through its two vertices, whatever order our build
+    added the bodies in; an edge the builder does not have refuses. A pair is written under both
+    of its edges: the solver consults only the querying edge's list, so a pair listed once still
+    collides from its other side.
+    """
+    import newton
+    import warp as wp
+    edge_of = {}
+    for e, (a, b) in enumerate(np.asarray(builder.edge_indices, dtype=np.int64).reshape(-1, 4)[:, 2:4]):
+        edge_of[(min(a, b), max(a, b))] = e
+    out = {}
+    for _kind, sim, _render in bodies(stage):
+        attr = sim.GetAttribute(asset_properties.EDGE_EXCLUSIONS)
+        if not (attr and attr.HasAuthoredValue()):
+            continue
+        mesh = UsdGeom.Mesh(sim)
+        faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int64)
+        if (np.asarray(mesh.GetFaceVertexCountsAttr().Get()) != 3).any():
+            raise SystemExit(f"{sim.GetPath()}: edge exclusions are authored on a mesh with "
+                             f"non-triangle faces; Newton's edge numbering is undefined there")
+        points = _world_points(sim)
+        local = newton.ModelBuilder()
+        local.add_cloth_mesh(pos=wp.vec3(0.0, 0.0, 0.0), rot=wp.quat_identity(), scale=1.0,
+                             vel=wp.vec3(0.0, 0.0, 0.0), vertices=[wp.vec3(*p) for p in points],
+                             indices=faces.tolist(), density=1.0)
+        ends = np.asarray(local.edge_indices, dtype=np.int64).reshape(-1, 4)[:, 2:4]
+        pairs = np.asarray(attr.Get(), dtype=np.int64).reshape(-1, 2)
+        if pairs.min() < 0 or pairs.max() >= len(ends):
+            raise SystemExit(f"{sim.GetPath()}: edge exclusions name edge {pairs.max()}, but Newton "
+                             f"numbers {len(ends)} edges on this mesh; the numbering is not Newton's")
+        mid = points[ends].mean(axis=1)
+        near = np.median(np.linalg.norm(mid[pairs[:, 0]] - mid[pairs[:, 1]], axis=1))
+        shuffled = np.median(np.linalg.norm(
+            mid[np.random.default_rng(0).permutation(pairs[:, 0])] - mid[pairs[:, 1]], axis=1))
+        if near > EDGE_EXCLUSION_NEARNESS * shuffled:
+            raise SystemExit(f"{sim.GetPath()}: under Newton's edge numbering the excluded edge "
+                             f"pairs are {near * 1e3:.1f} mm apart (median), against {shuffled * 1e3:.1f} mm "
+                             f"for the same edges paired at random; the numbering is not Newton's")
+        index = builder_index(builder, sim)
+        for e_a, e_b in pairs:
+            ids = []
+            for e in (e_a, e_b):
+                a, b = index[ends[e]]
+                key = (min(a, b), max(a, b))
+                if key not in edge_of:
+                    raise SystemExit(f"{sim.GetPath()}: excluded edge {e} joins points the builder "
+                                     f"has no edge between")
+                ids.append(edge_of[key])
+            out.setdefault(ids[0], set()).add(ids[1])
+            out.setdefault(ids[1], set()).add(ids[0])
+        asset_properties.consume(declared, asset_properties.EDGE_EXCLUSIONS)
+        print(f"[baseline] {len(pairs)} edge-edge exclusion(s) on {sim.GetPath()} in Newton's edge "
+              f"numbering: excluded pairs {near * 1e3:.1f} mm apart at rest (median), "
+              f"{shuffled * 1e3:.1f} mm when paired at random")
+        if report is not None:
+            report[f"edge_exclusions {sim.GetPath()}"] = (
+                len(pairs), "edge-edge self-contact pairs the asset excludes, in Newton's edge numbering, handed to the solver")
     return out

@@ -19,7 +19,7 @@ the canon's default is not changed here.
 structure -- what joins the asset's bodies into one object
     none      nothing beyond the schemas: every body meets the floor and nothing else
     asset     the asset's own: seal springs (`rlwrld:sealPairs`), self-contact at the radius and
-              margin it authors, its vertex-triangle contact exclusions where the solver takes them
+              margin it authors, its vertex-triangle and edge-edge contact exclusions
 contact -- the contact's stiffness, damping and friction
     derived   the asset's material at its own resolution (`newton_drop.contact_stiffness`),
               critically damped (`contact_damping`), the asset's friction or the shared default
