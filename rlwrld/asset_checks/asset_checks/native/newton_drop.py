@@ -34,6 +34,7 @@ from pxr import Usd
 
 import asset_properties
 import integrity
+import pace
 import setups
 import stepping
 import drop_shape
@@ -522,7 +523,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     # Before the damping: a Rayleigh kernel's damping is handed over relative to the stiffness.
     usd_deformable.read_surface_stiffness(builder, stage, setup["surface"], declared, chosen)
     usd_deformable.carry_material_damping(builder, stage,
-                                          element_damping_as_the_kernel_reads_it(solver_name), chosen)
+                                          element_damping_as_the_kernel_reads_it(solver_name), chosen, declared)
     recipe = declared["recipe"]
     if setup["stepping"] == "asset":
         asset_properties.consume(declared, *asset_properties.RECIPE["dt"], *asset_properties.RECIPE["iterations"])
@@ -589,7 +590,7 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
     chosen["floor_ke"] = (model.soft_contact_ke, "the floor is as stiff as the contact, because "
                                                  "it is the same contact")
     contact_source("baseline", model, solver_name, setup, recipe, declared, chosen, [ground_shape])
-    asset_properties.report("baseline", declared, chosen)
+    asset_properties.report("baseline", declared, chosen, setup)
 
     # Pipeline first, then the solver: SolverVBD sizes its per-body contact state from the
     # contacts that already exist, and Newton's own message says to construct CollisionPipeline
@@ -811,6 +812,31 @@ def main():
     print(f"[baseline] contact ke {model.soft_contact_ke:.4g} kd {model.soft_contact_kd:g}")
     print(f"[baseline] starts z [{start[:, 2].min():.4f}, {start[:, 2].max():.4f}]")
     first_frame = None
+    clock = pace.Pace("baseline", args.fps)
+
+    def substep_loop():
+        nonlocal state_0, state_1
+        for _ in range(substeps):
+            state_0.clear_forces()
+            pipeline.collide(state_0, contacts)
+            solver.step(state_0, state_1, control, contacts, dt)
+            state_0, state_1 = state_1, state_0
+
+    # Newton's examples record the substep loop once as a CUDA graph and replay it every frame
+    # (e.g. multiphysics/example_softbody_dropping_to_cloth.py); stepped from Python instead, each
+    # substep's dozens of kernel launches cost more than the kernels on a small asset, and the
+    # pace a run reports would be this runner's, not the engine's. Replaying needs the state
+    # buffers back where they started after one frame, i.e. an even number of swaps.
+    graph = None
+    if wp.get_device().is_cuda and substeps % 2 == 0:
+        with wp.ScopedCapture() as capture:
+            substep_loop()
+        graph = capture.graph
+        print(f"[baseline] substep loop captured as a CUDA graph ({substeps} substeps), replayed per frame")
+    else:
+        print(f"[baseline] substep loop stepped from Python: "
+              + ("not a CUDA device" if not wp.get_device().is_cuda else f"{substeps} substeps is odd, "
+                 "so the state buffers end a frame swapped and a replay would read the wrong one"))
     for frame in range(frames):
         # SolverVBD keeps a bounding-volume hierarchy for collision and it does not notice the
         # scene moving on its own: Newton's grasping example rebuilds it once per frame, right
@@ -818,13 +844,14 @@ def main():
         # something moves a long way -- measured, a plate held 5 mm inside the banana while only
         # 553 of its 3074 particles were ever in contact, because the tree still described where
         # everything had been at the start.
+        clock.start(frame)
         if hasattr(solver, "rebuild_bvh"):
             solver.rebuild_bvh(state_0)
-        for _ in range(substeps):
-            state_0.clear_forces()
-            pipeline.collide(state_0, contacts)
-            solver.step(state_0, state_1, control, contacts, dt)
-            state_0, state_1 = state_1, state_0
+        if graph is not None:
+            wp.capture_launch(graph)
+        else:
+            substep_loop()
+        clock.stop()
         q = np.asarray(state_0.particle_q.numpy())
         if not np.isfinite(q).all():
             print(f"[baseline] diverged at {frame / args.fps:.2f}s")
@@ -857,7 +884,7 @@ def main():
     extra = integrity.result_tokens(q, bag["seal"], bag["bodies"], bag["reach"])
     print(drop_shape.result_line("baseline", fell, float(q[:, 2].min()), float(q[:, 2].max()),
                                  below, speed, peak, decision, kept, first_frame)
-          + (" " + extra if extra else ""))
+          + (" " + extra if extra else "") + (" " + clock.tokens() if clock.tokens() else ""))
     if tape is not None:
         tape.close()
         print(f"[baseline] wrote {args.usd}")
