@@ -228,7 +228,7 @@ def read_surface_stiffness(builder, stage, reading, declared=None, report=None):
     builder.edge_bending_properties = [tuple(m) for m in edge_m]
 
 
-def carry_material_damping(builder, stage, convert, report=None):
+def carry_material_damping(builder, stage, convert, report=None, declared=None):
     """Put each body's authored damping on its own elements, in the builder.
 
     Newton's importer takes every stiffness from the USD and no damping: a volume's k_damp comes
@@ -266,6 +266,8 @@ def carry_material_damping(builder, stage, convert, report=None):
             for t, (a, b, c, d) in enumerate(tets):
                 if a in mine:
                     tet_m[t][2] = convert("tet", value, tet_m[t][0])
+            if declared is not None:
+                asset_properties.consume(declared, name)
             if report is not None:
                 report[f"tet_damping {path}"] = (value, f"{name} in Pa.s, handed over as this kernel reads it")
         else:
@@ -279,12 +281,16 @@ def carry_material_damping(builder, stage, convert, report=None):
                 for t, (a, b, c) in enumerate(tris):
                     if a in mine:
                         tri_m[t][2] = convert("tri", value, tri_m[t][0])
+                if declared is not None:
+                    asset_properties.consume(declared, name)
                 if report is not None:
                     report[f"tri_damping {path}"] = (value, f"{name}, handed over as this kernel reads it")
             if bend is not None:
                 for e, (_, _, a, b) in enumerate(edges):
                     if a in mine:
                         edge_m[e][1] = convert("edge", bend, edge_m[e][0])
+                if declared is not None:
+                    asset_properties.consume(declared, bend_name)
                 if report is not None:
                     report[f"edge_damping {path}"] = (bend, f"{bend_name}, handed over as this kernel reads it")
     builder.tet_materials = [tuple(m) for m in tet_m]

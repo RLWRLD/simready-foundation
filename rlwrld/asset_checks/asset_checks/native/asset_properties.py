@@ -121,7 +121,7 @@ def read(asset):
                                                   if p.GetMetadata("apiSchemas") else []))]
     geometry = [p for p in stage.Traverse() if p.IsA(UsdGeom.PointBased)]
     prims = materials + geometry
-    found = {}
+    found = {"_asset": str(asset)}          # `account` re-reads it to check restatements
     for key, names in (("particle_radius", RADIUS), ("friction", FRICTION),
                        ("restitution", RESTITUTION), ("density", DENSITY),
                        ("youngs_modulus", YOUNGS), ("poissons_ratio", POISSON),
@@ -163,12 +163,144 @@ def consume(declared, *names):
     declared.setdefault("_consumed", set()).update(names)
 
 
-def report(tag, declared, chosen):
-    """Print, every run, which numbers the asset gave and which we picked.
+# ------------------------------------------------------------------ every authored word, accounted for
+# A vendor attribute a run does not read is either deliberately set aside by the run's setup, or
+# accounted for below, or the run refuses. Printing "not consumed" and carrying on is how the
+# polybag's fold edge exclusions sat unread for two days while the bag it held together flew
+# apart (2026-09-22..24). The classes:
+#   restated    the same quantity as a consumed attribute, in the vendor's runtime's own terms;
+#               checked against it under that runtime's conversion (`restated_disagreements`),
+#               and a disagreement refuses -- that check is what would have caught the film's
+#               stiffness written in the wrong unit (2026-09-23)
+#   experiment  belongs to an experiment fixture (a gripper), not to the asset
+#   runtime     a solver buffer or the vendor's file bookkeeping; no physics
+#   authoring   the vendor's authoring intermediates, already baked into the authored mesh; not
+#               among the runtime items the vendor listed (SpaceAI reply, 2026-09-24)
+#   visual      binds a display mesh; a recording concern, which binds by its own rule
+# Names, not patterns: a pattern that covers today's fold data would also cover tomorrow's fold
+# exclusions, which is exactly the attribute this list exists not to wave through.
+ACCOUNTED = {
+    "newton:density": "restated", "newton:kMu": "restated", "newton:kLambda": "restated",
+    "newton:triKa": "restated", "rlwrld:contact:particle_radius_m": "restated",
+    "rlwrld:simulation:damping_s": "restated",
+    "rlwrld:simulation:grip_contact_mu": "experiment",
+    "rlwrld:contact:rigid_body_particle_contact_buffer_size": "runtime",
+    "rlwrld:formatVersion": "runtime", "rlwrld:runtimeAdapter": "runtime",
+    "rlwrld:flatPattern": "authoring", "rlwrld:foldBindIndices": "authoring",
+    "rlwrld:foldBindWeights": "authoring", "rlwrld:foldFlapFaces": "authoring",
+    "rlwrld:foldFlapPattern": "authoring", "rlwrld:foldFlapThickness": "authoring",
+    "rlwrld:foldFormedRestPoints": "authoring", "rlwrld:foldLipIndices": "authoring",
+    "rlwrld:foldNormalOffsets": "authoring", "rlwrld:foldParticleArea": "authoring",
+    "rlwrld:foldTrianglePattern": "authoring", "rlwrld:foldTriangleRest": "authoring",
+    "rlwrld:labelTriangles": "authoring",
+    "rlwrld:normalOffsets": "visual", "rlwrld:particleIndices": "visual",
+}
+# What each setup factor owns: under a level other than `asset` these are set aside on purpose.
+SETUP_OWNED = {
+    "structure": (SEAL_PAIRS, SEAL_KE, VERTEX_TRIANGLE_EXCLUSIONS, EDGE_EXCLUSIONS,
+                  *RECIPE["self_contact_radius"], *RECIPE["self_contact_margin"], *RECIPE["seal_ke"]),
+    "contact": (*RECIPE["contact_ke"], *RECIPE["contact_kd"], *RECIPE["friction"], *RECIPE["shape_ke"]),
+    "stepping": (*RECIPE["dt"], *RECIPE["iterations"]),
+}
+RESTATED_TOLERANCE = 1e-4          # relative; the vendor's floats are written at float32
+
+
+def _prim_values(stage, path):
+    prim = stage.GetPrimAtPath(path)
+    return {a.GetName(): a.Get() for a in prim.GetAttributes() if a.HasAuthoredValue()}
+
+
+def restated_disagreements(declared):
+    """Every `restated` attribute checked against what it restates -> [problem]. A restatement
+    whose counterpart is missing is a problem too: it cannot be checked, so it is not accounted for."""
+    out = []
+    stage = Usd.Stage.Open(declared["_asset"])
+
+    def differ(got, want):
+        return abs(got - want) > RESTATED_TOLERANCE * max(abs(want), 1e-12)
+
+    authored = declared.get("_authored", {})
+    radii = []
+    for path, names in authored.items():
+        v = _prim_values(stage, path)
+        if "newton:particleRadius" in v:
+            radii.append(float(v["newton:particleRadius"]))
+    for path, names in sorted(authored.items()):
+        v = _prim_values(stage, path)
+        E, nu, rho, t = (v.get("physics:youngsModulus"), v.get("physics:poissonsRatio"),
+                         v.get("physics:density"), v.get("physics:thickness"))
+        for name in names:
+            if ACCOUNTED.get(name) != "restated":
+                continue
+            got = v[name]
+            if name == "newton:density":
+                want = None if rho is None else rho * (t if t is not None else 1.0)
+                what = "physics:density" + (" x physics:thickness (areal)" if t is not None else "")
+            elif name in ("newton:kMu", "newton:kLambda"):
+                want = None if E is None or nu is None else (
+                    E / (2 * (1 + nu)) if name == "newton:kMu" else E * nu / ((1 + nu) * (1 - 2 * nu)))
+                what = "the Lame parameter of physics:youngsModulus and physics:poissonsRatio"
+            elif name == "newton:triKa":
+                want, what = 0.0, "Newton's membrane with no Poisson term, which the schema authors none of"
+            elif name == "rlwrld:contact:particle_radius_m":
+                want = min(radii, key=lambda r: abs(r - got)) if radii else None
+                what = "a body's newton:particleRadius"
+            elif name == "rlwrld:simulation:damping_s":
+                ratios = []
+                for other in authored:
+                    ov = _prim_values(stage, other)
+                    for kd, ke in (("newton:triKd", "newton:triKe"), ("newton:edgeKd", "newton:edgeKe")):
+                        if kd in ov and ov.get(ke):
+                            ratios.append((f"{other}.{kd}/{ke}", ov[kd] / ov[ke]))
+                bad = [r for r in ratios if differ(r[1], got)]
+                if not ratios:
+                    out.append(f"{path}.{name} = {got:g} restates damping ratios the asset authors none of")
+                for where, r in bad:
+                    out.append(f"{path}.{name} = {got:g} but {where} = {r:.6g}")
+                continue
+            if want is None:
+                out.append(f"{path}.{name} = {got:g} restates {what}, which is not authored beside it")
+            elif differ(float(got), want):
+                out.append(f"{path}.{name} = {got:g} but {what} gives {want:.6g}")
+    return out
+
+
+def account(declared, setup):
+    """Refuse the run unless every vendor attribute it does not consume is set aside by the setup
+    or accounted for (ACCOUNTED), and every restatement agrees; -> {name: why} of what was set
+    aside, for the report."""
+    consumed = declared.get("_consumed", set())
+    aside, unknown = {}, []
+    for path, names in sorted(declared.get("_authored", {}).items()):
+        for name in names:
+            if name in consumed:
+                continue
+            owner = next((f for f, owned in SETUP_OWNED.items() if name in owned), None)
+            if owner is not None and setup.get(owner) != "asset":
+                aside[name] = f"set aside by setup {owner}={setup.get(owner)}"
+            elif name in ACCOUNTED:
+                aside[name] = ACCOUNTED[name]
+            else:
+                unknown.append(f"{path}.{name}")
+    problems = restated_disagreements(declared)
+    if unknown:
+        raise SystemExit("refused: the asset authors attribute(s) this run neither reads nor accounts "
+                         "for -- read them, or add them to asset_properties.ACCOUNTED with a class: "
+                         + ", ".join(unknown))
+    if problems:
+        raise SystemExit("refused: the asset states a quantity twice and the two disagree: "
+                         + "; ".join(problems))
+    return aside
+
+
+def report(tag, declared, chosen, setup):
+    """Print, every run, which numbers the asset gave and which we picked -- and refuse the run if
+    the asset authors anything it neither reads nor accounts for (`account`).
 
     A run whose log does not say this cannot be audited later, and a benchmark nobody can audit
     is a benchmark nobody should believe.
     """
+    aside = account(declared, setup)
     for key in ("particle_radius", "thickness", "friction", "restitution", "density",
                 "youngs_modulus", "poissons_ratio", "stretch_stiffness", "bend_stiffness",
                 "shear_stiffness", "damping"):
@@ -186,8 +318,10 @@ def report(tag, declared, chosen):
     for path, names in sorted(declared.get("_authored", {}).items()):
         unread = [n for n in names if n not in consumed]
         if unread:
-            print(f"[{tag}] authored on {path}, not consumed by this run ({len(unread)}): "
-                  + ", ".join(unread))
+            print(f"[{tag}] authored on {path}, not read by this run ({len(unread)}): "
+                  + ", ".join(f"{n} [{aside[n]}]" for n in unread))
+    print(f"[{tag}] every authored attribute is read, set aside by the setup, or accounted for; "
+          f"restatements agree")
 
 
 def friction(declared):

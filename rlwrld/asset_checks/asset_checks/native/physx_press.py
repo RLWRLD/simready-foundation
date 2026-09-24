@@ -138,7 +138,8 @@ if declared.get("youngs_modulus") is not None:
     chosen["contact_stiffness_source"] = (declared["youngs_modulus"],
                                           "PhysX contacts run off the bound material's modulus, "
                                           "not a separate penalty constant")
-asset_properties.report("physx", declared, chosen)
+import setups  # noqa: E402  (PhysX runs the default setup only; run.py refuses others)
+asset_properties.report("physx", declared, chosen, setups.parse(setups.DEFAULT))
 # Of the five environments only Newton's VBD has a self-collision switch. The OmniPhysics
 # deformable schemas this conversion applies declare none -- their only self-collision attribute is
 # a `selfCollisionFilterPose` purpose -- so PhysX runs whatever its own default is and there is

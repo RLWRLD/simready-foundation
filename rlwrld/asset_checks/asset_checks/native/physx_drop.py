@@ -174,7 +174,8 @@ contact_offset = newton_drop.contact_margin(offset, args.substeps, args.fps, arg
 chosen["contact_offset"] = (contact_offset,
                             f"the band Newton is given too: {newton_drop.CONTACT_MARGIN_OF_RADIUS:g}x the rest "
                             f"offset, or one substep of this fall, whichever is wider")
-asset_properties.report("physx", declared, chosen)
+import setups  # noqa: E402  (PhysX runs the default setup only; run.py refuses others)
+asset_properties.report("physx", declared, chosen, setups.parse(setups.DEFAULT))
 # Of the five environments only Newton's VBD has a self-collision switch. The OmniPhysics
 # deformable schemas this conversion applies declare none -- their only self-collision attribute is
 # a `selfCollisionFilterPose` purpose -- so PhysX runs whatever its own default is and there is

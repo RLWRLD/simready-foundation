@@ -40,6 +40,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import asset_properties
 import integrity
+import pace
 import setups
 import stepping
 import press_shape
@@ -102,7 +103,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     # Before the damping: a Rayleigh kernel's damping is handed over relative to the stiffness.
     usd_deformable.read_surface_stiffness(builder, stage, setup["surface"], declared, chosen)
     usd_deformable.carry_material_damping(builder, stage,
-                                          element_damping_as_the_kernel_reads_it(solver_name), chosen)
+                                          element_damping_as_the_kernel_reads_it(solver_name), chosen, declared)
     recipe = declared["recipe"]
     if setup["stepping"] == "asset":
         asset_properties.consume(declared, *asset_properties.RECIPE["dt"], *asset_properties.RECIPE["iterations"])
@@ -191,7 +192,7 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     chosen["fixture_ke"] = (model.soft_contact_ke, "the floor and the plate are as stiff as the "
                                                    "contact, because it is the same contact")
     contact_source("press", model, solver_name, setup, recipe, declared, chosen, fixtures)
-    asset_properties.report("press", declared, chosen)
+    asset_properties.report("press", declared, chosen, setup)
 
     # The pipeline is built BEFORE the solver, on purpose. SolverVBD sizes its per-body
     # contact state from the contacts that already exist, and Newton's own error message says
@@ -301,6 +302,7 @@ def main():
     deepest, recovered, contact_peak, plate_peak, settled_height = 0.0, None, 0, 0, None
     depth, settled, lowest_q, finite = None, None, None, True
     last_plate_z = start_z
+    clock = pace.Pace("press", args.fps)
     for frame in range(frames):
         plate_z = press_shape.plate_height(frame, frames, start_z, bottom_z)
         speed = (plate_z - last_plate_z) * args.fps
@@ -310,6 +312,7 @@ def main():
         # adding it changed the measured compression by 0.1 mm. The tree it rebuilds is for
         # particle self-contact; shape collision is refreshed by `pipeline.collide` every substep
         # regardless. It is kept because the example does it, not because it fixed anything.
+        clock.start(frame)
         if hasattr(solver, "rebuild_bvh"):
             solver.rebuild_bvh(state_0)
         for _ in range(substeps):
@@ -318,6 +321,7 @@ def main():
             pipeline.collide(state_0, contacts)
             solver.step(state_0, state_1, control, contacts, dt)
             state_0, state_1 = state_1, state_0
+        clock.stop()
         q = np.asarray(state_0.particle_q.numpy())
         if not np.isfinite(q).all():
             print(f"[press] diverged at {frame / args.fps:.2f}s")
@@ -384,7 +388,8 @@ def main():
     extra = integrity.result_tokens(q_last, bag["seal"], bag["bodies"], bag["reach"]) if np.isfinite(q_last).all() else ""
     print(press_shape.result_line("press", start_top or 0.0, lowest_top or 0.0, compressed,
                                   settled_height or 0.0, recovery, deepest, pressed, verdict,
-                                  indent=depth) + (" " + extra if extra else ""))
+                                  indent=depth) + (" " + extra if extra else "")
+          + (" " + clock.tokens() if clock.tokens() else ""))
     if tape is not None:
         tape.close()
         print(f"[press] wrote {args.usd}")
