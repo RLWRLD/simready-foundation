@@ -641,7 +641,8 @@ def build(asset, solver_name, iterations, radius, drop, margin, full_surface, su
 # ---------------------------------------------------------------- what a setup adds, shared by the runners
 def structure(builder, stage, setup, declared, chosen, sizes):
     """Build what the setup's structure source says joins the bodies; -> (seal pairs added,
-    exclusions, bag). Called before anything is lifted: the match is at authored coordinates.
+    exclusions (vertex-triangle, edge-edge), bag). Called before anything is lifted: the match
+    is at authored coordinates.
 
     `bag` is what `integrity` measures in every setup: the authored seal pairs (springs or not),
     each body's particles, and the reach (the coarsest contact size, doubled)."""
@@ -654,9 +655,10 @@ def structure(builder, stage, setup, declared, chosen, sizes):
         if len(authored_seal):
             print(f"[baseline] the asset authors {len(authored_seal)} seal pair(s); this setup's "
                   f"structure source is '{setup['structure']}', so no seal is built")
-        return np.zeros((0, 2), dtype=np.int64), {}, bag
+        return np.zeros((0, 2), dtype=np.int64), ({}, {}), bag
     seal = usd_deformable.add_seal_springs(builder, stage, declared, chosen)
-    exclusions = usd_deformable.vertex_triangle_exclusions(builder, stage, declared, chosen)
+    exclusions = (usd_deformable.vertex_triangle_exclusions(builder, stage, declared, chosen),
+                  usd_deformable.edge_edge_exclusions(builder, stage, declared, chosen))
     asset_properties.consume(declared, *asset_properties.RECIPE["self_contact_radius"],
                              *asset_properties.RECIPE["self_contact_margin"])
     return seal, exclusions, bag
@@ -676,19 +678,24 @@ def self_contact(setup, recipe, declared, radius, margin):
 
 
 def exclusion_kwargs(tag, exclusions, self_collision):
-    """SolverVBD's keyword for the asset's vertex-triangle exclusions, if this Newton has it."""
-    if not exclusions:
-        return {}
-    if not self_collision:
-        print(f"[{tag}] contact exclusions are authored but self-contact is off; nothing to exclude")
-        return {}
-    name = "particle_external_vertex_contact_filtering_map"
-    if name not in inspect.signature(newton.solvers.SolverVBD.__init__).parameters:
-        raise SystemExit(f"this Newton's SolverVBD takes no {name}; the asset's contact exclusions "
-                         f"cannot be applied here")
-    print(f"[{tag}] {sum(len(v) for v in exclusions.values())} vertex-triangle exclusion(s) on "
-          f"{len(exclusions)} vertices handed to SolverVBD")
-    return {name: exclusions}
+    """SolverVBD's keywords for the asset's (vertex-triangle, edge-edge) exclusions; refuses if
+    this Newton has no such keyword."""
+    kwargs = {}
+    for what, name, found in (
+            ("vertex-triangle", "particle_external_vertex_contact_filtering_map", exclusions[0]),
+            ("edge-edge", "particle_external_edge_contact_filtering_map", exclusions[1])):
+        if not found:
+            continue
+        if not self_collision:
+            print(f"[{tag}] {what} contact exclusions are authored but self-contact is off; nothing to exclude")
+            continue
+        if name not in inspect.signature(newton.solvers.SolverVBD.__init__).parameters:
+            raise SystemExit(f"this Newton's SolverVBD takes no {name}; the asset's {what} contact "
+                             f"exclusions cannot be applied here")
+        print(f"[{tag}] {sum(len(v) for v in found.values())} {what} exclusion(s) on "
+              f"{len(found)} primitives handed to SolverVBD")
+        kwargs[name] = found
+    return kwargs
 
 
 def contact_source(tag, model, solver_name, setup, recipe, declared, chosen, fixtures):

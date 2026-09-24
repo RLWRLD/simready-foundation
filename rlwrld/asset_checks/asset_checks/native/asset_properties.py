@@ -83,7 +83,7 @@ RECIPE = {
 SEAL_PAIRS = "rlwrld:sealPairs"                                # (n, 2) prim-local point indices
 SEAL_KE = "rlwrld:sealStiffness"                               # N/m, the prim's own word for RECIPE["seal_ke"]
 VERTEX_TRIANGLE_EXCLUSIONS = "rlwrld:foldVertexContactExclusions"   # (n, 2) local (vertex, triangle)
-EDGE_EXCLUSIONS = "rlwrld:foldEdgeContactExclusions"                # (n, 2) in a numbering nobody authored
+EDGE_EXCLUSIONS = "rlwrld:foldEdgeContactExclusions"                # (n, 2) Newton's add_cloth_mesh edge ids
 # Namespaces that are USD's own or the schemas': an authored attribute outside these, on a prim a
 # run reads, is a vendor's word to this pipeline, and one it does not consume is printed as such.
 STANDARD_NAMESPACES = ("primvars", "xformOp", "material", "physics", "inputs", "outputs", "ui")
