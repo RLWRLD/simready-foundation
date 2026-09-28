@@ -832,7 +832,9 @@ def run_drop(asset_b, geom, args, slope_deg=None):
 # grasp_and_lift
 # --------------------------------------------------------------------------------------
 def settle_on_floor(asset_b, geom, args):
-    """Scene 1: drop from 1 cm, settle, return the settled body poses (or None)."""
+    """Scene 1: drop from 1 cm, settle; return (settled body poses or None, placement offset,
+    settled joint coordinates of the asset). The joint coordinates carry the pose of every body of
+    an articulated asset, which a single root transform cannot."""
     import numpy as np
     import warp as wp
     import newton
@@ -841,6 +843,7 @@ def settle_on_floor(asset_b, geom, args):
     apply_contact_defaults(scene, args)
     normal, spt = add_support(scene, None, args)
     off = place_offset(geom, normal, spt, DROP_HEIGHT)
+    jq0 = scene.joint_coord_count
     scene.add_builder(asset_b, xform=wp.transform(wp.vec3(*off), wp.quat_identity()))
     nb = asset_b.body_count
     sim = Sim(scene, args)
@@ -858,9 +861,10 @@ def settle_on_floor(asset_b, geom, args):
         else:
             quiet_since = None
     bq = sim.body_q()[:nb]
-    if not np.all(np.isfinite(bq)):
-        return None, off
-    return bq, off
+    jq = sim.joint_q()[jq0 : jq0 + asset_b.joint_coord_count]
+    if not (np.all(np.isfinite(bq)) and np.all(np.isfinite(jq))):
+        return None, off, None
+    return bq, off, jq
 
 
 def pad_edge_for(dims, gap):
@@ -884,7 +888,7 @@ def run_grasp(asset_b, geom, parse_info, stage_info, args, video_path=None):
         res.update({"verdict": "fail", "phase": "Setup", "message": "no grasp_identifier prims found"})
         return res
     nb = asset_b.body_count
-    settled, off = settle_on_floor(asset_b, geom, args)
+    settled, off, settled_jq = settle_on_floor(asset_b, geom, args)
     if settled is None:
         res.update({"verdict": "fail", "phase": "Settle", "message": "NaN while settling on the floor"})
         return res
@@ -896,13 +900,16 @@ def run_grasp(asset_b, geom, parse_info, stage_info, args, video_path=None):
     # root body) and follows its settled pose.
     root_authored = np.array(asset_b.body_q[0], dtype=np.float64)
     line_frame = args.line_frame
+    # the body that owns the grasp line (its rigid-body ancestor, else the root body): the rise,
+    # slip and release checks follow this body, whichever frame the line is placed in
+    body_idx = 0
+    anc = g.get("rigid_body_ancestor")
+    if anc:
+        for bi, bd in enumerate(parse_info.get("bodies", [])):
+            if bd.get("path") == anc:
+                body_idx = bi
+                break
     if line_frame == "body":
-        body_idx = 0
-        anc = g.get("rigid_body_ancestor")
-        if anc:
-            for bi, bd in enumerate(parse_info.get("bodies", [])):
-                if bd.get("path") == anc:
-                    body_idx = bi
         ref_authored = np.array(asset_b.body_q[body_idx], dtype=np.float64)
         p_local = [tf_apply(tf_inv(ref_authored), np.array(p)) for p in g["points_world"]]
         gp = [tf_apply(settled[body_idx], p) for p in p_local]
@@ -947,6 +954,7 @@ def run_grasp(asset_b, geom, parse_info, stage_info, args, video_path=None):
         "settle_tilt_deg": round(q_angle_between(root_authored[3:7], settled[0][3:7]), 1),
         "settle_shift_m": round(settle_shift, 4),
         "line_frame": line_frame_used,
+        "grasped_body": parse_info["bodies"][body_idx]["path"] if parse_info.get("bodies") else None,
         "grasp_xform_parent": g.get("parent"),
         "grasp_rigid_body_ancestor": g.get("rigid_body_ancestor"),
     }
@@ -959,8 +967,16 @@ def run_grasp(asset_b, geom, parse_info, stage_info, args, video_path=None):
     newton.solvers.SolverMuJoCo.register_custom_attributes(scene)
     ke, kd = apply_contact_defaults(scene, args)
     add_support(scene, None, args)
-    xf = tf_mul(settled[0], tf_inv(root_authored))
-    scene.add_builder(asset_b, xform=wp.transform(wp.vec3(*xf[:3]), wp.quat(*xf[3:7])))
+    # the asset is added exactly as in the settle scene, then every one of its joint coordinates and
+    # body poses is overwritten with the settled state (not just the root transform, which would put
+    # the child bodies of an articulated asset back at their authored joint positions)
+    jq0 = scene.joint_coord_count
+    b0 = scene.body_count
+    scene.add_builder(asset_b, xform=wp.transform(wp.vec3(*off), wp.quat_identity()))
+    for k in range(asset_b.joint_coord_count):
+        scene.joint_q[jq0 + k] = float(settled_jq[k])
+    for k in range(nb):
+        scene.body_q[b0 + k] = wp.transform(wp.vec3(*settled[k][:3]), wp.quat(*settled[k][3:7]))
     pts_local = local_points_by_body(asset_b)
 
     I3 = np.eye(3) * 1e-2
@@ -1087,10 +1103,10 @@ def run_grasp(asset_b, geom, parse_info, stage_info, args, video_path=None):
         pass
     else:
         bq, aq, p0, p1 = obs()
-        obj_z0 = float(aq[0, 2])
-        obj_xy0 = aq[0, :2].copy()
+        obj_z0 = float(aq[body_idx, 2])
+        obj_xy0 = aq[body_idx, :2].copy()
         z_pad0 = 0.5 * (p0[2] + p1[2])
-        moved = float(np.linalg.norm(aq[0, :3] - settled[0][:3]))
+        moved = float(np.linalg.norm(aq[body_idx, :3] - settled[body_idx][:3]))
         if moved > 0.02:
             notes.append(f"asset moved {moved * 1000:.0f} mm while the gripper was positioned")
         phase_log.append(f"t={sim.t:.1f}s Positioning obj_z={obj_z0:.4f} pads_z={z_pad0:.4f} gap={gap:.3f} pad={e:.4f}")
@@ -1120,7 +1136,7 @@ def run_grasp(asset_b, geom, parse_info, stage_info, args, video_path=None):
             sep = float(np.linalg.norm(p0[:3] - p1[:3])) - e
             jq = sim.joint_q()
             res["grasp_state"] = {"pad_separation": round(sep, 4), "finger_q": [round(float(jq[jq_idx["p0"]]), 4), round(float(jq[jq_idx["p1"]]), 4)], "closed_settled": closed_ok}
-            pushed = float(np.linalg.norm(aq[0, :2] - obj_xy0))
+            pushed = float(np.linalg.norm(aq[body_idx, :2] - obj_xy0))
             phase_log.append(f"t={sim.t:.1f}s Grasping sep={sep:.4f} finger_q={jq[jq_idx['p0']]:.4f},{jq[jq_idx['p1']]:.4f} obj_moved_xy={pushed:.4f}")
             if sep < 0.001:
                 fail("Grasping", "Grasping failed: pads touched (no object)")
@@ -1133,25 +1149,25 @@ def run_grasp(asset_b, geom, parse_info, stage_info, args, video_path=None):
     if verdict is None:
         # Phase: Lifting (ramp z over LIFT_T)
         bq, aq, p0, p1 = obs()
-        obj_z_grasp = float(aq[0, 2])
-        # the material point of the root body that sits between the pads at grasp time;
+        obj_z_grasp = float(aq[body_idx, 2])
+        # the material point of the grasped body that sits between the pads at grasp time;
         # slip = how far that point has moved away from the pad centre (rotation about
         # the pinch axis is not slip)
         pad_c0 = 0.5 * (p0[:3] + p1[:3])
-        grasp_pt_local = tf_apply(tf_inv(aq[0]), pad_c0)
+        grasp_pt_local = tf_apply(tf_inv(aq[body_idx]), pad_c0)
         slip_thr = 0.03
         res["slip_threshold_m"] = slip_thr
 
         def slip_now(aq, p0, p1):
             pc = 0.5 * (p0[:3] + p1[:3])
-            gp_now = tf_apply(aq[0], grasp_pt_local)
+            gp_now = tf_apply(aq[body_idx], grasp_pt_local)
             return float(np.linalg.norm(gp_now - pc)), float(pc[2] - gp_now[2])
 
         def held_check(bq, aq, p0, p1, ph):
             slip, vslip = slip_now(aq, p0, p1)
             res["max_slip_m"] = round(max(res.get("max_slip_m", 0.0), slip), 4)
             if slip > slip_thr:
-                oz = float(aq[0, 2])
+                oz = float(aq[body_idx, 2])
                 fail(ph, f"{ph} failed: object dropped" if (oz < obj_z0 + RISE_MIN or vslip > 0.5 * lift) else f"{ph} failed: object slipped {slip:.3f} m in the jaws")
                 return False
             return True
@@ -1162,38 +1178,38 @@ def run_grasp(asset_b, geom, parse_info, stage_info, args, video_path=None):
         ok = run_for(LIFT_T + 0.2, "Lifting", lift_ctrl, lambda bq, aq, p0, p1: held_check(bq, aq, p0, p1, "Lifting"))
         if ok:
             bq, aq, p0, p1 = obs()
-            dz = float(aq[0, 2]) - obj_z0
-            phase_log.append(f"t={sim.t:.1f}s Lifting obj_z={aq[0, 2]:.4f} dz={dz:.4f} pads_z={0.5 * (p0[2] + p1[2]):.4f} slip={slip_now(aq, p0, p1)[0]:.4f}")
-            res["obj_z_after_lift"] = round(float(aq[0, 2]), 4)
+            dz = float(aq[body_idx, 2]) - obj_z0
+            phase_log.append(f"t={sim.t:.1f}s Lifting obj_z={aq[body_idx, 2]:.4f} dz={dz:.4f} pads_z={0.5 * (p0[2] + p1[2]):.4f} slip={slip_now(aq, p0, p1)[0]:.4f}")
+            res["obj_z_after_lift"] = round(float(aq[body_idx, 2]), 4)
             if dz < RISE_MIN:
-                fail("Lifting", f"Lifting failed: object did not rise {RISE_MIN:.3f}m (actual_dz={dz:.4f}, obj_z={obj_z0:.4f}->{aq[0, 2]:.4f})")
+                fail("Lifting", f"Lifting failed: object did not rise {RISE_MIN:.3f}m (actual_dz={dz:.4f}, obj_z={obj_z0:.4f}->{aq[body_idx, 2]:.4f})")
         if verdict is None:
             ok = run_for(HOLD_T, "HoldBeforeShake", lambda t: set_targets(z=lift, p=q_close_max), lambda bq, aq, p0, p1: held_check(bq, aq, p0, p1, "HoldBeforeShake"))
             if ok:
                 bq, aq, p0, p1 = obs()
-                phase_log.append(f"t={sim.t:.1f}s HoldBeforeShake obj_z={aq[0, 2]:.4f}")
+                phase_log.append(f"t={sim.t:.1f}s HoldBeforeShake obj_z={aq[body_idx, 2]:.4f}")
         if verdict is None:
             ok = run_for(SHAKE_T, "Shake", lambda t: set_targets(z=lift, x=SHAKE_AMP * math.sin(2 * math.pi * SHAKE_HZ * t), p=q_close_max), lambda bq, aq, p0, p1: held_check(bq, aq, p0, p1, "Shake"))
             if ok:
                 bq, aq, p0, p1 = obs()
-                phase_log.append(f"t={sim.t:.1f}s Shake obj_z={aq[0, 2]:.4f}")
+                phase_log.append(f"t={sim.t:.1f}s Shake obj_z={aq[body_idx, 2]:.4f}")
         if verdict is None:
             ok = run_for(HOLD_T, "HoldAfterShake", lambda t: set_targets(z=lift, p=q_close_max), lambda bq, aq, p0, p1: held_check(bq, aq, p0, p1, "HoldAfterShake"))
             if ok:
                 bq, aq, p0, p1 = obs()
                 mz = obj_min_z(bq)
-                phase_log.append(f"t={sim.t:.1f}s HoldAfterShake obj_z={aq[0, 2]:.4f} obj_min_z={mz:.4f} slip={slip_now(aq, p0, p1)[0]:.4f}")
+                phase_log.append(f"t={sim.t:.1f}s HoldAfterShake obj_z={aq[body_idx, 2]:.4f} obj_min_z={mz:.4f} slip={slip_now(aq, p0, p1)[0]:.4f}")
                 if "obj_z_after_lift" in res:
-                    res["creep_in_jaws_m"] = round(res["obj_z_after_lift"] - float(aq[0, 2]), 4)
+                    res["creep_in_jaws_m"] = round(res["obj_z_after_lift"] - float(aq[body_idx, 2]), 4)
                 if mz < 0.005:
                     fail("HoldAfterShake", f"HoldAfterShake failed: object touched ground (z={mz:.4f})")
         if verdict is None:
             bq, aq, p0, p1 = obs()
-            z_before = float(aq[0, 2])
+            z_before = float(aq[body_idx, 2])
             ok = run_for(RELEASE_T, "Dropping", lambda t: set_targets(z=lift, p=0.0))
             if ok:
                 bq, aq, p0, p1 = obs()
-                fell = z_before - float(aq[0, 2])
+                fell = z_before - float(aq[body_idx, 2])
                 needed = 0.5 * (z_before - obj_z0)
                 phase_log.append(f"t={sim.t:.1f}s Dropping fell={fell:.4f} needed={needed:.4f}")
                 if fell < needed:
