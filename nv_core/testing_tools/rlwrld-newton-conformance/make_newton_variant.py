@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -61,11 +62,51 @@ def thin_axis(v):
     return n, ext
 
 
+def _farthest_spread(pts, cap):
+    """The ``cap`` vertices of ``pts`` that spread farthest (greedy farthest-point sampling)."""
+    keep = [int(np.argmax(np.linalg.norm(pts - pts.mean(axis=0), axis=1)))]
+    d = np.linalg.norm(pts - pts[keep[0]], axis=1)
+    while len(keep) < min(cap, len(pts)):
+        j = int(np.argmax(d)); keep.append(j); d = np.minimum(d, np.linalg.norm(pts - pts[j], axis=1))
+    return pts[keep]
+
+
+def _extrude_degenerate(v):
+    """Points of a coplanar or collinear piece, which Qhull refuses, as a 1 mm slab (or bar).
+
+    The outline is taken in the piece's own plane (or its two end points on a line), capped so
+    the extruded set stays <= 64 vertices, then extruded along each missing axis. The extrusion
+    is a hair over 1 mm so the thickness check below does not extrude it a second time."""
+    from scipy.spatial import ConvexHull
+    c = v - v.mean(axis=0)
+    _, _, vt = np.linalg.svd(c, full_matrices=True)
+    ext = [float(np.ptp(c @ vt[k])) for k in range(3)]
+    thin = [k for k in (1, 2) if ext[k] < MIN_THICKNESS_M]
+    if not thin or ext[0] < MIN_THICKNESS_M:
+        raise ValueError(f"piece is degenerate in every direction (extents {ext})")
+    if len(thin) == 1:
+        keep = [k for k in range(3) if k != thin[0]]
+        pts = v[ConvexHull(c @ vt[keep].T).vertices]
+    else:
+        s = c @ vt[0]
+        pts = v[[int(np.argmin(s)), int(np.argmax(s))]]
+    pts = _farthest_spread(pts, MAX_HULL_VERTS >> len(thin))
+    for k in thin:
+        half = 0.5 * MIN_THICKNESS_M * 1.001
+        pts = np.concatenate([pts + half * vt[k], pts - half * vt[k]])
+    return pts
+
+
 def hull_piece(v):
     """Convex hull of a piece as (points <= 64, triangles); thickened when thinner than 1 mm."""
     from scipy.spatial import ConvexHull
     v = np.asarray(v, dtype=np.float64)
-    h = ConvexHull(v)
+    thickened = False
+    try:
+        h = ConvexHull(v)
+    except Exception:  # noqa: BLE001  (scipy.spatial.QhullError: a planar tab, a flat sheet, a wire)
+        v = _extrude_degenerate(v); thickened = True
+        h = ConvexHull(v)
     pts = v[h.vertices]
     # a sliver is thin along one axis, a needle off a ring along two; each extrusion doubles the
     # vertices, so the cap is applied first, small enough that the extruded hull stays <= 64
@@ -74,12 +115,7 @@ def hull_piece(v):
     n_thin = int(sum((ext[i].max() - ext[i].min()) < MIN_THICKNESS_M for i in (1, 2)))
     cap = MAX_HULL_VERTS >> n_thin
     if len(pts) > cap:  # keep the farthest-spread vertices, then hull again
-        keep = [int(np.argmax(np.linalg.norm(pts - pts.mean(axis=0), axis=1)))]
-        d = np.linalg.norm(pts - pts[keep[0]], axis=1)
-        while len(keep) < cap:
-            j = int(np.argmax(d)); keep.append(j); d = np.minimum(d, np.linalg.norm(pts - pts[j], axis=1))
-        pts = pts[keep]; h = ConvexHull(pts); pts = pts[h.vertices]
-    thickened = False
+        pts = _farthest_spread(pts, cap); h = ConvexHull(pts); pts = pts[h.vertices]
     for _ in range(3):
         n, ext1 = thin_axis(pts)
         if ext1 >= MIN_THICKNESS_M:
@@ -115,11 +151,53 @@ def collider_targets(stage):
     for p in stage.Traverse():
         if not p.HasAPI(UsdPhysics.CollisionAPI) or not p.IsA(UsdGeom.Mesh):
             continue
+        if UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr().Get() is False:
+            continue  # physics:collisionEnabled = false: not a collider, nothing to replace
         a = p.GetAttribute("physics:approximation")
         approx = (a.Get() if a and a.HasAuthoredValue() else None) or "none"
         if approx.lower() in REPLACE or approx.lower() == "convexhull":
             out.append((p, approx))  # a convexHull collider is only touched when it is thinner than 1 mm
     return out
+
+
+def holder_path(stage, body, src, is_body, taken):
+    """A holder Xform path under the body, unique to this collider.
+
+    Named after the collider's path relative to the body (``geom/mesh`` -> ``geom_mesh_newton_collision``),
+    so two colliders that share a leaf name under one body get their own holders; a clash with an
+    existing prim or an earlier holder (after the name is made a valid identifier) takes a numeric suffix."""
+    from pxr import Tf
+    if is_body:
+        stem = "newton_collision"
+    else:
+        rel = str(src.GetPath().MakeRelativePath(body.GetPath()))
+        stem = Tf.MakeValidIdentifier(rel.replace("/", "_")) + "_newton_collision"
+    path = body.GetPath().AppendChild(stem); k = 1
+    while str(path) in taken or stage.GetPrimAtPath(path):
+        path = body.GetPath().AppendChild(f"{stem}_{k}"); k += 1
+    taken.add(str(path))
+    return path
+
+
+def check_holders(variant_usd: Path, record: dict) -> list:
+    """Problems with the pieces as authored in ``variant_usd``: every recorded collider must have a
+    holder of its own that carries exactly its pieces, each a collider. Empty when all is well."""
+    from pxr import Usd, UsdPhysics
+    st = Usd.Stage.Open(str(variant_usd))
+    problems = []
+    seen = {}
+    for c in record.get("colliders", []):
+        h = c.get("holder")
+        if not h:
+            problems.append(f"{c['prim']}: no holder recorded"); continue
+        if h in seen:
+            problems.append(f"{c['prim']}: holder {h} shared with {seen[h]}"); continue
+        seen[h] = c["prim"]
+        hp = st.GetPrimAtPath(h)
+        pieces = [q for q in hp.GetChildren() if q.HasAPI(UsdPhysics.CollisionAPI)] if hp else []
+        if len(pieces) != c["pieces"] or not pieces:
+            problems.append(f"{c['prim']}: holder {h} has {len(pieces)} collider pieces, {c['pieces']} recorded")
+    return problems
 
 
 def author_variant(base_usd: Path, variant_usd: Path, threshold: float, max_hulls: int, log) -> dict:
@@ -131,9 +209,9 @@ def author_variant(base_usd: Path, variant_usd: Path, threshold: float, max_hull
         return {}
     # (a package whose only candidates are convexHull colliders of sane thickness ends up with no
     # collider record, and is reported as nothing to replace)
+    # variant_usd is the caller's scratch path next to the final variant (main() replaces the
+    # accepted variant atomically), so an existing, previously accepted variant is never touched here
     variant_usd.parent.mkdir(parents=True, exist_ok=True)
-    if variant_usd.exists():
-        variant_usd.unlink()
     # Authored over the package USD as a sublayer, then flattened into one self-contained
     # layer: usd-core's UsdPhysics parser (which Newton's importer and Isaac Lab's Newton
     # backend both call) corrupts the heap, intermittently, on a stage composed from more
@@ -144,6 +222,7 @@ def author_variant(base_usd: Path, variant_usd: Path, threshold: float, max_hull
     stage = Usd.Stage.Open(layer)
     UsdGeom.SetStageMetersPerUnit(stage, UsdGeom.GetStageMetersPerUnit(base))
     UsdGeom.SetStageUpAxis(stage, UsdGeom.GetStageUpAxis(base))
+    holders = set()  # holder paths handed out in this layer: one per collider, never shared
     record = {"colliders": [], "pieces": 0, "thickened": 0, "coacd": {"threshold": threshold, "max_convex_hull": max_hulls, "max_ch_vertex": MAX_HULL_VERTS, "mcts_nodes": 20, "mcts_iterations": 5, "mcts_max_depth": 1, "merge": True}}
     for prim, approx in targets:
         src = stage.GetPrimAtPath(prim.GetPath())
@@ -176,8 +255,10 @@ def author_variant(base_usd: Path, variant_usd: Path, threshold: float, max_hull
         # a mass authored on a collider that is not the body moves to the pieces (split by volume);
         # a mass authored on the body prim stays where it is
         mass = float(mass_attr.Get()) if (not is_body and mass_attr and mass_attr.HasAuthoredValue()) else None
-        binding = UsdShade.MaterialBindingAPI(src).GetDirectBinding("physics").GetMaterialPath()
-        holder = stage.DefinePrim(body.GetPath().AppendChild(("newton_collision" if is_body else src.GetName() + "_newton_collision")), "Xform")
+        # the physics material the collider resolves to (a direct binding, or one inherited from an
+        # ancestor or a collection), which is what the UsdPhysics parser would have used for it
+        bound = UsdShade.MaterialBindingAPI(src).ComputeBoundMaterial(materialPurpose="physics")[0]
+        holder = stage.DefinePrim(holder_path(stage, body, src, is_body, holders), "Xform")
         UsdGeom.Imageable(holder).GetPurposeAttr().Set(UsdGeom.Tokens.guide)
         for i, (v, f, pvol, thick) in enumerate(pieces):
             piece = UsdGeom.Mesh.Define(stage, holder.GetPath().AppendChild(f"piece_{i:03d}"))
@@ -193,10 +274,8 @@ def author_variant(base_usd: Path, variant_usd: Path, threshold: float, max_hull
             UsdPhysics.MeshCollisionAPI.Apply(pp).GetApproximationAttr().Set(UsdPhysics.Tokens.convexHull)
             if mass is not None:
                 UsdPhysics.MassAPI.Apply(pp).GetMassAttr().Set(mass * pvol / vol)
-            if binding and not binding.isEmpty:
-                mat = UsdShade.Material(stage.GetPrimAtPath(binding))
-                if mat:
-                    UsdShade.MaterialBindingAPI.Apply(pp).Bind(mat, materialPurpose="physics")
+            if bound:
+                UsdShade.MaterialBindingAPI.Apply(pp).Bind(bound, materialPurpose="physics")
             record["thickened"] += int(thick)
         # the original keeps rendering; its collision schemas (and its mass, now on the pieces) are
         # deleted with a list op in this layer, which also covers PhysX schemas usd-core does not know
@@ -205,7 +284,8 @@ def author_variant(base_usd: Path, variant_usd: Path, threshold: float, max_hull
                 or (mass is not None and api == "PhysicsMassAPI")]
         spec = Sdf.CreatePrimInLayer(layer, src.GetPath()); spec.specifier = Sdf.SpecifierOver
         lo = Sdf.TokenListOp(); lo.deletedItems = drop; spec.SetInfo("apiSchemas", lo)
-        record["colliders"].append({"prim": str(prim.GetPath()), "body": str(body.GetPath()), "approximation": approx, "vertices": int(len(pts)), "pieces": len(pieces),
+        record["colliders"].append({"prim": str(prim.GetPath()), "body": str(body.GetPath()), "holder": str(holder.GetPath()),
+                                    "physics_material": str(bound.GetPath()) if bound else None, "approximation": approx, "vertices": int(len(pts)), "pieces": len(pieces),
                                     "piece_vertices_max": max(len(p[0]) for p in pieces), "mass_kg_split": mass, "seconds": round(time.time() - t0, 1)})
         record["pieces"] += len(pieces)
         log(f"    {prim.GetPath()} {approx} {len(pts)}v -> {len(pieces)} pieces in {time.time() - t0:.1f}s")
@@ -308,17 +388,26 @@ def main() -> int:
             import shutil
             shutil.rmtree(target.parent.parent, ignore_errors=True)
             shutil.copytree(base.parent, target.parent.parent, ignore=shutil.ignore_patterns("variants"))
-        rec = author_variant(base, target, args.threshold, args.max_hulls, print)
-        if not rec:
-            skipped.append(name); print("    no mesh collider to replace"); continue
-        if not args.no_verify:
-            v = verify_with_newton(target); rec["newton_parse"] = v
-            print(f"    newton parse: {'OK' if v['ok'] else 'REJECTED'} {v['colliders']} thin={v.get('thin_pieces')} unattached={v.get('unattached')} bodies={v['bodies']} mass={v.get('mass_kg')}" + (f" warnings={v['warnings']}" if v["warnings"] else ""))
-            if not v["ok"]:
-                print(f"    !! variant rejected")
-                if args.write:  # leave no orphan layer behind: the package records nothing for it
-                    target.unlink(missing_ok=True); (target.parent / f"{target.stem}.meta.json").unlink(missing_ok=True)
-                continue
+        # authored to a scratch file next to the variant (same folder, so the re-anchored asset paths
+        # hold) and moved over the variant only once accepted: a failed or rejected regeneration leaves
+        # a previously accepted variant, and the sidecar that points at it, as they were
+        scratch = target.parent / f".{target.stem}.{os.getpid()}.tmp.usd"
+        try:
+            rec = author_variant(base, scratch, args.threshold, args.max_hulls, print)
+            if not rec:
+                skipped.append(name); print("    no mesh collider to replace"); continue
+            bad = check_holders(scratch, rec)
+            if bad:
+                print(f"    !! variant rejected: {bad[:3]}"); continue
+            if not args.no_verify:
+                v = verify_with_newton(scratch); rec["newton_parse"] = v
+                print(f"    newton parse: {'OK' if v['ok'] else 'REJECTED'} {v['colliders']} thin={v.get('thin_pieces')} unattached={v.get('unattached')} bodies={v['bodies']} mass={v.get('mass_kg')}" + (f" warnings={v['warnings']}" if v["warnings"] else ""))
+                if not v["ok"]:
+                    print("    !! variant rejected" + (f"; the existing {target.name} is kept" if target.exists() else ""))
+                    continue
+            os.replace(scratch, target)
+        finally:
+            scratch.unlink(missing_ok=True)
         done += 1
         # sidecars: the variant gets a copy of the base sidecar marked as a variant; the base points at it
         sc = sidecar_for(base); meta = json.loads(sc.read_text())
