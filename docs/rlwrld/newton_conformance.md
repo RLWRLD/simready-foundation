@@ -18,13 +18,34 @@ engine needs that PhysX did not.
 
 ## What
 
-`newton15_cert.py` mirrors the three NVIDIA runtime tests on the standalone Newton 1.5.2 wheel: parse
-with Newton's USD importer, drop 1 cm onto a floor, drop onto a 15° walled slope, and grasp-and-lift on the
-authored `grasp_identifier_01` with a two-pad gantry (close, lift by max(0.3 m, 2 × longest edge), hold 1 s,
-shake 1 cm at 2 Hz for 1.5 s, hold, open). Verdict messages follow NVIDIA's wording so PhysX and Newton
-results can be compared line by line. Every asset runs in its own subprocess; a crash is recorded, not fatal.
-`newton15_cert_report.py` writes the comparison report. `make_newton_variant.py` authors the per-package
-Newton collision layer described below.
+`newton15_cert.py` runs a procedure similar to NVIDIA's FET003 drops and FET005 grasp-and-lift, with
+different parameters, on the standalone Newton 1.5.2 wheel: parse with Newton's USD importer, drop 1 cm onto
+a floor, drop onto a 15° walled slope, and grasp-and-lift on the authored `grasp_identifier_01` with a two-pad
+gantry (close, lift by max(0.3 m, 2 × longest edge), hold 1 s, shake 1 cm along X at 2 Hz for 1.5 s, hold,
+open). Its failure messages reuse the names of NVIDIA's phases ("pads touched (no object)", "did not rise",
+"dropped"), but the thresholds behind them differ, so a verdict here is not an NVIDIA verdict and PhysX and
+Newton results are comparable only in kind. Every asset runs in its own subprocess; a crash is recorded, not
+fatal. `newton15_cert_report.py` writes the comparison report. `make_newton_variant.py` authors the
+per-package Newton collision layer described below.
+
+Where the runner differs from NVIDIA's documented procedure (`simready_benchmark_kit_suite/docs/`
+`fet003/ground-drop.md` 3.1.0, `fet003/slope-drop.md` 3.0.0, `fet005/grasp-and-lift.md` 1.3.0):
+
+| | NVIDIA simready-benchmark | this runner |
+|---|---|---|
+| physics rate | 240 Hz | 1 kHz, control at 100 Hz |
+| ground drop height | 2 × the asset's bounding-box height | 1 cm above the floor |
+| ground drop, at rest | bounding-box centre and corners within 2 cm for 2 s, within 8 s of first contact (10 s cap) | touching the floor (lowest collision point within 5 mm) with speed < 2 cm/s and < 0.5 rad/s for 0.5 s (6 s cap) |
+| penetration | bounding-box bottom more than 0.1 m below the floor | collision points more than 1 cm below the surface |
+| slope | 45°, open onto a flat floor, friction 0.5 / 0.4; passes on a 1 cm slide without penetration | 15°, walled on four sides, friction 0.5; passes when the asset comes to rest on it |
+| grasp lines | every `grasp_identifier_*`; the asset passes if any one does | `grasp_identifier_01` only |
+| settle before the grasp | centroid within 2 mm for 1 s, up to 3 s | speed < 2 cm/s and < 0.5 rad/s for 0.5 s, up to 3 s |
+| closing | at most 0.04 m/s with 5 mm preload per jaw, then 0.3 s settle | position target at the point where the pads meet, force capped at 5 × weight |
+| lift | 2 × longest edge of the grasped body, clamped to 0.3–0.5 m, smoothstep over 1 s | max(0.3 m, 2 × longest edge of the asset's bounding box), no upper cap, linear over 1 s |
+| hold | fails if the centroid drops > 0.10 m or comes within 0.02 m of the floor | fails if the grasped point slips > 3 cm from the pad centre |
+| shake | circular horizontal orbit, 1 cm radius, 2 Hz, 1.5 s, 0.25 s envelope; fails at 5 cm separation | 1 cm sine along X, 2 Hz, 1.5 s, no envelope; fails at 3 cm slip |
+| release | open over 0.5 s, pad collision disabled; the body must fall ≥ max(5 cm, its bounding-box height) within 3 s | open for 1 s; the body must fall at least half the height it was lifted |
+| contact settings | engine defaults, one PD actuator per jaw on Newton | tuned: 4 ms solref, elliptic cone, `impratio` 10, multi-CCD, pad `condim 4`, 1 kg finger armature |
 
 ## Results on the 171 handled props
 
@@ -99,8 +120,9 @@ while reporting a Newton run; pointing the Newton engine at `isaac-sim.newton.sh
 
 ## What it is not
 
-Not an engine plugin for `simready-benchmark`; a standalone runner that mirrors the tests' procedure so
-verdicts can be compared. Not a SimReady requirement: a package's profile pass stays a PhysX/Kit statement,
+Not an engine plugin for `simready-benchmark`, and not the same test: a standalone runner with a similar
+procedure and different parameters (table above), so its verdicts sit beside NVIDIA's rather than replace
+them. Not a SimReady requirement: a package's profile pass stays a PhysX/Kit statement,
 and the Newton verdicts are recorded beside it. Its grasp verdicts assume its tuned contact settings (solref
 4 ms, elliptic cone, `impratio` 10, multi-CCD, pad `condim 4`), which differ from DexBench-Arena's teleop
 profiles (MuJoCo-Warp contacts, `ccd_iterations` 50, multi-CCD, default stiffness).

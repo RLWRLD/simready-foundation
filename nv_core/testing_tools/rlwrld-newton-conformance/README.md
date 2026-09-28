@@ -7,18 +7,24 @@ runs on the standalone Newton 1.5.2 wheel (MuJoCo-Warp rigid solver, warp 1.17),
 
 | file | what |
 |---|---|
-| `newton15_cert.py` | The runner. Per package: parse with Newton's USD importer, ground drop (1 cm), slope drop (15°, walled), grasp-and-lift on the authored `grasp_identifier_01` with a two-pad gantry (close, lift, hold 1 s, shake 1 cm at 2 Hz, hold, open). Verdict wording follows NVIDIA's. Driver mode runs every asset in its own subprocess (a crash is a finding, not the end of the run). |
+| `newton15_cert.py` | The runner. Per package: parse with Newton's USD importer, ground drop (1 cm), slope drop (15°, walled), grasp-and-lift on the authored `grasp_identifier_01` with a two-pad gantry (close, lift, hold 1 s, shake 1 cm along X at 2 Hz, hold, open). A procedure similar to NVIDIA's FET003 / FET005 with different parameters (drop height, slope angle, shake path, lift cap, settle and slip criteria; see the table in `docs/rlwrld/newton_conformance.md`); failure messages reuse NVIDIA's phase names, not its thresholds. Driver mode runs every asset in its own subprocess (a crash is a finding, not the end of the run). |
 | `newton15_cert_report.py` | Turns the merged `results.json` (plus the PhysX verdicts) into the report: totals, Newton-vs-PhysX disagreements, drop tests, collider approximations the importer could not honour. |
+| `test_newton_conformance_tools.py` | Self-checks on synthetic stages (usd-core, numpy, scipy; no Newton or GPU): degenerate hulls, per-collider holders, disabled colliders, inherited physics materials, a rejected regeneration keeping the accepted variant, slope placement, stale results after a worker crash, the report's drop sentence. `python test_newton_conformance_tools.py` or pytest. |
 | `make_newton_variant.py` | Authors `usd/variants/<name>_newton.usd` inside a package: a flattened copy whose `sdf`, `convexDecomposition` and unauthored mesh colliders become pre-decomposed convex pieces (CoACD, ≤ 32 hulls per collider, ≤ 64 vertices per hull, pieces thinner than 1 mm extruded to 1 mm), parsed back through Newton's importer before it is accepted. Records itself in the package sidecar and changelog (`rlwrld_sidecar.py`). |
 
 ## Running
 
 ```bash
 python -m venv newton15 && newton15/bin/pip install "newton==1.5.2" "newton[importers]" usd-core imageio[ffmpeg] pyglet
-# the three tests over a manifest of package USDs (one path per line, relative to --assets-root)
-newton15/bin/python newton15_cert.py --assets-root <pool> --manifest packages.txt --out out/ --tests parse,ground_drop,slope_drop,grasp_and_lift
-# the report, against the PhysX verdicts of the same packages
-newton15/bin/python newton15_cert_report.py --main out/results.json --physx grasp_verdicts.json --fet003 fet003_results.json --out report.md
+# parse + both drops + grasp (line in the stage frame) over a manifest of package USDs (one path per line, relative to --assets-root)
+newton15/bin/python newton15_cert.py --assets-root <pool> --manifest packages.txt --out out/
+# optional: the grasp with the line on the body, and with stock Newton contact settings
+newton15/bin/python newton15_cert.py --assets-root <pool> --manifest packages.txt --out out_bodyline/ --tests grasp_and_lift --line-frame body --no-video
+newton15/bin/python newton15_cert.py --assets-root <pool> --manifest packages.txt --out out_defaults/ --tests grasp_and_lift --no-video \
+    --contact-timeconst 0.02 --finger-armature 0 --cone pyramidal --impratio 1 --no-multiccd --pad-condim 3
+# the report (writes report/results.json and report/summary.md), against the PhysX verdicts of the same packages
+newton15/bin/python newton15_cert_report.py --main out/results.json --bodyline out_bodyline/results.json --defaults out_defaults/results.json \
+    --physx grasp_verdicts.json --fet003 fet003_results.json --assets-root <pool> --manifest packages.txt --out-dir report/
 # Newton collision variants for the packages the importer cannot honour
 newton15/bin/python make_newton_variant.py --assets-root <pool> --candidates candidates.json --write
 ```

@@ -2,23 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """Newton 1.5.2 standalone (MuJoCo-Warp) conformance pass over DexBench rigid props.
 
-Mirrors the three NVIDIA simready-benchmark runtime tests that every handled prop
-passed (or failed) on Isaac Sim 6.0.1 / PhysX, re-run on the Newton 1.5.2 wheel with
-the MuJoCo-Warp rigid solver -- NOT the Isaac Lab-Arena image:
+Runs checks similar to NVIDIA's simready-benchmark FET003 drops and FET005 grasp-and-lift,
+with different parameters (drop height, slope angle, shake path, lift cap, settle and slip
+criteria; the differences are tabulated in docs/rlwrld/newton_conformance.md), on the
+Newton 1.5.2 wheel with the MuJoCo-Warp rigid solver -- NOT the Isaac Lab-Arena image.
+Its verdicts are therefore not NVIDIA benchmark verdicts:
 
   parse          load the package USD with Newton's own USD importer (rigid body,
                  MassAPI, mesh colliders with the authored ``physics:approximation``)
-  ground_drop    drop from 1 cm above a flat floor, settle, no tunnelling / explosion /
-                 jitter
-  slope_drop     same on a 15 deg slope (with a stop wall at the bottom, like NVIDIA's
-                 walled room)
+  ground_drop    drop from 1 cm above a flat floor, touch it, settle on it, no tunnelling /
+                 explosion / jitter
+  slope_drop     same on a 15 deg slope walled on four sides (the runner's choice; NVIDIA
+                 uses 45 deg ending on a flat floor and passes on a 1 cm slide)
   grasp_and_lift settle the asset on the floor, rebuild a gantry two-pad gripper at the
                  authored ``grasp_identifier_01`` line (pads = cubes, edge 10 % of the
                  bbox geometric mean / 30 % of the min dim when aspect > 5, capped at
                  30 % of the gap; grip force 5x weight; friction 5 on the pads), close,
                  lift by max(0.3 m, 2 x longest edge), hold 1 s, shake 1 cm @ 2 Hz for
-                 1.5 s, hold 1 s, open.  Verdict messages follow NVIDIA's wording
-                 ("pads touched (no object)", "did not rise", "dropped", ...).
+                 1.5 s along X, hold 1 s, open.  Verdict messages reuse the phrasing of
+                 NVIDIA's phases ("pads touched (no object)", "did not rise", "dropped",
+                 ...); the thresholds behind them are the runner's own.
 
 Driver mode loops over a manifest and runs every asset in its own subprocess (a
 crash or a hang is a finding, not the end of the run); worker mode (``--single``)
@@ -45,7 +48,7 @@ import warnings
 ENGINE_LABEL = "Newton 1.5.2 standalone (MuJoCo-Warp), not the Arena image"
 
 # --------------------------------------------------------------------------------------
-# benchmark parameters (NVIDIA kit-suite semantics; see the module docstring)
+# benchmark parameters (the runner's own; see the module docstring for how they differ from NVIDIA's)
 # --------------------------------------------------------------------------------------
 SIM_DT = 1.0 / 1000.0  # MuJoCo-Warp step
 FRAME_HZ = 100  # control / observation rate
@@ -633,7 +636,7 @@ def add_support(scene, slope_deg=None, args=None, half=1.2):
 
     ``half`` is the half-size of the walled slope; the drop test sizes it to the asset
     (1.5 x its longest edge, at least 0.25 m) so rolling props stop at a wall instead of
-    bouncing between distant walls, like NVIDIA's small walled drop room."""
+    bouncing between distant walls (NVIDIA's slope ends on an open flat floor instead)."""
     import numpy as np
     import warp as wp
     import newton
@@ -648,7 +651,7 @@ def add_support(scene, slope_deg=None, args=None, half=1.2):
     hz = 0.05
     centre = q_rot(q, [0.0, 0.0, -hz])
     scene.add_shape_box(-1, xform=wp.transform(wp.vec3(*centre), wp.quat(*q)), hx=half, hy=half, hz=hz, cfg=cfg, label="slope")
-    # walls on all four sides (NVIDIA's drop room is walled); 0.3 m tall
+    # walls on all four sides; 0.3 m tall
     for k, (cx, cy, hx, hy) in enumerate(((half, 0.0, 0.02, half), (-half, 0.0, 0.02, half), (0.0, half, half, 0.02), (0.0, -half, half, 0.02))):
         wc = q_rot(q, [cx, cy, 0.15])
         scene.add_shape_box(-1, xform=wp.transform(wp.vec3(*wc), wp.quat(*q)), hx=hx, hy=hy, hz=0.15, cfg=cfg, label=f"wall_{k}")
