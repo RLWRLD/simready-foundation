@@ -1,10 +1,11 @@
 # SimReady props on Newton 1.5.2: conformance runner, findings and collision variants
 
-RLWRLD addition (2026-09-16), tools in `nv_core/testing_tools/rlwrld-newton-conformance/`.
+RLWRLD addition (2026-09-16, rescoped 2026-09-28), tools in `nv_core/testing_tools/rlwrld-newton-conformance/`.
 
 ## Why
 
-The SimReady runtime tests only exist for Isaac Sim / PhysX. DexBench runs its scenes on Newton as well,
+When this was written the SimReady runtime tests only existed for Isaac Sim / PhysX; 2026.07.1 added a Newton path,
+which does not hold grasps on the Newton 1.5.2 stack DexBench runs (see "Upstream kit on Newton" below). DexBench runs its scenes on Newton as well,
 and a package that passes `Prop-Robotics-Neutral 2.0.0` and the PhysX grasp-and-lift can still be
 unusable there: MuJoCo-Warp collides every mesh as one 64-vertex convex hull, so a bowl is a lid, a
 `convexDecomposition` depends on CoACD at every load, and a planar piece is refused. We needed the same
@@ -84,19 +85,22 @@ accepted; the sidecar records the pieces, the CoACD settings and the certificati
 |---|---|---|
 | ![](newton/ikea_365_bowl_rounded_16_hull_fail.png) ![](newton/ikea_365_bowl_rounded_16_variant_pass.png) | ![](newton/hex_nut_m20_variant_pass.png) | ![](newton/sus304_flat_bar_fail.png) |
 
-## Deformables (examples)
+## Upstream kit on Newton (2026-09-28)
 
-SimReady has no runtime test for deformable packages. `examples/newton15_soft_grasp.py` (tetrahedral fruit)
-and `examples/newton15_polybag_grasp.py` (cloth film with seal springs) run the same pad gantry on Newton's
-VBD soft-body solver: settle, close by a set squeeze, lift, hold, shake, open. The SpaceAI apple, plum and
-strawberry and the two polybags hold and deform plausibly.
-
-| apple | plum | polybag with cotton |
-|---|---|---|
-| ![](newton/deformable_apple_strip.png) | ![](newton/deformable_plum_strip.png) | ![](newton/deformable_polybag_cotton_strip.png) |
+`simready-benchmark` 2026.07.1 runs FET005 grasp-and-lift on Newton with the package's Newton runtime variant
+enabled, one PD actuator per jaw and every contact parameter at the engine default. On Isaac Sim 6.1.0-rc.26 /
+Newton 1.5.2 it failed upstream's own orange and tool box samples and 8 of 8 DexBench props: the pads close
+through the object (on the R2 can, from 94 mm to 6 mm at the same 19 N grip). On Isaac Sim 6.0.1 / Newton 1.2.1
+the same kit passed the orange, the can and a box, and lifted but dropped a bowl. This runner with stock settings
+fails the same 8 of 8; with its tuned settings it holds all 8 (line on the body). The kit's Newton verdicts are
+therefore not a substitute on Newton 1.5.2. Two setup notes from that run: upstream's documented engines.toml
+(`isaac-sim.sh` with `experience = "isaacsim.exp.full.newton"`) started the PhysX app on standalone Isaac Sim
+while reporting a Newton run; pointing the Newton engine at `isaac-sim.newton.sh` started Newton.
 
 ## What it is not
 
 Not an engine plugin for `simready-benchmark`; a standalone runner that mirrors the tests' procedure so
 verdicts can be compared. Not a SimReady requirement: a package's profile pass stays a PhysX/Kit statement,
-and the Newton verdicts are recorded beside it.
+and the Newton verdicts are recorded beside it. Its grasp verdicts assume its tuned contact settings (solref
+4 ms, elliptic cone, `impratio` 10, multi-CCD, pad `condim 4`), which differ from DexBench-Arena's teleop
+profiles (MuJoCo-Warp contacts, `ccd_iterations` 50, multi-CCD, default stiffness).

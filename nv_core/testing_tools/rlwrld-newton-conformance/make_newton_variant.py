@@ -13,8 +13,12 @@ mass split over the pieces by volume). The original collider keeps rendering; on
 CollisionAPI is dropped in the variant (a flattened copy, so the package USD is not composed at load). Nothing in the package USD changes; the base sidecar
 gains ``asset.variants.newton`` and a MINOR bump, the variant gets its own sidecar.
 
-    <newton venv>/bin/python scripts/tools/make_newton_variant.py --assets-root <clone> --only ikea_365_bowl_rounded_19 --check
-    <newton venv>/bin/python scripts/tools/make_newton_variant.py --assets-root <clone> --candidates outputs/newton_variant_candidates.json --write
+    <newton venv>/bin/python make_newton_variant.py --assets-root <clone> --only ikea_365_bowl_rounded_19 --check
+    <newton venv>/bin/python make_newton_variant.py --assets-root <clone> --candidates outputs/newton_variant_candidates.json --write
+
+With SimReady Foundation 2026.07.1 runtime variants (RV.001-RV.011) this layer is an intermediate: DexBench-Arena's
+`scripts/tools/author_physics_variants.py` folds its pieces into `usd/runnables/physics/newton.usd` and deletes
+it, so for a new concave prop run this first and that second.
 
 Runs in the Newton 1.5.2 venv (pxr, coacd, numpy, scipy, newton) so the variant is parsed
 back through Newton's own importer before it is accepted: every collider must come out as a
