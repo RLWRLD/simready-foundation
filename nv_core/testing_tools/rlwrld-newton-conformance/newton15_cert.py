@@ -59,6 +59,7 @@ SETTLE_LIN = 2e-2  # m/s  (MuJoCo soft contacts creep a few mm/s on a slope)
 SETTLE_ANG = 5e-1  # rad/s
 SETTLE_HOLD = 0.5  # s of quiet before "settled"
 TUNNEL_DEPTH = 0.01  # m below the support surface counts as tunnelling
+CONTACT_TOL = 0.005  # m: lowest collision vertex within this of the support counts as touching it
 EXPLODE_SPEED = 10.0  # m/s
 
 SLOPE_DEG = 15.0
@@ -660,12 +661,13 @@ def place_offset(geom, normal, surface_pt, height):
     import numpy as np
 
     pts = geom["coll_pts"]
-    d = (pts - surface_pt) @ normal
-    need = height - d.min()
     centre_xy = 0.5 * (geom["coll_min"] + geom["coll_max"])
-    off = np.array([-centre_xy[0], -centre_xy[1], 0.0]) + normal * need
-    # keep the xy centring exact on the surface plane: correct the normal shift's xy drift
-    return off
+    shift = np.array([-centre_xy[0], -centre_xy[1], 0.0])
+    # the clearance is measured after the xy centring: on a slope the centring shift itself moves
+    # the body along the normal (by -x sin(theta)), so measuring before it misplaces the drop height
+    d = (pts + shift - surface_pt) @ normal
+    need = height - d.min()
+    return shift + normal * need
 
 
 def asset_body_ids(scene_map, n_asset_bodies):
@@ -732,6 +734,7 @@ def run_drop(asset_b, geom, args, slope_deg=None):
     q0 = sim.body_q()[:nb]
     quiet_since = None
     settled_t = None
+    first_contact_t = None
     max_speed = 0.0
     min_height = 1e9
     below_frames = 0
@@ -760,7 +763,12 @@ def run_drop(asset_b, geom, args, slope_deg=None):
         if np.linalg.norm(bq[:, :3], axis=1).max() > 3.0 or lin > EXPLODE_SPEED:
             fly = True
             break
-        if lin < SETTLE_LIN and ang < SETTLE_ANG:
+        touching = h <= CONTACT_TOL
+        if touching and first_contact_t is None:
+            first_contact_t = sim.t
+        # quiet only counts while the body rests on the support: a body that never falls (or hangs
+        # in the air) is slow as well, and must not read as settled
+        if touching and lin < SETTLE_LIN and ang < SETTLE_ANG:
             if quiet_since is None:
                 quiet_since = sim.t
             elif sim.t - quiet_since >= SETTLE_HOLD and settled_t is None:
@@ -774,6 +782,7 @@ def run_drop(asset_b, geom, args, slope_deg=None):
     res.update(
         {
             "settle_time_s": None if settled_t is None else round(settled_t, 2),
+            "first_contact_s": None if first_contact_t is None else round(first_contact_t, 2),
             "sim_time_s": round(sim.t, 2),
             "rest_body_z": [round(float(z), 4) for z in bq[:, 2]],
             "rest_min_height": round(rest_h, 4),
@@ -798,6 +807,8 @@ def run_drop(asset_b, geom, args, slope_deg=None):
         verdict, msg = "fail", [f"flew away / exploded (max speed {max_speed:.1f} m/s)"]
     elif below_frames > 5 or rest_h < -TUNNEL_DEPTH:
         verdict, msg = "fail", [f"tunnelled into the support ({-min_height * 1000:.1f} mm)"]
+    elif first_contact_t is None:
+        verdict, msg = "fail", [f"never touched the support (lowest collision point stayed {min_height * 1000:.1f} mm or more above it)"]
     elif settled_t is None:
         if left_slope:
             verdict, msg = "fail", ["left the walled slope (went over / through a wall)"]
