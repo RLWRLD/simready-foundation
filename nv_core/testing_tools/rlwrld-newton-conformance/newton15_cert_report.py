@@ -253,7 +253,18 @@ def main():
         L.append("No drop-test failures.")
     if any(a["name"] == "dragon_fork_19cm" for a in drop_fail):
         L.append("\ndragon_fork_19cm is the only prop that never settles on the slope: its single 64-vertex hull (an `sdf` collider) is a curved rocker that keeps rocking and yawing while it creeps downhill; on the flat floor it settles in 0.1 s. PhysX (SDF collider) rests it on both tests.")
-    L.append(f"\nNo NaN, fly-away or tunnelling on any package. {len(tipped)} packages tip over (> 20 deg) when dropped 1 cm onto the flat floor from their authored pose: {', '.join(tipped)}.")
+    drop_tests = ("ground_drop", "slope_drop")
+    nan_n = sorted({a["name"] for a in rows for t in drop_tests if (a.get(t) or {}).get("nan")})
+    fly_n = sorted({a["name"] for a in rows for t in drop_tests if (a.get(t) or {}).get("fly_away")})
+    tun_n = sorted({a["name"] for a in rows for t in drop_tests if m(a, t).startswith("tunnelled")})
+    ran = sum(1 for a in rows for t in drop_tests if v(a, t) in ("pass", "fail"))
+    if not ran:
+        bad = "No drop test ran, so nothing is said here about NaN, fly-away or tunnelling."
+    elif not (nan_n or fly_n or tun_n):
+        bad = "No NaN, fly-away or tunnelling on any package that ran the drops."
+    else:
+        bad = "; ".join(f"{k} on {', '.join(n)}" for k, n in (("NaN", nan_n), ("fly-away", fly_n), ("tunnelling", tun_n)) if n) + "."
+    L.append(f"\n{bad} {len(tipped)} packages tip over (> 20 deg) when dropped 1 cm onto the flat floor from their authored pose: {', '.join(tipped)}.")
     if slope_creep:
         sc = sorted(slope_creep)
         L.append(f"\nOn the 15 deg slope every prop that 'rests' still creeps downhill: median {sc[len(sc) // 2] * 1000:.1f} mm/s, max {sc[-1] * 1000:.1f} mm/s (MuJoCo soft contacts with the 4 ms solref used here; the 20 ms default is ~5x worse). The 'came to rest' criterion is therefore < 2 cm/s and < 0.5 rad/s for 0.5 s; PhysX/TGS sticks.")
