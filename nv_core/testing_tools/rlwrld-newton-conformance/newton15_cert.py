@@ -1261,6 +1261,10 @@ def worker(args):
             with open(out_json) as f:
                 result = json.load(f)
             result["tests_requested"] = tests
+            # a crash recorded by the driver on an earlier attempt is history once this attempt runs:
+            # it moves aside, so the report can tell "recovered on rerun" from "crashed this time"
+            if "crash" in result:
+                result.setdefault("crash_earlier_attempts", []).append(result.pop("crash"))
         except Exception:  # noqa: BLE001
             pass
 
@@ -1354,6 +1358,12 @@ def driver(args):
                     continue
             except Exception:  # noqa: BLE001
                 pass
+        if not args.skip_done:
+            # a fresh run starts from nothing: a result left by an earlier run must not survive a
+            # worker that dies before its first write and be reported as this run's verdicts
+            for stale in (out_json, out_json + ".tmp"):
+                if os.path.exists(stale):
+                    os.remove(stale)
         cmd = [sys.executable, os.path.abspath(__file__), "--single", rel] + passthrough(args)
         logp = os.path.join(args.out, "logs", f"{name}.log")
         t0 = time.time()
@@ -1386,12 +1396,14 @@ def driver(args):
             prev.setdefault("engine", ENGINE_LABEL)
             prev["crash"] = {"returncode": rc, "timed_out": timed_out, "log_tail": tail, "elapsed_s": round(dt, 1)}
             for t in tests:
-                if t not in prev or prev[t].get("verdict") is None:
+                if t not in prev or prev[t].get("verdict") in (None, "crash"):
                     prev[t] = {"verdict": "crash", "message": "worker timed out" if timed_out else f"worker exited {rc}", "engine": ENGINE_LABEL}
             if "parse" not in prev:
                 prev["parse"] = {"ok": False, "error": "worker crashed before parse finished"}
-            with open(out_json, "w") as f:
+            tmp = out_json + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(prev, f, indent=1)
+            os.replace(tmp, out_json)
             log(f"    CRASH rc={rc} timed_out={timed_out} ({dt:.0f}s)")
         else:
             try:

@@ -81,28 +81,31 @@ def main():
         a["grasp_and_lift_stock_defaults"] = gd if gd else {"verdict": "missing"}
         if (body_r.get(n) or {}).get("crash"):
             a["crash_bodyline"] = body_r[n]["crash"]
-        if a.get("crash") and all((a.get(t) or {}).get("verdict") in ("pass", "fail") for t in ("ground_drop", "slope_drop", "grasp_and_lift_stage_frame")):
-            a["crash_recovered"] = a.pop("crash")
+        # a crash in this run stays a crash, even when the worker wrote every verdict before it died;
+        # "recovered" is only a crash of an earlier attempt followed by a clean --skip-done rerun
+        if a.get("crash_earlier_attempts") and not a.get("crash"):
+            a["crash_recovered"] = a["crash_earlier_attempts"][-1]
         a["physx"] = {"grasp": physx.get(n), "drops": fet.get(n)}
         a["category"] = cats.get(n, "-")
         merged["assets"][n] = a
         rows.append(a)
     merged["count"] = len(rows)
-    os.makedirs(args.out_dir, exist_ok=True)
-    with open(os.path.join(args.out_dir, "results.json"), "w") as f:
-        json.dump(merged, f, indent=1)
 
     def v(a, t):
         return (a.get(t) or {}).get("verdict") or "missing"
 
     def m(a, t):
         return (a.get(t) or {}).get("message") or ""
+    os.makedirs(args.out_dir, exist_ok=True)
+    with open(os.path.join(args.out_dir, "results.json"), "w") as f:
+        json.dump(merged, f, indent=1)
 
     tests = ("ground_drop", "slope_drop", "grasp_and_lift", "grasp_and_lift_stage_frame", "grasp_and_lift_stock_defaults")
     tot = {t: collections.Counter(v(a, t) for a in rows) for t in tests}
     parse_ok = sum(1 for a in rows if (a.get("parse") or {}).get("ok"))
     parse_fail = [a for a in rows if not (a.get("parse") or {}).get("ok")]
     crashes = [a for a in rows if a.get("crash")]
+    crash_late = [a for a in crashes if all(v(a, t) in ("pass", "fail") for t in ("ground_drop", "slope_drop", "grasp_and_lift_stage_frame"))]
     recovered = [a for a in rows if a.get("crash_recovered")]
     phases = collections.Counter((a.get("grasp_and_lift") or {}).get("phase") or "-" for a in rows if v(a, "grasp_and_lift") == "fail")
 
@@ -179,7 +182,7 @@ def main():
 
     L.append("## Totals per test\n")
     L.append("| test | pass | fail | crash / skip / missing |\n|---|---|---|---|")
-    L.append(f"| parse (Newton USD importer) | {parse_ok} | {len(rows) - parse_ok} | {len(crashes)} worker crashes ({len(recovered)} recovered on rerun) |")
+    L.append(f"| parse (Newton USD importer) | {parse_ok} | {len(rows) - parse_ok} | {len(crashes)} worker crashes ({len(crash_late)} after every verdict was written), {len(recovered)} recovered on a rerun |")
     labels = {"ground_drop": "ground_drop", "slope_drop": "slope_drop (15 deg, walled)", "grasp_and_lift": "grasp_and_lift (line on body, cert settings)", "grasp_and_lift_stage_frame": "grasp_and_lift (line in stage frame, cert settings)", "grasp_and_lift_stock_defaults": "grasp_and_lift (stage frame, stock Newton defaults)"}
     for t in tests:
         c = tot[t]
@@ -283,10 +286,12 @@ def main():
     for a in parse_fail:
         L.append(f"- {a['name']}: {short((a.get('parse') or {}).get('error'), 200)}")
     for a in crashes:
-        L.append(f"- {a['name']}: worker crash rc={a['crash'].get('returncode')} timed_out={a['crash'].get('timed_out')}: {short(a['crash'].get('log_tail', '')[-300:], 200)}")
+        late = " (after every verdict was written; the verdicts are this run's)" if a in crash_late else ""
+        L.append(f"- {a['name']}: worker crash rc={a['crash'].get('returncode')} timed_out={a['crash'].get('timed_out')}{late}: {short(a['crash'].get('log_tail', '')[-300:], 200)}")
     for a in recovered:
-        L.append(f"- {a['name']}: worker aborted on the first attempts (rc={a['crash_recovered'].get('returncode')}), recovered on rerun -- see below.")
-    L.append("- polybag_3 (4.5 MB `.usda`, 23 convex pieces) aborted the worker on two of three attempts with heap corruption (`double free or corruption (fasttop)` / SIGSEGV inside `UsdPhysics.LoadUsdPhysicsFromRange`, usd-core 26.3) when the stage had already been opened once in the same process by the runner's pxr pre-scan; opening the stage once and handing the `Usd.Stage` object to `add_usd` avoided it and the package then passes every test.")
+        L.append(f"- {a['name']}: worker aborted on an earlier attempt (rc={a['crash_recovered'].get('returncode')}), recovered on a --skip-done rerun.")
+    if "polybag_3" in names:
+        L.append("- polybag_3 (4.5 MB `.usda`, 23 convex pieces) aborted the worker on two of three attempts with heap corruption (`double free or corruption (fasttop)` / SIGSEGV inside `UsdPhysics.LoadUsdPhysicsFromRange`, usd-core 26.3) when the stage had already been opened once in the same process by the runner's pxr pre-scan; opening the stage once and handing the `Usd.Stage` object to `add_usd` avoided it and the package then passes every test.")
     L.append("")
 
     L.append("## Findings: what Newton 1.5 needs from these assets that PhysX did not\n")
