@@ -40,6 +40,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import asset_properties
 import integrity
+import loader
 import pace
 import setups
 import stepping
@@ -64,61 +65,10 @@ PLATE_BODY = 0        # the only body in the scene
 def build(asset, solver_name, iterations, radius, margin, full_surface=True,
           substeps=stepping.SUBSTEPS, fps=stepping.FPS, setup=None):
     setup = setup or setups.parse(setups.DEFAULT)
-    measure = newton.ModelBuilder()
-    measure.add_usd(Usd.Stage.Open(asset))
-    # Where this Newton's importer has no path for what the asset declares -- 1.2.1 knows nothing
-    # of PhysicsSurfaceDeformableSimAPI, though it ships eight cloth examples -- read the
-    # declaration and build it with the engine's own constructor, using 1.5.0's conversion.
-    usd_deformable.add_missing(measure, asset)
-    if measure.particle_count == 0:
-        raise SystemExit(f"{asset}: nothing deformable -- neither this Newton's importer nor its "
-                         f"declared schemas produced any particles")
-    points = np.asarray(measure.particle_q, dtype=np.float64)
-    declared, chosen = asset_properties.read(asset), {}
-    if radius != "auto":
-        radius = float(radius)
-        chosen["requested_particle_radius"] = (radius, "asked for on the command line")
-    elif asset_properties.contact_size(declared)[0] is not None:
-        radius = asset_properties.contact_size(declared)[0]
-    else:
-        radius = auto_radius(points)
-        chosen["derived_particle_radius"] = (radius, "the asset declares none; half the median "
-                                                      "distance between neighbouring nodes")
+    asset_ = loader.load(asset, solver_name, setup, radius, tag="press")
+    builder, points, radius = asset_.builder, asset_.points, asset_.radius
+    sim_path, kinds, bag, chosen = asset_.sim_path, asset_.kinds, asset_.bag, asset_.chosen
     height = float(points[:, 2].max() - points[:, 2].min())
-    span = float(max(points[:, 0].max() - points[:, 0].min(), points[:, 1].max() - points[:, 1].min()))
-
-    builder = newton.ModelBuilder()
-    builder.default_particle_radius = radius
-    stage = Usd.Stage.Open(asset)
-    _refusal = usd_deformable.why_not_runnable(stage, asset)   # any number of bodies
-    if _refusal:
-        raise SystemExit(_refusal)
-    builder.add_usd(stage)
-    built = usd_deformable.add_missing(builder, asset, chosen)
-    # The radius the run uses is the one the builder ended up with, not the one asked for. A
-    # volume deformable takes `default_particle_radius`; a cloth's constructor sets its own from
-    # the declared shell thickness and ignores it. Reading it back is the only way the contact
-    # margin, the plate's size and the landing tolerance are all talking about the same number.
-    sizes = usd_deformable.assign_particle_radii(builder, stage, radius, chosen)
-    # Before the damping: a Rayleigh kernel's damping is handed over relative to the stiffness.
-    usd_deformable.read_surface_stiffness(builder, stage, setup["surface"], declared, chosen)
-    usd_deformable.carry_material_damping(builder, stage,
-                                          element_damping_as_the_kernel_reads_it(solver_name), chosen, declared)
-    recipe = declared["recipe"]
-    if setup["stepping"] == "asset":
-        asset_properties.consume(declared, *asset_properties.RECIPE["dt"], *asset_properties.RECIPE["iterations"])
-    seal, exclusions, bag = structure(builder, stage, setup, declared, chosen, sizes)
-    # Every scene length below -- the contact band, the plate, the landing tolerance -- is sized
-    # from the coarsest body, so that no body's contact is narrower than its own particles.
-    radius = max(sizes.values()) if sizes else float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
-    if built:
-        print(f"[press] this Newton's importer did not build {len(built)} of the asset's "
-              f"bodies; built from the asset's declaration instead: {built}")
-    # Which prims the solver simulates and what each is, so the recording can hide the
-    # asset's still copy of each and bind the right render mesh to the right body.
-    simulated = usd_deformable.find(stage)
-    kinds = [kind for kind, _ in simulated]
-    sim_path = next((str(prim.GetPath()) for _, prim in simulated), None)
     # Rest on the floor rather than fall onto it: this test is about the plate, not the drop.
     q = np.asarray(builder.particle_q, dtype=np.float64)
     q[:, 2] += radius - q[:, 2].min()
@@ -127,11 +77,6 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     centre = (float(q[:, 0].mean()), float(q[:, 1].mean()))
     ground_shape = builder.shape_count
     builder.add_ground_plane()
-
-    for i in range(builder.shape_count):                       # visual-only import leftovers
-        if not int(builder.shape_flags[i]) & (int(newton.ShapeFlags.COLLIDE_SHAPES)
-                                              | int(newton.ShapeFlags.COLLIDE_PARTICLES)):
-            builder.shape_flags[i] = 0
 
     # The plate covers the asset's own footprint with a small margin, rather than a square of
     # its longest side: a square plate on a long thin asset is mostly plate, and it hides the
@@ -161,38 +106,12 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
 
     membrane_as_springs(builder, solver_name, 1.0 / (fps * substeps), chosen)
     elements_report("press", builder)
-    if solver_name == "vbd":
-        colour_for_vbd(builder, seal)
+    loader.colour(asset_)
     model = builder.finalize()
-    model.soft_contact_ke = contact_stiffness(model)
-    chosen["soft_contact_ke"] = (model.soft_contact_ke,
-                                 "N/m per contact: the asset's own material at its own resolution "
-                                 "(E * 2r for a volume, tri_ke for a membrane), stiffest body; "
-                                 + (f"{solver_name} reads it" if solver_reads(solver_name, "soft_contact_ke")
-                                    else f"{solver_name} reads no contact stiffness at all"))
-    damping = contact_damping(model)
-    model.soft_contact_kd = damping_as_the_kernel_reads_it(damping, model.soft_contact_ke)
-    chosen["soft_contact_kd"] = (model.soft_contact_kd,
-                                 f"{damping:.4g} N*s/m, {CONTACT_DAMPING_RATIO:g}x critical for the "
-                                 f"median particle at this contact stiffness, as this kernel reads it")
-    friction, restitution = contact_material(declared, chosen)
-    model.soft_contact_mu = friction
-    model.soft_contact_restitution = restitution
     # The floor and the plate are the experiment's; the asset's own shapes keep what they came
-    # in with. Friction is the same number the asset (or, failing that, this run) set globally,
-    # so the plate does not grip differently from the ground.
+    # in with, and the plate does not grip differently from the ground.
     fixtures = [ground_shape, plate_shape]
-    for array, value in ((model.shape_material_ke, model.soft_contact_ke),
-                         (model.shape_material_kd, model.soft_contact_kd),
-                         (model.shape_material_mu, friction)):
-        values = array.numpy()
-        values[fixtures] = value
-        array.assign(wp.array(values, dtype=float))
-    chosen["particle_radius_used"] = (radius, "read back from the model, whatever set it")
-    chosen["fixture_ke"] = (model.soft_contact_ke, "the floor and the plate are as stiff as the "
-                                                   "contact, because it is the same contact")
-    contact_source("press", model, solver_name, setup, recipe, declared, chosen, fixtures)
-    asset_properties.report("press", declared, chosen, setup)
+    loader.configure(asset_, model, fixtures)
 
     # The pipeline is built BEFORE the solver, on purpose. SolverVBD sizes its per-body
     # contact state from the contacts that already exist, and Newton's own error message says
@@ -210,29 +129,10 @@ def build(asset, solver_name, iterations, radius, margin, full_surface=True,
     print(f"[press] full-surface soft contact: {full}")
     pipeline = newton.CollisionPipeline(model, **kwargs)
 
-    self_collision, self_radius, self_margin, why = self_contact(setup, recipe, declared, radius, margin)
-    print(f"[press] self-collision {'on' if self_collision else 'off'} -- {why}")
-    if solver_name == "vbd" and not self_collision and not model.tet_count:
-        # Context for a cell that dies here. Every cloth example Newton ships that has a ground
-        # plane -- bending, franka, hanging, poker_cards, rollers -- enables self-contact, so a
-        # sheet run without it is outside anything the engine demonstrates. 1.5.0 handles it; 1.2.1
-        # diverges on the first frame. We follow the asset either way and report what happened.
-        print(f"[press] no cloth example Newton ships runs a sheet over a ground plane with "
-              f"self-contact off; if this cell diverges, that is the reason to look at first")
-    if solver_name != "vbd":
-        print(f"[press] SolverXPBD has no particle self-collision switch, so this run has none")
-
     if solver_name == "vbd":
-        # Every particle of the asset could touch the plate at once. The per-body list is fixed
-        # at 256 by default and documented as never resizing, so anything past it is dropped
-        # without a word.
-        solver = newton.solvers.SolverVBD(
-            model, iterations=iterations,
-            particle_enable_self_contact=self_collision,
-            particle_self_contact_radius=self_radius, particle_self_contact_margin=self_margin,
-            rigid_body_particle_contact_buffer_size=max(256, model.particle_count),
-            **exclusion_kwargs("press", exclusions, self_collision))
+        solver = loader.vbd_solver(asset_, model, iterations, margin)
     else:
+        print(f"[press] SolverXPBD has no particle self-collision switch, so this run has none")
         particle_contact_report("press", model)
         relaxation = (xpbd_relaxation(model.tet_count, model.particle_count)
                       if relaxation_is_a_jacobi_factor() else XPBD_MAX_RELAXATION)
