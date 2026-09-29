@@ -14,7 +14,7 @@ that cannot work is refused before anything launches -- the reason is printed an
 `refused.json` where the cell would have been -- and says what can:
 
 ```
-deformable assets are checked in newton15_vbd only (--engine newton1.5 --solver vbd); newton12_vbd is out of that scope
+deformable assets are checked in newton15_vbd only (--engine newton1.5 --solver vbd); newton15_xpbd is out of that scope
 ```
 
 Exit status: 0 every cell passed, 1 a cell ran and failed its experiment, 2 refused or no verdict.
@@ -26,13 +26,12 @@ nor syncs them to the stage, so a deformable run through Kit is neither measured
 `asset_checks/native/README.md`.
 
 **The engine carries its version**, because a Newton version is an Isaac build -- `isaacsim-core`
-pins `newton[sim]==1.2.1` to Isaac 6.0.1 and `==1.5.0` to 6.1.0:
+pins `newton[sim]==1.5.0` to Isaac 6.1.0, the one Isaac build supported (6.0.1 / Newton 1.2 were
+removed on 2026-09-29):
 
 | `--engine` | Isaac Sim | engine | `--solver` |
 |---|---|---|---|
 | `physx` | 6.1.0 | PhysX | `physx` |
-| `physx6.0.1` | 6.0.1 | PhysX | `physx` |
-| `newton1.2` | 6.0.1 | Newton 1.2.1 | `mujoco`, `xpbd`, `vbd` (rigid only) |
 | `newton1.5` | 6.1.0 | Newton 1.5.0 | `mujoco`, `xpbd`, `vbd` (`vbd`: rigid and deformable) |
 
 | `--experiment` | asset kinds | what it does |
@@ -149,9 +148,6 @@ its own scene, its own phases and its own verdict -- none of which this runner t
 
 ## Known limits
 
-- Newton 1.2.1 reads a collider's authored mass only when its rigid body also has MassAPI; NVIDIA's
-  sample props author mass on the collider alone, so Newton 1.2 recomputes it from density 1000
-  (the apple 0.57x, the coffee cup 0.14x its authored mass). Newton 1.5 and PhysX read it.
 - Isaac's Newton stage gives every joint that authors no armature `cfg.armature` = 0.1 kg m^2
   (PhysX: 0). On a light articulated prop this outweighs the links' own inertia and the joints
   barely move; `solver_seen.dof_armature` shows it.

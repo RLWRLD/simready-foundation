@@ -271,8 +271,7 @@ def stack_notes(stage, engine, root_path):
                                            f"{legacy:.4f} kg as {LEGACY_MASS_ATTR}" if legacy > 0 else ""])) or "no mass"
         notes.append({"note": "mass_differs_from_usd",
                       "detail": f"the asset declares {declared} and this Newton simulated {simulated:.4f} kg. "
-                                f"Newton 1.2.1 reads a collider's MassAPI only when its rigid body has one too, and "
-                                f"otherwise recomputes the mass from density.",
+                                f"A Newton that does not read the collider's MassAPI recomputes the mass from density.",
                       "authored_kg": round(canonical, 5), "legacy_kg": round(legacy, 5),
                       "simulated_kg": round(simulated, 5),
                       "ratio_to_authored": round(simulated / canonical, 3) if canonical > 0 else None})

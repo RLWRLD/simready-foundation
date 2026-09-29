@@ -2,7 +2,7 @@
 """Run physics checks on assets in the three environments; one fresh Kit process per run.
 
     PYTHONPATH=rlwrld/asset_checks python3 -m asset_checks.run --bench <simready-bench> --out <new dir> \
-        [--envs physx,newton12,newton15] [--experiments drop,slope,grasp] <asset.usd> [...]
+        [--envs physx,newton15] [--experiments drop,slope,grasp] <asset.usd> [...]
 
 Each asset is first validated with NVIDIA's simready-validate; its passed features gate the tests as
 NVIDIA's runner would. A run counts only if its result.json says "done" and Kit demonstrably had

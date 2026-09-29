@@ -217,77 +217,6 @@ def _set_substeps(substeps):
     return {"num_substeps": int(substeps), "was": was}
 
 
-def _register_mujoco_attributes_too():
-    """Isaac 6.0.1 hands Newton's USD importer a MuJoCo schema resolver whatever the solver, but
-    registers MuJoCo's custom attributes on the builder only when the solver is MuJoCo, so asking
-    for any other solver there fails with "MuJoCo custom attributes not registered" and no model is
-    built at all. Registering them alongside whatever else is registered costs nothing -- they are
-    attribute declarations. Idempotent: registering twice is ignored."""
-    import newton
-
-    if getattr(newton.ModelBuilder, "_asset_checks_mjc_attributes", False):
-        return  # installed once per Kit process
-    original = newton.ModelBuilder.add_usd
-
-    def add_usd(self, *args, **kwargs):
-        try:
-            newton.solvers.SolverMuJoCo.register_custom_attributes(self)
-        except Exception:  # noqa: BLE001 - already registered, which is what we want
-            pass
-        return original(self, *args, **kwargs)
-
-    newton.ModelBuilder.add_usd = add_usd
-    newton.ModelBuilder._asset_checks_mjc_attributes = True
-
-
-def _select_solver_by_config(solver):
-    """Isaac 6.0.1's Newton stage has no schema mapping: `_get_solver` reads `cfg.solver_cfg`, whose
-    `solver_type` it switches on. Setting that config before the first play is how a solver is asked
-    for there.
-
-    It knows two -- mujoco and xpbd -- and raises for anything else, but the Newton it is pinned to
-    ships every solver, so a missing branch is a gap in Isaac's switch rather than a missing
-    capability. For such a solver this supplies a config carrying its name and a `_get_solver` that
-    builds it from newton.solvers, leaving Isaac's own branches untouched. Returns what was set."""
-    import dataclasses
-
-    import newton
-    import isaacsim.physics.newton as isaac_newton
-    from isaacsim.physics.newton.impl import solver_config
-    from isaacsim.physics.newton.impl.newton_stage import NewtonStage
-
-    by_type = {getattr(cls, "__dataclass_fields__", {}).get("solver_type").default: cls
-               for cls in vars(solver_config).values()
-               if isinstance(cls, type) and "solver_type" in getattr(cls, "__dataclass_fields__", {})}
-    stage_handle = isaac_newton.acquire_stage()
-    _register_mujoco_attributes_too()
-    if solver in by_type:
-        stage_handle.cfg.solver_cfg = by_type[solver]()
-        return f"cfg.solver_cfg = {by_type[solver].__name__}"
-
-    solver_class = getattr(newton.solvers, f"Solver{solver.upper()}", None) or \
-        getattr(newton.solvers, f"Solver{solver.capitalize()}", None)
-    if solver_class is None:
-        raise RuntimeError(f"this Isaac has no config for {solver!r} and Newton has no solver by that name")
-    if not getattr(NewtonStage, "_asset_checks_solver_patched", False):
-        original = NewtonStage._get_solver.__func__
-
-        def _get_solver(cls, model, solver_cfg):
-            wanted = getattr(solver_cfg, "solver_type", None)
-            if wanted in by_type or wanted is None:
-                return original(cls, model, solver_cfg)
-            built = getattr(newton.solvers, f"Solver{wanted.upper()}", None)
-            if built is None:
-                return original(cls, model, solver_cfg)
-            kwargs = {k: v for k, v in vars(solver_cfg).items() if k != "solver_type"}
-            return built(model, **kwargs)
-
-        NewtonStage._get_solver = classmethod(_get_solver)
-        NewtonStage._asset_checks_solver_patched = True
-    stage_handle.cfg.solver_cfg = dataclasses.make_dataclass(
-        f"{solver.upper()}SolverConfigSuppliedByAssetChecks", [("solver_type", str, solver)])()
-    return f"cfg.solver_cfg = {solver!r} through asset_checks (this Isaac's _get_solver has no branch for it)"
-
 
 def _preset_solver_config(solver, settings):
     """Give Isaac the solver's config before it builds one, so settings survive initialisation.
@@ -319,9 +248,8 @@ def select_solver(stage, engine, solver, settings=None, substeps=RIGID_NEWTON_SU
     """Ask Isaac for `solver` and report how. Isaac 6.1.0 reads a solver's scene API schema off the
     PhysicsScene (`impl/utils.py newton_solver_to_api_schema`) and refuses a stage carrying two of
     them. Under PhysX there is nothing to select. Asking for the Isaac's own default needs nothing
-    applied -- Isaac 6.0.1 has no schema mapping at all and always builds SolverMuJoCo -- so it is
-    reported as such; asking for anything else on an Isaac that cannot select it is refused here
-    rather than silently simulating with another solver. Either way run.py checks the solver that
+    applied, and is reported as such; asking for anything else on an Isaac that cannot select it is
+    refused here rather than silently simulating with another solver. Either way run.py checks the solver that
     actually integrated the scene against the one asked for."""
     from pxr import Usd, UsdPhysics
 
@@ -330,18 +258,11 @@ def select_solver(stage, engine, solver, settings=None, substeps=RIGID_NEWTON_SU
     fit = check_asset_fits_solver(stage, ASSET_PRIM, solver)
     fit["solver_settings"] = settings or None
     if engine == "newton":
-        _register_mujoco_attributes_too()  # before anything Isaac builds reads the geometry
         fit["substeps"] = _set_substeps(substeps)
     if engine != "newton":
         return {"requested": solver, "applied": None, "reason": f"{engine} has one solver", **fit}
-    try:
-        from isaacsim.physics.newton.impl.utils import newton_solver_to_api_schema as mapping
-    except ImportError:  # Isaac 6.0.1: the solver comes from the Python config, not from USD
-        mapping = None
+    from isaacsim.physics.newton.impl.utils import newton_solver_to_api_schema as mapping
     schema = NEWTON_SOLVER_SCENE_API[solver]
-    if mapping is None:  # Isaac 6.0.1 takes the solver from its Python config, not from USD
-        return {"requested": solver, "applied": _select_solver_by_config(solver), **fit,
-                "reason": "this Isaac selects a solver from its config, not from a scene schema"}
     if solver == DEFAULT_NEWTON_SOLVER and not _schema_registered(schema):
         return {"requested": solver, "applied": None, **fit,
                 "reason": f"this Isaac builds {solver} by default and cannot select from USD"}

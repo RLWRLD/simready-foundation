@@ -7,11 +7,10 @@ Four things are named and nothing else has to be: the USD, the experiment, the e
 solver. Everything else is read -- whether the asset is rigid or deformable comes from its own
 schemas, which runner drives it follows from that, and what it is made of comes from the USD.
 
-**The engine carries its version.** Newton 1.2.1 and 1.5.0 are not interchangeable and neither is
-free-standing: `isaacsim-core` pins `newton[sim]==1.2.1` to Isaac 6.0.1 and `==1.5.0` to 6.1.0, so
-a Newton version *is* an Isaac build. `envs.py` says the same thing in its docstring -- a result
-means nothing until the build, the engine and the solver are all named -- so `--engine newton1.5`
-names two of the three and `--solver` the last.
+**The engine carries its version.** A Newton version is not free-standing: `isaacsim-core` pins
+`newton[sim]==1.5.0` to Isaac 6.1.0, the one Isaac build supported, so a Newton version *is* an
+Isaac build. A result means nothing until the build, the engine and the solver are all named -- so
+`--engine newton1.5` names two of the three and `--solver` the last.
 
 **Two paths.** A rigid asset runs through Kit (`asset_checks.run`) in any environment. A deformable
 runs through `native/` in one environment only, `envs.DEFORMABLE` (Newton 1.5 VBD), with a setup
@@ -39,7 +38,7 @@ import setups  # noqa: E402
 def engines():
     """{command-line engine name: {solver: environment}} -- derived from `envs.ENVIRONMENTS`.
 
-    The name a person types is the engine and its version: `physx`, `newton1.2`, `newton1.5`. Each
+    The name a person types is the engine and its version: `physx`, `newton1.5`. Each
     environment already carries all of it, so this is a reading of that table rather than a second
     copy of it.
     """

@@ -9,7 +9,7 @@ importer leaves out, and nothing the asset does not say.
     loader.configure(asset, model, fixtures=[ground_shape])      # contact numbers, and the audit
     solver = loader.vbd_solver(asset, model, iterations, margin)
 
-Newton's importer (1.2.1 and 1.5.0) builds the meshes and reads the moduli, and silently drops
+Newton 1.5.0's importer builds the meshes and reads the moduli, and silently drops
 the rest: `newton:particleRadius` (every particle gets the builder's 0.1 m default), a volume's
 `newton:kDamp` and a membrane's `newton:triKd`/`edgeKd` (damping 0), and everything a vendor
 authors for its own runtime (seal springs, contact exclusions, self-contact radius and margin,
@@ -429,8 +429,8 @@ def vbd_solver(asset, model, iterations, margin):
     if not self_collision and not model.tet_count:
         # Context for a cell that dies here. Every cloth example Newton ships that has a ground
         # plane -- bending, franka, hanging, poker_cards, rollers -- enables self-contact, so a
-        # sheet run without it is outside anything the engine demonstrates. 1.5.0 handles it; 1.2.1
-        # diverges on the first frame. We follow the asset either way and report what happened.
+        # sheet run without it is outside anything the engine demonstrates. We follow the asset
+        # either way and report what happened.
         print(f"[{tag}] no cloth example Newton ships runs a sheet over a ground plane with "
               f"self-contact off; if this cell diverges, that is the reason to look at first")
     # The contact buffers: the asset's recipe where it sizes them. Otherwise every particle could

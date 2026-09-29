@@ -1,3 +1,7 @@
+> **Record, not scope.** The measurements below include Newton 1.2.1 / Isaac Sim 6.0.1, XPBD and PhysX
+> deformables, which were removed from this package on 2026-09-29 (Newton 1.5.0 on Isaac 6.1.0 only). They
+> are kept as the evidence behind the rules the code still follows.
+
 # What Newton's own examples do, and where ours differs
 
 Read 2026-09-21 out of the installed packages, not the web: the shipped

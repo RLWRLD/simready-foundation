@@ -8,7 +8,7 @@ pinch spins out. It uses a 4 ms solref time constant on every shape, condim 4 an
 coefficient on the pads, an elliptic cone and impratio 10. Only these are applied; NVIDIA's gripper,
 masses, gains and verdicts are unchanged.
 
-Where Newton reads them (newton/_src/usd/schemas.py, solvers/mujoco/solver_mujoco.py, 1.2.1 and 1.5.0):
+Where Newton reads them (newton/_src/usd/schemas.py, solvers/mujoco/solver_mujoco.py, 1.5.0):
 newton:contact_ke / newton:contact_kd on each collider, mjc:condim on each collider,
 newton:torsionalFriction on the bound physics material, mjc:option:impratio / mjc:option:cone on
 the PhysicsScene.
@@ -54,9 +54,9 @@ def apply(stage, profile):
             prim.CreateAttribute("mjc:option:cone", Sdf.ValueTypeNames.Token).Set(profile["cone"])
             report["scenes"].append(str(prim.GetPath()))
     # Isaac Sim hands its own MuJoCo solver config to SolverMuJoCo. Where that config carries these
-    # options (Isaac Sim 6.0.1: cone and impratio; 6.1.0 has neither) it overrides the USD values:
-    # measured on 6.0.1, impratio stayed 1.0 with mjc:option:impratio = 10 alone. So they are set on
-    # Isaac's config as well; measure() shows what the compiled model got.
+    # options it overrides the USD values (measured on an Isaac whose config had cone and impratio:
+    # impratio stayed 1.0 with mjc:option:impratio = 10 alone). So they are set on Isaac's config as
+    # well, where it has them; measure() shows what the compiled model got.
     import isaacsim.physics.newton as isaac_newton
 
     solver_cfg = isaac_newton.acquire_stage().cfg.solver_cfg

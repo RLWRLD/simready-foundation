@@ -12,8 +12,8 @@ class Environment:
     """One thing an asset can be checked in: an Isaac Sim build, a physics engine, and a solver.
 
     The three are independent and a result only means something with all three named: Newton's
-    version moves with Isaac's (isaacsim-core pins `newton[sim]==`), so a Newton 1.2-vs-1.5
-    difference is an Isaac+Newton difference until an environment holds one of them still.
+    version moves with Isaac's (isaacsim-core pins `newton[sim]==1.5.0` to Isaac 6.1.0). One Isaac
+    build is supported: 6.1.0 (the 6.0.1 / Newton 1.2 environments were removed on 2026-09-29).
     """
 
     name: str  # label in results and reports
@@ -26,34 +26,28 @@ class Environment:
 
     @property
     def isaac(self) -> str:
-        return {"isaac601": "6.0.1", "isaac610": "6.1.0"}[self.venv]
+        return {"isaac610": "6.1.0"}[self.venv]
 
 
 # A Newton solver other than the default is selected by applying its scene API schema to the
-# PhysicsScene (Isaac 6.1.0 `impl/utils.py newton_solver_to_api_schema`); Isaac 6.0.1 has no such
-# mapping and its `_get_solver` accepts only mujoco and xpbd.
+# PhysicsScene (Isaac 6.1.0 `impl/utils.py newton_solver_to_api_schema`).
 NEWTON_SOLVER_SCENE_API = {"mujoco": "MjcSceneAPI", "xpbd": "NewtonXpbdSceneAPI", "vbd": "NewtonVbdSceneAPI"}
 
 ENVIRONMENTS = {
     env.name: env
     for env in (
         Environment("physx", "isaac610", "isaacsim.exp.full", "physx", "", "physx", "Isaac Sim 6.1.0, PhysX"),
-        Environment("physx601", "isaac601", "isaacsim.exp.full", "physx", "", "physx", "Isaac Sim 6.0.1, PhysX"),
-        Environment("newton12", "isaac601", "isaacsim.exp.full.newton", "newton", "1.2.", "mujoco", "Isaac Sim 6.0.1, Newton 1.2.1, MuJoCo"),
         Environment("newton15", "isaac610", "isaacsim.exp.full.newton", "newton", "1.5.", "mujoco", "Isaac Sim 6.1.0, Newton 1.5.0, MuJoCo"),
-        Environment("newton12_xpbd", "isaac601", "isaacsim.exp.full.newton", "newton", "1.2.", "xpbd", "Isaac Sim 6.0.1, Newton 1.2.1, XPBD"),
         Environment("newton15_xpbd", "isaac610", "isaacsim.exp.full.newton", "newton", "1.5.", "xpbd", "Isaac Sim 6.1.0, Newton 1.5.0, XPBD"),
-        Environment("newton12_vbd", "isaac601", "isaacsim.exp.full.newton", "newton", "1.2.", "vbd", "Isaac Sim 6.0.1, Newton 1.2.1, VBD"),
         Environment("newton15_vbd", "isaac610", "isaacsim.exp.full.newton", "newton", "1.5.", "vbd", "Isaac Sim 6.1.0, Newton 1.5.0, VBD"),
     )
 }
 
 def engine_name(env):
-    """What a person types for this environment's engine: `physx`, `newton1.2`, `newton1.5`.
+    """What a person types for this environment's engine: `physx`, `newton1.5`.
 
-    The PhysX on the newest Isaac is plainly `physx`; a PhysX on an older Isaac carries its
-    Isaac version so it is never mistaken for it. That is the rule, rather than the version
-    literal that was written in two files.
+    The PhysX on the newest Isaac is plainly `physx`; a PhysX on an older Isaac would carry its
+    Isaac version so it is never mistaken for it. That is the rule, rather than a version literal.
     """
     if env.engine == "physx":
         newest = max((e.isaac for e in ENVIRONMENTS.values() if e.engine == "physx"),
@@ -62,7 +56,7 @@ def engine_name(env):
     return "newton" + env.newton.rstrip(".")
 
 
-DEFAULT_ENVIRONMENTS = ("physx", "newton12", "newton15")  # the rigid comparison; the rest are opt-in
+DEFAULT_ENVIRONMENTS = ("physx", "newton15")  # the rigid comparison; the rest are opt-in
 
 # The one environment deformable assets are checked in (by `native/`, never through Kit). Newton 1.5
 # VBD only, by the user's scope decision of 2026-09-29: Newton 1.2, XPBD and PhysX deformables were
@@ -107,7 +101,7 @@ def gpu_settings(gpu: int) -> dict:
     isaac-run exposes only that GPU to CUDA, so PhysX's device 0 is it; the renderer enumerates
     GPUs through Vulkan and is pinned to the same physical index. With Kit's defaults on a two-GPU
     machine (multi-GPU rendering, PhysX device -1) Kit crashed whenever a stage that ran GPU
-    physics was replaced (measured 2026-09-18 on Isaac Sim 6.0.1).
+    physics was replaced (measured 2026-09-18).
     """
     return {"/physics/cudaDevice": 0, "/renderer/multiGpu/enabled": False, "/renderer/activeGpu": gpu}
 
