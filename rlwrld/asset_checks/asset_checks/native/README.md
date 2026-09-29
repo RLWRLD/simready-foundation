@@ -94,7 +94,7 @@ Each of these was a silent wrong answer, not a crash, and each is now a rule rat
 - **Self-collision is the asset's to declare.** No deformable schema in either family has a
   switch for it; where the asset is silent the schema default (off) applies, to every engine
   that has the switch, and the ones that do not say so.
-- **The asset is measured after it settles.** This banana loses 16 mm of height just lying down.
+- **The asset is measured after it settles.** The banana (measured 2026-09) loses 16 mm of height just lying down.
 - **The press happens where the asset is**, not where it was authored; it rolls while settling.
 - **A speed is judged against a speed**: the fall the experiment gives, not the asset's height,
   which is zero for a sheet. And the drop is the starting clearance, not how far a runner lifted.

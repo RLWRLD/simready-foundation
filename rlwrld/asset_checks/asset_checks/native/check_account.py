@@ -28,7 +28,8 @@ RUNNER_READS = ("newton:particleRadius", "newton:kDamp", "newton:triKd", "newton
                 "newton:triKe", "newton:edgeKe", asset_properties.SEAL_PAIRS, asset_properties.SEAL_KE,
                 asset_properties.VERTEX_TRIANGLE_EXCLUSIONS, asset_properties.EDGE_EXCLUSIONS,
                 *(n for k in ("self_contact_radius", "self_contact_margin", "seal_ke", "contact_ke",
-                              "contact_kd", "friction", "shape_ke", "dt", "iterations")
+                              "contact_kd", "friction", "shape_ke", "shape_kd", "shape_mu", "dt", "iterations",
+                              "rigid_particle_buffer", "rigid_buffer")
                   for n in asset_properties.RECIPE[k]))
 
 

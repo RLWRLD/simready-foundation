@@ -6,7 +6,7 @@ the thing is made of. Where the USD is silent we still have to put a number some
 the number is reported as ours rather than passed off as the asset's.
 
 That distinction is not pedantic. Newton's importer does not read `newton:particleRadius` at all
--- this banana declares 0.76 mm and gets Newton's 100 mm default -- and it derives the Lame
+-- the banana (measured 2026-09) declares 0.76 mm and gets Newton's 100 mm default -- and it derives the Lame
 parameters from `physics:youngsModulus` and `physics:poissonsRatio` rather than from the
 `newton:kMu` and `newton:kLambda` the asset also spells out. Somebody has to notice. Equally,
 contact friction is a property of the materials in the scene, not of the integrator: giving VBD
@@ -70,6 +70,10 @@ RECIPE = {
     "contact_ke": ("rlwrld:contact:soft_contact_ke",),
     "contact_kd": ("rlwrld:contact:soft_contact_kd",),
     "shape_ke": ("rlwrld:contact:shape_contact_ke",),
+    # The scene's fixtures (floor, plate, gripper pads): the vendor's recipe names the gripper's
+    # friction, and its reply says the table and floor ran at the same number.
+    "shape_kd": ("rlwrld:contact:shape_contact_kd",),
+    "shape_mu": ("rlwrld:simulation:grip_contact_mu",),
     "friction": ("rlwrld:simulation:soft_contact_mu",),
     "dt": ("rlwrld:simulation:dt_s",),
     "iterations": ("rlwrld:simulation:iterations",),
@@ -78,6 +82,9 @@ RECIPE = {
     "seal_ke": ("rlwrld:contact:seal_spring_ke_n_m",),
     "particle_radius": ("rlwrld:contact:particle_radius_m",),
     "damping_s": ("rlwrld:simulation:damping_s",),
+    # SolverVBD's contact buffers, sized by the vendor for its run.
+    "rigid_particle_buffer": ("rlwrld:contact:rigid_body_particle_contact_buffer_size",),
+    "rigid_buffer": ("rlwrld:contact:rigid_body_contact_buffer_size",),
 }
 # On a simulated prim: the structure that makes its mesh one object.
 SEAL_PAIRS = "rlwrld:sealPairs"                                # (n, 2) prim-local point indices
@@ -172,7 +179,6 @@ def consume(declared, *names):
 #               checked against it under that runtime's conversion (`restated_disagreements`),
 #               and a disagreement refuses -- that check is what would have caught the film's
 #               stiffness written in the wrong unit (2026-09-23)
-#   experiment  belongs to an experiment fixture (a gripper), not to the asset
 #   runtime     a solver buffer or the vendor's file bookkeeping; no physics
 #   authoring   the vendor's authoring intermediates, already baked into the authored mesh; not
 #               among the runtime items the vendor listed (vendor reply, 2026-09-24)
@@ -183,8 +189,6 @@ ACCOUNTED = {
     "newton:density": "restated", "newton:kMu": "restated", "newton:kLambda": "restated",
     "newton:triKa": "restated", "rlwrld:contact:particle_radius_m": "restated",
     "rlwrld:simulation:damping_s": "restated",
-    "rlwrld:simulation:grip_contact_mu": "experiment",
-    "rlwrld:contact:rigid_body_particle_contact_buffer_size": "runtime",
     "rlwrld:formatVersion": "runtime", "rlwrld:runtimeAdapter": "runtime",
     "rlwrld:flatPattern": "authoring", "rlwrld:foldBindIndices": "authoring",
     "rlwrld:foldBindWeights": "authoring", "rlwrld:foldFlapFaces": "authoring",
@@ -199,7 +203,8 @@ ACCOUNTED = {
 SETUP_OWNED = {
     "structure": (SEAL_PAIRS, SEAL_KE, VERTEX_TRIANGLE_EXCLUSIONS, EDGE_EXCLUSIONS,
                   *RECIPE["self_contact_radius"], *RECIPE["self_contact_margin"], *RECIPE["seal_ke"]),
-    "contact": (*RECIPE["contact_ke"], *RECIPE["contact_kd"], *RECIPE["friction"], *RECIPE["shape_ke"]),
+    "contact": (*RECIPE["contact_ke"], *RECIPE["contact_kd"], *RECIPE["friction"], *RECIPE["shape_ke"],
+                *RECIPE["shape_kd"], *RECIPE["shape_mu"]),
     "stepping": (*RECIPE["dt"], *RECIPE["iterations"]),
 }
 RESTATED_TOLERANCE = 1e-4          # relative; the vendor's floats are written at float32

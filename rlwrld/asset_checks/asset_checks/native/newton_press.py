@@ -177,7 +177,7 @@ def main():
         top_now = float(q[:, 2].max())
         if frame == settle_at:
             # Measure the asset only once it has settled under gravity. Reading its height at
-            # frame zero is reading the pose its author happened to save: this banana loses
+            # frame zero is reading the pose its author happened to save: the banana (measured 2026-09) loses
             # 16 mm just lying down, which a press measured from frame zero would report as
             # compression it never caused -- and it aims the plate at a height the asset no
             # longer has, so the plate stops in the air and presses nothing at all.

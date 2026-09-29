@@ -156,16 +156,18 @@ def contact_of(setup, recipe):
         return None
     if level == "example":
         e = EXAMPLE_CONTACT
-        return {"ke": e["ke"], "kd": e["kd"], "mu": e["mu"], "shape_ke": e["ke"],
-                "why": "Newton's example_cloth_hanging.py VBD constants, as written"}
+        return {"ke": e["ke"], "kd": e["kd"], "mu": e["mu"], "shape_ke": e["ke"], "shape_kd": e["kd"],
+                "shape_mu": e["mu"], "why": "Newton's example_cloth_hanging.py VBD constants, as written"}
     missing = [key for key in ("contact_ke", "contact_kd", "friction") if recipe.get(key, (None,))[0] is None]
     if missing:
         raise SystemExit("this setup takes the contact numbers from the asset, and the asset authors "
                          f"none for {', '.join(missing)} (looked for "
                          + ", ".join(n for k in missing for n in asset_properties.RECIPE[k]) + ")")
-    shape_ke = recipe.get("shape_ke", (None,))[0]
+    # A fixture number the recipe does not state is left None: the loader gives it Newton's own
+    # default shape material (ModelBuilder.ShapeConfig), which is what the vendor's runtime ran with.
     return {"ke": recipe["contact_ke"][0], "kd": recipe["contact_kd"][0], "mu": recipe["friction"][0],
-            "shape_ke": recipe["contact_ke"][0] if shape_ke is None else shape_ke,
+            "shape_ke": recipe.get("shape_ke", (None,))[0], "shape_kd": recipe.get("shape_kd", (None,))[0],
+            "shape_mu": recipe.get("shape_mu", (None,))[0],
             "why": "the asset's own runtime numbers (" + ", ".join(
                 recipe[k][1] for k in ("contact_ke", "contact_kd", "friction")) + "), handed to the kernel unchanged"}
 

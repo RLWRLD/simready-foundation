@@ -12,6 +12,7 @@ import warp as wp
 import newton
 
 import asset_properties
+import drop_shape
 import setups
 import stepping
 
@@ -23,7 +24,7 @@ import stepping
 CONTACT_MARGIN_OF_RADIUS = 2.0
 
 
-def contact_margin(radius, substeps, fps, drop, depth=0.0, gravity=9.81):
+def contact_margin(radius, substeps, fps, drop, depth=0.0, gravity=drop_shape.GRAVITY):
     """How far out to look for contact: wide enough for everything the experiment asks of it.
 
     A penalty contact exists only while the particle is inside the band, so the band is also the

@@ -106,7 +106,7 @@ def plate_over(points):
 def settle_frame(frames):
     """The frame at which the asset is measured: the end of the settle phase.
 
-    An asset's authored pose is not its resting shape -- this banana loses 16 mm of height just
+    An asset's authored pose is not its resting shape -- the banana (measured 2026-09) loses 16 mm of height just
     lying down. Measuring at frame zero reports that settling as compression the plate never
     caused, and aims the plate at a height the asset no longer has, so it stops in the air.
     """

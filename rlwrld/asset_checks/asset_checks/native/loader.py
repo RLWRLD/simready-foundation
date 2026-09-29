@@ -97,7 +97,7 @@ def contact_stiffness(model):
 
     This replaces `2 x median(k_mu)`: a Pa quantity times a ratio, stored as N/m. It was the ratio
     of two numbers of different dimension in one shipped example (k_mu 1e6, soft_contact_ke 2e6)
-    and on this banana it made the contact 3.4e6 N/m, a thousand times its material at its own
+    and on the banana (measured 2026-09) it made the contact 3.4e6 N/m, a thousand times its material at its own
     resolution; `contact_damping`, critical for that stiffness, inherited the error.
     """
     radius = model.particle_radius.numpy()
@@ -264,9 +264,17 @@ def contact_source(tag, model, setup, recipe, declared, chosen, fixtures):
     # Stated in N*s/m; handed over the way this kernel reads it, as the derived damping is.
     kd = damping_as_the_kernel_reads_it(source["kd"], source["ke"])
     model.soft_contact_ke, model.soft_contact_kd, model.soft_contact_mu = source["ke"], kd, source["mu"]
-    for array, value in ((model.shape_material_ke, source["shape_ke"]),
-                         (model.shape_material_kd, kd),
-                         (model.shape_material_mu, source["mu"])):
+    # The fixtures' own material: the source's where it states one, Newton's default shape
+    # material where it does not -- never the particles' numbers, which are a different contact.
+    default = newton.ModelBuilder.ShapeConfig()
+    fixture = {}
+    for name, stated, fallback in (("ke", source["shape_ke"], default.ke), ("kd", source["shape_kd"], default.kd),
+                                   ("mu", source["shape_mu"], default.mu)):
+        fixture[name] = (stated, "the source") if stated is not None else (fallback, "Newton's default shape material")
+    fixture_kd = damping_as_the_kernel_reads_it(fixture["kd"][0], fixture["ke"][0])
+    for array, value in ((model.shape_material_ke, fixture["ke"][0]),
+                         (model.shape_material_kd, fixture_kd),
+                         (model.shape_material_mu, fixture["mu"][0])):
         values = array.numpy()
         values[fixtures] = value
         array.assign(wp.array(values, dtype=float))
@@ -274,15 +282,15 @@ def contact_source(tag, model, setup, recipe, declared, chosen, fixtures):
                        ("soft_contact_mu", source["mu"])):
         chosen[key] = (value, f"{setup['contact']} contact source: {source['why']}"
                        + (f"; {source['kd']:g} N*s/m, as this kernel reads it" if key == "soft_contact_kd" else ""))
-    for key in list(chosen):
-        if key.endswith("_ke") and key not in ("soft_contact_ke",):
-            chosen[key] = (source["shape_ke"], f"the fixtures' stiffness from the same source")
+    for name in ("ke", "kd", "mu"):
+        chosen[f"fixture_{name}"] = (fixture[name][0], f"the scene's fixtures, from {fixture[name][1]}")
     if setup["contact"] == "asset":
-        asset_properties.consume(declared, *(n for k in ("contact_ke", "contact_kd", "shape_ke", "friction")
+        asset_properties.consume(declared, *(n for k in ("contact_ke", "contact_kd", "shape_ke", "shape_kd",
+                                                         "shape_mu", "friction")
                                              for n in asset_properties.RECIPE[k]))
     print(f"[{tag}] contact numbers from the {setup['contact']} source: ke {source['ke']:g} "
-          f"kd {source['kd']:g} N*s/m (this kernel is handed {kd:g}) mu {source['mu']:g} "
-          f"fixtures ke {source['shape_ke']:g}")
+          f"kd {source['kd']:g} N*s/m (this kernel is handed {kd:g}) mu {source['mu']:g}; fixtures ke "
+          f"{fixture['ke'][0]:g} kd {fixture['kd'][0]:g} mu {fixture['mu'][0]:g}")
 
 
 def elements_report(tag, builder):
@@ -404,6 +412,10 @@ def configure(asset, model, fixtures):
     chosen["fixture_ke"] = (model.soft_contact_ke, "the scene's fixtures are as stiff as the contact, "
                                                    "because it is the same contact")
     contact_source(tag, model, asset.setup, declared["recipe"], declared, chosen, list(fixtures))
+    # The recipe's contact buffers are applied by `vbd_solver`, which the scene calls next.
+    for key in ("rigid_particle_buffer", "rigid_buffer"):
+        if declared["recipe"].get(key):
+            asset_properties.consume(declared, *asset_properties.RECIPE[key])
     asset_properties.report(tag, declared, chosen, asset.setup)
 
 
@@ -421,11 +433,18 @@ def vbd_solver(asset, model, iterations, margin):
         # diverges on the first frame. We follow the asset either way and report what happened.
         print(f"[{tag}] no cloth example Newton ships runs a sheet over a ground plane with "
               f"self-contact off; if this cell diverges, that is the reason to look at first")
-    # Every particle of the asset could touch a fixture at once. The per-body list is fixed at 256
-    # by default and documented as never resizing, so anything past it is dropped without a word.
+    # The contact buffers: the asset's recipe where it sizes them. Otherwise every particle could
+    # touch a fixture at once, and the per-body list (256 by default, documented as never resizing)
+    # would drop what did not fit without a word, so it is sized to the particle count.
+    recipe, buffers = asset.declared["recipe"], {}
+    stated = recipe.get("rigid_particle_buffer")
+    buffers["rigid_body_particle_contact_buffer_size"] = int(stated[0]) if stated else max(256, model.particle_count)
+    if recipe.get("rigid_buffer"):
+        buffers["rigid_body_contact_buffer_size"] = int(recipe["rigid_buffer"][0])
+    print(f"[{tag}] contact buffers: " + ", ".join(f"{k} {v}" for k, v in buffers.items())
+          + (" (the asset's recipe)" if stated else " (sized to the particle count)"))
     return newton.solvers.SolverVBD(
         model, iterations=iterations,
         particle_enable_self_contact=self_collision,
         particle_self_contact_radius=self_radius, particle_self_contact_margin=self_margin,
-        rigid_body_particle_contact_buffer_size=max(256, model.particle_count),
-        **exclusion_kwargs(tag, asset.exclusions, self_collision))
+        **buffers, **exclusion_kwargs(tag, asset.exclusions, self_collision))
