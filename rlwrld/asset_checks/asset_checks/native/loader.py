@@ -22,7 +22,6 @@ second loading path.
 """
 import inspect
 import math
-import sys
 import types
 
 import numpy as np
@@ -36,10 +35,6 @@ import setups
 import usd_deformable
 
 
-# Penalty constants, quoted from newton/examples/multiphysics/example_rigid_soft_contact.py. They
-# are numerics, not material: the two solvers need different numbers to express the same contact,
-# and `ke` without its matching `kd` is a different simulation.
-#
 # There is no table of contact numbers here. Friction is the asset's, or one stated default shared
 # by every solver; the contact's stiffness is the asset's own material at the contact's own scale
 # (`contact_stiffness`); its damping is critical for that stiffness and the asset's own mass
@@ -47,8 +42,8 @@ import usd_deformable
 # soft body, 2e6 for a duck in a gripper -- and each of those numbers is right for its scene and
 # wrong for the next asset, which is what a copied constant is.
 # The contact spring is critically damped for the typical particle: c = 2 * zeta * sqrt(ke * m).
-# It was a constant per solver before (100 for VBD, 1 for XPBD, read off two shipped examples), and
-# Newton's own examples use 1, 10 and 100 for scenes of different mass, so the number was a
+# It was a constant before (100, read off a shipped example), and Newton's own examples use 1, 10
+# and 100 for scenes of different mass, so the number was a
 # property of those scenes. Measured across this canon it was 6x critical on the banana and 1600x
 # on the empty polybag; on the loaded polybag's 3 mg film it was 650x, and the film left the
 # floor at 345 km/s on the frame it landed -- all five of that asset's Newton cells read
@@ -62,51 +57,30 @@ def contact_damping(model):
     mass = mass[mass > 0.0]
     return 2.0 * CONTACT_DAMPING_RATIO * math.sqrt(float(model.soft_contact_ke) * float(np.median(mass)))
 
-def element_damping_as_the_kernel_reads_it(solver_name):
-    """-> convert(kind, value, stiffness): the number this solver's element kernels need so that
-    a material damping *is* `value` in Pa.s.
-
-    Newton 1.5.0's VBD scales the elastic force by `rest_volume * damping` and its XPBD uses
-    `gamma = k_damp / (stiffness * dt)`: absolute. 1.2.1's VBD multiplies the elastic Hessian by
-    `(1.0 + damping * inv_dt)`, a Rayleigh multiplier in seconds, so there the value is divided
-    by the element's own stiffness. Read off the kernel source, never a version number.
-    """
-    module = sys.modules[solver_class(solver_name).__module__]
-    package = module.__name__.rsplit(".", 1)[0]
-    import importlib
-    kernels = importlib.import_module(package + (".particle_vbd_kernels" if solver_name == "vbd" else ".kernels"))
-    source = "\n".join(line for line in inspect.getsource(kernels).splitlines()
+def element_damping_as_the_kernel_reads_it():
+    """-> convert(kind, value, stiffness): the number SolverVBD's element kernels need so that a
+    material damping *is* `value` in Pa.s. Newton 1.5.0's VBD scales the elastic force by
+    `rest_volume * damping`, an absolute damping, so the value is handed over as it is. Read off
+    the kernel source: a Newton whose kernel says otherwise (1.2.1's was a Rayleigh multiplier,
+    `(1.0 + damping * inv_dt)`) is refused rather than handed a number in the wrong unit."""
+    from newton._src.solvers.vbd import particle_vbd_kernels
+    source = "\n".join(line for line in inspect.getsource(particle_vbd_kernels).splitlines()
                        if not line.lstrip().startswith("#"))
-    if "rest_volume * damping" in source or "k_damp / (stiffness * dt)" in source:
-        return lambda kind, value, stiffness: value
-    if "(1.0 + damping * inv_dt)" in source or "hessian * (damping / dt)" in source:
-        return lambda kind, value, stiffness: value / stiffness if stiffness > 0.0 else 0.0
-    if "materials[tid, 2]" not in source:
-        # This solver's element kernels never read the material's damping column (1.2.1's XPBD
-        # has the line commented out). The value is carried unchanged, for the record only.
-        print(f"[baseline] {solver_name}'s element kernels read no material damping; the asset's is "
-              f"carried for the record only")
-        return lambda kind, value, stiffness: value
-    raise SystemExit(f"{solver_name}'s element kernels read damping in a way this runner does not "
-                     f"know; read {kernels.__name__} and say which")
+    if "rest_volume * damping" not in source:
+        raise SystemExit("this Newton's VBD element kernels do not read damping as Newton 1.5.0's do "
+                         "(rest_volume * damping); this package is for Newton 1.5")
+    return lambda kind, value, stiffness: value
 
 def damping_as_the_kernel_reads_it(value, ke):
-    """The number to hand the solver so that the contact damping *is* `value` N*s/m.
-
-    Newton 1.2.1's VBD contact force law multiplies kd by ke (`damping_coeff = kd * ke`: a
-    Rayleigh multiplier); 1.4.0 made kd absolute and called it a breaking change. The kernel's own
-    source says which, and that is what is read -- never a version number, because the same name
-    meaning two things across versions is exactly how `soft_body_relaxation` already bit once.
-    XPBD's kernels read neither, so for XPBD the value is a record and changes nothing.
-    """
+    """The number to hand SolverVBD so that the contact damping *is* `value` N*s/m. Newton 1.5.0's
+    contact law takes kd absolute (`kd / dt`); 1.2.1's multiplied it by ke. Read off the kernel's
+    source, and refused if it is not 1.5.0's -- the same name meaning two things across versions."""
     from newton._src.solvers.vbd import rigid_vbd_kernels
     source = inspect.getsource(rigid_vbd_kernels._compute_body_particle_contact_force)
-    if "kd * ke" in source:
-        return value / ke
-    if "kd / dt" in source:
-        return value
-    raise SystemExit("this Newton's contact kernel reads kd in a way this runner does not know; "
-                     "read _compute_body_particle_contact_force and say which")
+    if "kd / dt" not in source or "kd * ke" in source:
+        raise SystemExit("this Newton's contact kernel does not read kd as Newton 1.5.0's does "
+                         "(kd / dt); this package is for Newton 1.5")
+    return value
 
 def contact_stiffness(model):
     """The contact spring in N/m per particle contact: the asset's material at the contact's scale.
@@ -142,12 +116,6 @@ def contact_stiffness(model):
         raise SystemExit("this model has no element with a stiffness to set a contact against")
     return max(candidates)
 
-def solver_reads(solver_name, name):
-    """Does this solver's own module ever reference `name`? A solver that never mentions
-    `tri_materials` has no triangle kernel; one that never mentions `soft_contact_ke` cannot be
-    tuned by it. Read from the source, so it stays true on a version nobody has looked at."""
-    module = sys.modules[solver_class(solver_name).__module__]
-    return name in inspect.getsource(module)
 
 # Self-collision is not here: it is a property of the asset, read by
 # `asset_properties.self_collision`. Keying it on the element type made a cloth self-collide and a
@@ -230,9 +198,6 @@ def contact_material(declared, chosen):
         chosen["soft_contact_restitution"] = (restitution, "the asset declares no restitution")
     return friction, restitution
 
-def solver_class(solver_name):
-    """The Newton solver this name means. One place, so the runners and the rules agree."""
-    return {"vbd": newton.solvers.SolverVBD, "xpbd": newton.solvers.SolverXPBD}[solver_name]
 
 # ---------------------------------------------------------------- what a setup adds, shared by the runners
 def structure(builder, stage, setup, declared, chosen, sizes):
@@ -291,9 +256,9 @@ def exclusion_kwargs(tag, exclusions, self_collision):
         kwargs[name] = found
     return kwargs
 
-def contact_source(tag, model, solver_name, setup, recipe, declared, chosen, fixtures):
+def contact_source(tag, model, setup, recipe, declared, chosen, fixtures):
     """Replace the derived contact numbers with the setup's source, where it is not `derived`."""
-    source = setups.contact_of(setup, solver_name, recipe)
+    source = setups.contact_of(setup, recipe)
     if source is None:
         return
     # Stated in N*s/m; handed over the way this kernel reads it, as the derived damping is.
@@ -319,12 +284,6 @@ def contact_source(tag, model, solver_name, setup, recipe, declared, chosen, fix
           f"kd {source['kd']:g} N*s/m (this kernel is handed {kd:g}) mu {source['mu']:g} "
           f"fixtures ke {source['shape_ke']:g}")
 
-def particle_contact_report(tag, model):
-    """XPBD meets particles with particles through `particle_*`, which no asset authors and no
-    run had ever printed."""
-    print(f"[{tag}] particle-particle contact (XPBD): ke {model.particle_ke:g} kd {model.particle_kd:g} "
-          f"kf {model.particle_kf:g} mu {model.particle_mu:g} -- Newton's defaults; the asset "
-          f"authors none and this run sets none")
 
 def elements_report(tag, builder):
     print(f"[{tag}] elements before finalize: {builder.particle_count} particles, "
@@ -332,24 +291,19 @@ def elements_report(tag, builder):
           f"{len(builder.edge_indices)} bending edges, {builder.spring_count} springs")
 
 
-def load(asset, solver_name="vbd", setup=None, radius="auto", tag="load"):
+def load(asset, setup=None, radius="auto", tag="load"):
     """Build `asset` into a fresh ModelBuilder with everything it declares; -> Loaded.
 
     `setup` (a parsed native/setups.py name) says which sources to use where the asset states
-    them; the default reads everything the asset states (setups.FINAL). `radius` overrides the
+    them; the default is setups.CANON, everything the asset states. `radius` overrides the
     particle radius only when the asset states none, or when a number is given explicitly."""
-    setup = setup or setups.resolve(setups.parse(setups.FINAL), asset_properties.read(asset))[0]
+    setup = setup or setups.resolve(setups.parse(setups.CANON), asset_properties.read(asset))[0]
     # add_usd stamps `default_particle_radius` onto every particle it imports, so the radius
     # has to be known first. Import once cheaply to measure the asset, then again to build it.
     measure = newton.ModelBuilder()
     measure.add_usd(Usd.Stage.Open(asset))
-    # Where this Newton's importer has no path for what the asset declares -- 1.2.1 knows nothing
-    # of PhysicsSurfaceDeformableSimAPI, though it ships eight cloth examples -- read the
-    # declaration and build it with the engine's own constructor, using 1.5.0's conversion.
-    usd_deformable.add_missing(measure, asset)
     if measure.particle_count == 0:
-        raise SystemExit(f"{asset}: nothing deformable -- neither this Newton's importer nor its "
-                         f"declared schemas produced any particles")
+        raise SystemExit(f"{asset}: nothing deformable -- this Newton's importer produced no particles")
     points = np.asarray(measure.particle_q, dtype=np.float64)
     declared, chosen = asset_properties.read(asset), {}
     if radius != "auto":
@@ -374,7 +328,7 @@ def load(asset, solver_name="vbd", setup=None, radius="auto", tag="load"):
     if refusal:
         raise SystemExit(refusal)
     builder.add_usd(stage)
-    built = usd_deformable.add_missing(builder, asset, chosen)
+    usd_deformable.check_imported(builder, stage)             # every declared body, point for point
     # The radius the run uses is the one the builder ended up with, not the one asked for. A
     # volume deformable takes `default_particle_radius`; a cloth's constructor sets its own from
     # the declared shell thickness and ignores it.
@@ -382,16 +336,13 @@ def load(asset, solver_name="vbd", setup=None, radius="auto", tag="load"):
     # Before the damping: a Rayleigh kernel's damping is handed over relative to the stiffness.
     usd_deformable.read_surface_stiffness(builder, stage, setup["surface"], declared, chosen)
     usd_deformable.carry_material_damping(builder, stage,
-                                          element_damping_as_the_kernel_reads_it(solver_name), chosen, declared)
+                                          element_damping_as_the_kernel_reads_it(), chosen, declared)
     if setup["stepping"] == "asset":
         asset_properties.consume(declared, *asset_properties.RECIPE["dt"], *asset_properties.RECIPE["iterations"])
     seal, exclusions, bag = structure(builder, stage, setup, declared, chosen, sizes)
     # Every scene length -- a contact band, a plate, a landing tolerance -- is sized from the
     # coarsest body, so that no body's contact is narrower than its own particles.
     radius = max(sizes.values()) if sizes else float(np.median(np.asarray(builder.particle_radius, dtype=np.float64)))
-    if built:
-        print(f"[{tag}] this Newton's importer did not build {len(built)} of the asset's "
-              f"bodies; built from the asset's declaration instead: {built}")
     # Which prims the solver simulates and what each is, so a recording can hide the asset's
     # still copy of each and bind the right render mesh to the right body.
     simulated = usd_deformable.find(stage)
@@ -404,7 +355,7 @@ def load(asset, solver_name="vbd", setup=None, radius="auto", tag="load"):
         builder.shape_flags[i] = 0
     if ghosts:
         print(f"[{tag}] hid {len(ghosts)} visual-only shape(s) the USD import added: {ghosts}")
-    return Loaded(asset=asset, tag=tag, solver_name=solver_name, setup=setup, builder=builder,
+    return Loaded(asset=asset, tag=tag, setup=setup, builder=builder,
                   stage=stage, declared=declared, chosen=chosen, points=points, radius=radius,
                   sizes=sizes, seal=seal, exclusions=exclusions, bag=bag,
                   kinds=[kind for kind, _ in simulated],
@@ -421,21 +372,18 @@ class Loaded(types.SimpleNamespace):
 def colour(asset):
     """SolverVBD's colouring, with the seal springs in the graph. Call after the scene's fixtures
     are added and before finalize."""
-    if asset.solver_name == "vbd":
-        colour_for_vbd(asset.builder, asset.seal)
+    colour_for_vbd(asset.builder, asset.seal)
 
 
 def configure(asset, model, fixtures):
     """Give the finalized model the asset's contact: stiffness and damping from its own material
     (or the recipe the setup takes), its friction, the same numbers on the scene's `fixtures`
     (shape indices the scene added); then print the audit and refuse what nobody read."""
-    tag, chosen, declared, solver_name = asset.tag, asset.chosen, asset.declared, asset.solver_name
+    tag, chosen, declared = asset.tag, asset.chosen, asset.declared
     model.soft_contact_ke = contact_stiffness(model)
     chosen["soft_contact_ke"] = (model.soft_contact_ke,
                                  "N/m per contact: the asset's own material at its own resolution "
-                                 "(E * 2r for a volume, tri_ke for a membrane), stiffest body; "
-                                 + (f"{solver_name} reads it" if solver_reads(solver_name, "soft_contact_ke")
-                                    else f"{solver_name} reads no contact stiffness at all"))
+                                 "(E * 2r for a volume, tri_ke for a membrane), stiffest body")
     damping = contact_damping(model)
     model.soft_contact_kd = damping_as_the_kernel_reads_it(damping, model.soft_contact_ke)
     chosen["soft_contact_kd"] = (model.soft_contact_kd,
@@ -455,7 +403,7 @@ def configure(asset, model, fixtures):
     chosen["particle_radius_used"] = (asset.radius, "read back from the model, whatever set it")
     chosen["fixture_ke"] = (model.soft_contact_ke, "the scene's fixtures are as stiff as the contact, "
                                                    "because it is the same contact")
-    contact_source(tag, model, solver_name, asset.setup, declared["recipe"], declared, chosen, list(fixtures))
+    contact_source(tag, model, asset.setup, declared["recipe"], declared, chosen, list(fixtures))
     asset_properties.report(tag, declared, chosen, asset.setup)
 
 

@@ -152,17 +152,14 @@ def add_visual_cues(stage, center_xy, tile_m=0.1, half_extent_m=5.0, key_intensi
 
 DEFAULT_NEWTON_SOLVER = "mujoco"  # what Isaac's Newton stage builds when no scene schema selects one
 
-# What an asset declares itself to be, by the API schemas on its geometry. A deformable is not a
-# rigid body with soft settings: it is particles, and only a solver that integrates particles can
-# run it. Which prims are simulated deformables is `native/usd_deformable.simulated_kind`'s rule
-# -- one rule, because this file had a name table and that one had a suffix rule, and a bare
-# TetMesh was "nothing to simulate" here and a volume there.
-SOLVER_SIMULATES = {  # measured, not assumed: MuJoCo refuses a stage whose bodies are particles
-    "physx": {"rigid", "deformable"},   # one engine, both kinds, no solver to choose
-    "mujoco": {"rigid"},                # MuJoCo-Warp is a rigid-body engine
-    "xpbd": {"rigid", "deformable"},    # XPBD: rigid and soft bodies
-    "vbd": {"rigid", "deformable"},     # VBD for particles, AVBD for rigid bodies, and the two coupled
-}
+# What an asset declares itself to be, by the API schemas on its geometry. Which prims are
+# simulated deformables is `native/usd_deformable.simulated_kind`'s rule -- one rule for both paths.
+#
+# This Kit path runs rigid assets only, whatever the solver. A deformable is particles, and Isaac's
+# Newton extension neither sizes them (every particle keeps the builder's 0.1 m) nor syncs them to
+# the stage (its Fabric update writes body transforms only), so a deformable run here is neither
+# measured nor seen. Deformables go through `native/` (check.py routes them; envs.DEFORMABLE).
+KIT_SIMULATES = {"rigid"}
 
 
 def asset_kinds(stage, root_path):
@@ -181,15 +178,15 @@ def asset_kinds(stage, root_path):
 
 
 def check_asset_fits_solver(stage, root_path, solver):
-    """Refuse a combination the solver cannot simulate, before the test spends a run on it."""
+    """Refuse what this Kit path does not run, before the test spends a run on it."""
     kinds = asset_kinds(stage, root_path)
-    unsupported = kinds - SOLVER_SIMULATES.get(solver, set())
+    unsupported = kinds - KIT_SIMULATES
     if unsupported:
         raise RuntimeError(
-            f"the asset declares {sorted(kinds)} geometry and the {solver!r} solver simulates "
-            f"{sorted(SOLVER_SIMULATES.get(solver, set()))}: {sorted(unsupported)} has no solver here. "
-            f"Run it in an environment whose solver takes it.")
-    return {"asset_kinds": sorted(kinds), "solver_simulates": sorted(SOLVER_SIMULATES.get(solver, set()))}
+            f"the asset declares {sorted(kinds)} geometry and this Kit path runs "
+            f"{sorted(KIT_SIMULATES)} only: {sorted(unsupported)} goes through asset_checks.check, "
+            f"which sends a deformable to the native Newton runner.")
+    return {"asset_kinds": sorted(kinds), "solver": solver}
 
 
 def _schema_registered(identifier) -> bool:
@@ -203,30 +200,15 @@ def _schema_registered(identifier) -> bool:
                for t in Plug.Registry().GetAllDerivedTypes("UsdAPISchemaBase"))
 
 
-DEFORMABLE_SUBSTEPS = 5  # what Newton's own deformable examples use; Isaac's default is 1
-CONTACT_MARGIN_OF_RADIUS = 4.0  # Newton's soft-rigid example creates contacts this far out
-
-
-def _set_contact_margin(margin):
-    """How far out the collision pipeline looks for a particle-surface contact.
-
-    Isaac fixes it at 1 cm. A particle larger than that -- a 2 m cloth's vertices are 4 cm -- is
-    already through the surface by the time a contact would be created, and the asset falls through
-    a floor it should rest on. Newton's own example scales it with the radius, which is what this
-    does; the pipeline is built from this config during initialisation."""
-    import isaacsim.physics.newton as isaac_newton
-
-    cfg = isaac_newton.acquire_stage().cfg
-    was = getattr(cfg, "soft_contact_margin", None)
-    cfg.soft_contact_margin = float(margin)
-    PARTICLE_SIZING["soft_contact_margin"] = {"margin_m": round(float(margin), 6), "was_m": was}
-    return float(margin)
+# Solver steps per frame for every rigid Newton run. Isaac's default is 1. Every rigid Newton cell
+# has run at 5 (results/20260922_rigid records {"num_substeps": 5, "was": 1} in all 66); the
+# constant used to be named for deformables, which this path no longer runs. Kept at 5 by the
+# user's decision of 2026-09-29. PhysX runs take no substep setting from here.
+RIGID_NEWTON_SUBSTEPS = 5
 
 
 def _set_substeps(substeps):
-    """How many solver steps Isaac takes per frame. It defaults to one, and Newton's own deformable
-    examples take five: a particle solver integrates a stiff material, and one step per frame is
-    where a large or stiff asset comes apart. Returns what was set."""
+    """How many solver steps Isaac's Newton stage takes per frame. Returns what was set."""
     import isaacsim.physics.newton as isaac_newton
 
     cfg = isaac_newton.acquire_stage().cfg
@@ -235,30 +217,16 @@ def _set_substeps(substeps):
     return {"num_substeps": int(substeps), "was": was}
 
 
-def _patch_builder(particle_radius=None):
-    """Everything that has to happen while Newton's model is being built, in one wrapper."""
-    _register_mujoco_attributes_too()
-    _RADIUS["value"] = particle_radius
-
-
-_RADIUS = {"value": None}
-
-
 def _register_mujoco_attributes_too():
     """Isaac 6.0.1 hands Newton's USD importer a MuJoCo schema resolver whatever the solver, but
     registers MuJoCo's custom attributes on the builder only when the solver is MuJoCo, so asking
     for any other solver there fails with "MuJoCo custom attributes not registered" and no model is
     built at all. Registering them alongside whatever else is registered costs nothing -- they are
-    attribute declarations. Idempotent: registering twice is ignored.
-
-    Isaac 6.0.1 also abandons initialisation when the builder has no rigid body, which drops a
-    deformable-only scene outright (6.1.0 counts particles in the same test). That one is not
-    patched here: adding a body to get past it made XPBD 1.2.1 fail with an illegal CUDA access, so
-    on that Isaac a deformable-only scene is reported as not running rather than forced."""
+    attribute declarations. Idempotent: registering twice is ignored."""
     import newton
 
     if getattr(newton.ModelBuilder, "_asset_checks_mjc_attributes", False):
-        return  # installed once per Kit process; the wrapper reads _RADIUS each time it runs
+        return  # installed once per Kit process
     original = newton.ModelBuilder.add_usd
 
     def add_usd(self, *args, **kwargs):
@@ -266,11 +234,7 @@ def _register_mujoco_attributes_too():
             newton.solvers.SolverMuJoCo.register_custom_attributes(self)
         except Exception:  # noqa: BLE001 - already registered, which is what we want
             pass
-        out = original(self, *args, **kwargs)
-        radius = size_particles_on(self, _RADIUS["value"])
-        if radius:
-            _set_contact_margin(radius * CONTACT_MARGIN_OF_RADIUS)
-        return out
+        return original(self, *args, **kwargs)
 
     newton.ModelBuilder.add_usd = add_usd
     newton.ModelBuilder._asset_checks_mjc_attributes = True
@@ -335,7 +299,7 @@ def _preset_solver_config(solver, settings):
     if not settings:
         return None
     import isaacsim.physics.newton as isaac_newton
-    from isaacsim.physics.newton.impl import newton_config, solver_config
+    from isaacsim.physics.newton.impl import solver_config
 
     by_type = {getattr(cls, "__dataclass_fields__", {}).get("solver_type").default: cls
                for cls in vars(solver_config).values()
@@ -351,7 +315,7 @@ def _preset_solver_config(solver, settings):
     return dict(settings)
 
 
-def select_solver(stage, engine, solver, settings=None, particle_radius=None, substeps=DEFORMABLE_SUBSTEPS):
+def select_solver(stage, engine, solver, settings=None, substeps=RIGID_NEWTON_SUBSTEPS):
     """Ask Isaac for `solver` and report how. Isaac 6.1.0 reads a solver's scene API schema off the
     PhysicsScene (`impl/utils.py newton_solver_to_api_schema`) and refuses a stage carrying two of
     them. Under PhysX there is nothing to select. Asking for the Isaac's own default needs nothing
@@ -366,7 +330,7 @@ def select_solver(stage, engine, solver, settings=None, particle_radius=None, su
     fit = check_asset_fits_solver(stage, ASSET_PRIM, solver)
     fit["solver_settings"] = settings or None
     if engine == "newton":
-        _patch_builder(particle_radius)  # before anything Isaac builds reads the geometry
+        _register_mujoco_attributes_too()  # before anything Isaac builds reads the geometry
         fit["substeps"] = _set_substeps(substeps)
     if engine != "newton":
         return {"requested": solver, "applied": None, "reason": f"{engine} has one solver", **fit}
@@ -404,106 +368,3 @@ def select_solver(stage, engine, solver, settings=None, particle_radius=None, su
     return {"requested": solver, "applied": schema, "replaced": replaced,
             "scenes": [str(p.GetPath()) for p in scenes], **fit}
 
-
-# Newton's defaults are soft_contact_ke 1e3, kd 1e1, mu 0.5, which let a soft body sink through the
-# floor, and Isaac sets none of them. Newton's own VBD soft-rigid example uses 1e5 / 1e2 / 0.8 for
-# centimetre-scale objects (examples/vbd/example_vbd_soft_rigid_contact.py); those are the floor
-# here, and the stiffness is raised from the asset when the asset needs more -- see soft_contact_for.
-SOFT_CONTACT_FLOOR = {"soft_contact_ke": 1.0e5, "soft_contact_kd": 1.0e2, "soft_contact_mu": 0.8}
-PENETRATION_OF_RADIUS = 0.1  # how far a resting particle may sink into a surface, as a fraction of its radius
-
-
-def soft_contact_for(particle_mass, radius, gravity=9.81):
-    """Contact stiffness that holds this asset up, whatever it weighs.
-
-    A particle resting on a surface sinks until the contact force balances its weight: with a linear
-    contact that is m*g/ke, so ke = m*g / (fraction of the radius one is willing to let it sink).
-    Fixed numbers cannot do this -- the same 1e5 that suits a 3 g cloth vertex lets a heavy one sink
-    straight through -- and the mass comes from the asset's own density and geometry. Damping is
-    kept in the same proportion to stiffness as Newton's example uses.
-    """
-    import numpy as np
-
-    mass = float(np.median(np.asarray(particle_mass)[np.asarray(particle_mass) > 0])) if len(particle_mass) else 0.0
-    if mass <= 0.0 or radius <= 0.0:
-        return dict(SOFT_CONTACT_FLOOR)
-    ke = mass * gravity / (PENETRATION_OF_RADIUS * radius)
-    ke = max(ke, SOFT_CONTACT_FLOOR["soft_contact_ke"])
-    ratio = SOFT_CONTACT_FLOOR["soft_contact_kd"] / SOFT_CONTACT_FLOOR["soft_contact_ke"]
-    return {"soft_contact_ke": ke, "soft_contact_kd": ke * ratio,
-            "soft_contact_mu": SOFT_CONTACT_FLOOR["soft_contact_mu"]}
-
-
-def particle_radius_for(points, radius=None):
-    """Half the median distance from a particle to its nearest neighbour, so neighbours touch
-    without overlapping, whatever the asset's scale."""
-    import numpy as np
-
-    if radius is not None:
-        return float(radius)
-    points = np.asarray(points, dtype=np.float64)
-    picked = np.random.default_rng(0).choice(len(points), size=min(512, len(points)), replace=False)
-    distances = np.sqrt(((points[picked][:, None, :] - points[None, :, :]) ** 2).sum(-1))
-    distances[distances < 1e-9] = np.inf  # a sampled particle matches itself in the full set
-    return float(np.median(distances.min(axis=1)) * 0.5)
-
-
-def size_particles_on(builder, radius=None):
-    """Set the particle radius on the builder, before anything is finalised.
-
-    Newton's ModelBuilder defaults `particle_radius` to 0.1 m and Isaac never changes it, so a 17 cm
-    banana imports as 3074 particles each 10 cm across. Setting it on the finished model is too
-    late: the solver is constructed from the model and keeps what it was built with. Newton's own
-    examples set it while building, which is what this does.
-    """
-    import numpy as np
-
-    if not builder.particle_count:
-        return None
-    value = particle_radius_for(np.asarray(builder.particle_q, dtype=np.float64), radius)
-    was = float(max(builder.particle_radius))
-    for i in range(builder.particle_count):
-        builder.particle_radius[i] = value
-    PARTICLE_SIZING.update({"radius_m": round(value, 6), "was_m": round(was, 6),
-                            "particles": int(builder.particle_count), "set_on": "builder"})
-    return value
-
-
-PARTICLE_SIZING = {}  # what the last build gave its particles; read back into result.json
-
-
-def size_particles(radius=None, soft_contact=None):
-    """Give the model's particles a radius and contact stiffness that fit the asset, and report both.
-
-    Newton's ModelBuilder defaults `particle_radius` to 0.1 m and Isaac never changes it, so a
-    17 cm banana imports as 3074 particles each 10 cm across, packed into a body 3 cm thick. Every
-    solver then starts from enormous overlap and throws the asset out of the scene -- which is what
-    both VBD and XPBD did. Newton's own examples set the radius explicitly (3 mm for centimetre-
-    scale objects).
-
-    Left to itself this uses half the median distance from a particle to its nearest neighbour, so
-    neighbouring particles touch and do not overlap, whatever the asset's scale.
-    """
-    import numpy as np
-
-    import isaacsim.physics.newton as isaac_newton
-
-    model = getattr(isaac_newton.acquire_stage(), "model", None)
-    if model is None or not getattr(model, "particle_count", 0):
-        return None
-    points = np.asarray(model.particle_q.numpy())
-    if radius is None:
-        picked = np.random.default_rng(0).choice(len(points), size=min(512, len(points)), replace=False)
-        distances = np.sqrt(((points[picked][:, None, :] - points[None, :, :]) ** 2).sum(-1))
-        distances[distances < 1e-9] = np.inf  # a sampled particle matches itself in the full set
-        radius = float(np.median(distances.min(axis=1)) * 0.5)
-    was = float(np.asarray(model.particle_radius.numpy()).max())
-    model.particle_radius.fill_(float(radius))
-    contact = dict(soft_contact_for(np.asarray(model.particle_mass.numpy()),
-                                    float(np.asarray(model.particle_radius.numpy()).max())),
-                   **(soft_contact or {}))
-    before = {name: float(getattr(model, name)) for name in contact}
-    for name, value in contact.items():
-        setattr(model, name, float(value))
-    return {"radius_m": round(float(radius), 6), "was_m": round(was, 6), "particles": int(model.particle_count),
-            "soft_contact": contact, "soft_contact_was": before}

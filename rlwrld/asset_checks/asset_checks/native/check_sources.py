@@ -16,12 +16,40 @@ import pathlib
 import sys
 
 BUILTINS = set(dir(__builtins__)) | {"__file__", "__name__", "__doc__", "__builtins__"}
-# Modules that pull in USD and therefore must not be imported before Kit exists, in a file that
-# starts Kit at all. Importing them early initialises USD outside Kit, and Kit then cannot
-# register its own schema wrappers -- the run dies during startup, long before any physics.
-NEEDS_KIT_FIRST = {"pxr", "omni", "isaacsim", "asset_properties", "usd_deformable",
-                   "recording", "skinning", "physx_parity", "warp", "newton"}
+# In a file that starts Kit, nothing that pulls in USD (or an engine that does) may be imported
+# before Kit exists: USD initialised outside Kit stops Kit registering its own schema wrappers,
+# and the run dies during startup. These are the roots; a module of this package needs Kit first
+# when its own module-level imports reach one of them, directly or through another module here --
+# computed from the imports (`needs_kit_first`), not listed, so a new module is covered the day
+# it is written. `isaacsim` is how Kit is started, so it is not one of them.
+ENGINE_ROOTS = {"pxr", "omni", "warp", "newton"}
 STARTS_KIT = "SimulationApp("
+
+
+def top_level_imports(tree):
+    """The root module names a file imports at module scope (not inside a function)."""
+    roots = set()
+    for node in tree.body:
+        for inner in ast.walk(node) if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else ():
+            if isinstance(inner, ast.Import):
+                roots |= {a.name.split(".")[0] for a in inner.names}
+            elif isinstance(inner, ast.ImportFrom) and inner.module and not inner.level:
+                roots.add(inner.module.split(".")[0])
+    return roots
+
+
+def needs_kit_first(directory):
+    """{module name} of this directory's modules that reach ENGINE_ROOTS at import time, plus the roots."""
+    imports = {p.stem: top_level_imports(ast.parse(p.read_text())) for p in pathlib.Path(directory).glob("*.py")}
+    needs = set(ENGINE_ROOTS)
+    grew = True
+    while grew:
+        grew = False
+        for name, roots in imports.items():
+            if name not in needs and roots & needs:
+                needs.add(name)
+                grew = True
+    return needs
 
 
 def module_scope(tree):
@@ -95,7 +123,7 @@ def enclosing_loop_start(node, parent):
     return start
 
 
-def check(path):
+def check(path, needs=frozenset(ENGINE_ROOTS)):
     text = path.read_text()
     try:
         tree = ast.parse(text)
@@ -160,7 +188,7 @@ def check(path):
                 continue
             for alias in node.names:
                 root = (alias.name if isinstance(node, ast.Import) else (node.module or "")).split(".")[0]
-                if root in NEEDS_KIT_FIRST and root != "isaacsim":
+                if root in needs:
                     complaints.append(f"{path.name}:{node.lineno}: `{root}` is imported before "
                                       f"SimulationApp on line {kit_line}; USD initialised outside "
                                       f"Kit stops Kit registering its own schemas")
@@ -172,8 +200,9 @@ def main():
     ap.add_argument("directory", nargs="?", default=str(pathlib.Path(__file__).resolve().parent))
     args = ap.parse_args()
     complaints = []
+    needs = needs_kit_first(args.directory)
     for path in sorted(pathlib.Path(args.directory).glob("*.py")):
-        complaints += check(path)
+        complaints += check(path, needs)
     for complaint in sorted(set(complaints)):
         print(f"[sources] {complaint}")
     print(f"[sources] {len(set(complaints))} problem(s) that would only show up at run time")

@@ -1,13 +1,14 @@
 # Deformables: run the engine, not the host
 
 ```
-python asset_checks/native/run.py <asset.usda> --out <dir> \
-    --envs newton12_vbd,newton12_xpbd,newton15_vbd,newton15_xpbd,physx \
-    --experiments drop,press
+python asset_checks/native/run.py <asset.usda> --bench <simready-bench> --out <dir> \
+    [--experiments drop,press] [--setup auto-auto-auto-auto]
 ```
 
-You name four things -- a USD, an experiment, an engine and a solver -- and this measures the
-asset and makes the videos. The principle behind every file here: **the asset's physics and
+Usually reached through `asset_checks.check ... --engine newton1.5 --solver vbd`. Deformables are
+checked in one environment: **Newton 1.5 VBD** (`envs.DEFORMABLE`; the scope decision of
+2026-09-29 removed Newton 1.2, XPBD and PhysX deformables). This measures the asset and makes the
+videos. The principle behind every file here: **the asset's physics and
 textures live in the USD; the experiment never changes with the engine; only the engine changes.**
 Anything a run has to decide that the USD does not say is printed as ours, with the reason.
 
@@ -35,32 +36,45 @@ holding the strips; `<out>/<asset>/summary.md` with the numbers and the engines 
 NVIDIA's three tests read rigid-body transforms and refuse an asset without `RigidBodyAPI`, and
 Isaac's Fabric sync carries rigid-body transforms only. A deformable driven through that path is
 both unmeasurable and invisible: every video of one came out still, because the mesh on the stage
-never changes. Here each engine is driven directly, the solver's own state is what gets measured,
+never changes. Here Newton is driven directly, the solver's own state is what gets measured,
 and the recording each run writes is what gets photographed.
 
-Every cell is a separate process in its own virtual environment, because the two Newton versions
-cannot share one: `isaacsim-core` pins `newton[sim]==1.2.1` against Isaac 6.0.1 and `==1.5.0`
-against 6.1.0.
+Every cell is a separate process in the Isaac 6.1.0 venv, which carries Newton 1.5.0.
+
+## A run refuses rather than guesses
+
+- **Every vendor attribute is accounted for** (`asset_properties.account`): an authored attribute
+  the run neither reads nor sets aside by its setup, and that is not classified in
+  `asset_properties.ACCOUNTED`, refuses the run; so does a quantity stated twice whose two
+  statements disagree (e.g. `newton:kMu` against `physics:youngsModulus`/`poissonsRatio`).
+- **The setup** (`setups.py`, default `setups.CANON = auto-auto-auto-auto`) says where each number
+  the USD does not settle comes from; half a recipe is refused, not completed.
+- **The kernel's unit is read off its source**: damping is handed to SolverVBD in the unit Newton
+  1.5.0's kernels read, and a Newton whose kernels read it otherwise is refused.
+- **Every RESULT line carries `realtime_x`** (`pace.py`): simulated seconds per second of stepping.
 
 ## The files
 
 | file | what it owns |
 |---|---|
-| `run.py` | the grid: which cells, in which venv; the cell directories; the strips |
+| `run.py` | the cells of one asset, their directories, videos, result.json, summary and strips |
 | `drop_shape.py` / `press_shape.py` | **the experiments themselves** -- schedule, depth, thresholds, verdicts. No engine imports, no engine parameters. |
-| `asset_properties.py` | what the asset declares (material, thickness, radius, self-collision), each with its source; what we chose where it is silent, said out loud |
-| `newton_drop.py` / `newton_press.py` | Newton: import, size, colour, step, measure. The shared Newton constants. |
-| `physx_drop.py` / `physx_press.py` | the same two, inside Kit, through `DeformablePrim` |
-| `to_physx.py` | the same asset re-authored for PhysX: same elements, same declared material |
-| `physx_parity.py` | the independent oracle that the conversion carried everything, run before any PhysX cell |
-| `usd_deformable.py` | building a cloth from its declaration where an importer produces nothing; finding the simulated prim by what it is |
+| `newton_drop.py` / `newton_press.py` | the two experiments' scenes: the asset lifted over a floor / set down under a kinematic plate, and what is measured |
+| `loader.py` | **the one loading path**: a deformable USD into a Newton builder with everything it states (radii, damping, surface stiffness, seal springs, contact exclusions, self-contact, contact numbers) and the audit that refuses what nobody read |
+| `newton_scene.py` | what both experiments share outside the asset: contact band, collision pipeline, stepping, the substep loop (`Stepper`), element arrays |
+| `asset_properties.py` | what the asset declares, each with its source; the vendor recipe; `account`, which refuses unread or contradicting attributes |
+| `setups.py` | where every number the USD does not settle comes from; `CANON` |
+| `usd_deformable.py` | reading the declared bodies, materials, structure (seals, exclusions) and render meshes |
+| `integrity.py` | whether a bag stayed a bag: seal gaps and contents outside the film, in every RESULT |
+| `pace.py` | `realtime_x`: the engine's pace against the clock |
+| `stepping.py` | the canon stepping: substeps, iterations, fps |
 | `recording.py` | the recording, for a deformable (`Recording`) and a rigid run (`RigidRecording`): one layout |
 | `skinning.py` | binding the render mesh to the simulated elements, in the authored pose |
 | `render_usd.py` | any recording -> frames: the rigid runs' room, cues and camera, one view at a time |
-| `../video.py` | how a recording becomes its two videos, for both pipelines |
+| `../video.py` | how a recording becomes its videos, for both pipelines; a failed render makes none |
 | `../compare.py` | the environments side by side, one strip per view |
-| `agreement.py` | the engines' answers to one question in one table; deliberately no threshold |
-| `check_sources.py` | the static check for the failures that only show at run time: undefined names, use before definition, pxr imported before Kit |
+| `check_sources.py` | static check: undefined names, use before definition, a USD/engine module imported before Kit (computed from the imports) |
+| `check_rules.py` | static check: no asset named in code, experiments know no engine, experiments declared once |
 
 ## The things that were not tuning
 
@@ -77,10 +91,6 @@ Each of these was a silent wrong answer, not a crash, and each is now a rule rat
   diverges for every stiffness, damping and substep count.
 - **`rigid_body_particle_contact_buffer_size` is fixed at 256** and documented as never growing.
   Sized from the asset.
-- **XPBD's `soft_body_relaxation` is the only Jacobi averaging there is** -- `apply_particle_deltas`
-  never divides by how many constraints touched a particle. It must carry `1/n`, and n is the
-  mesh's own connectivity. Newton 1.2.1 spends the same parameter as a compliance instead, and
-  never reads the material at all, so the rule is applied only where the kernel means it.
 - **Self-collision is the asset's to declare.** No deformable schema in either family has a
   switch for it; where the asset is silent the schema default (off) applies, to every engine
   that has the switch, and the ones that do not say so.
@@ -90,7 +100,8 @@ Each of these was a silent wrong answer, not a crash, and each is now a rule rat
   which is zero for a sheet. And the drop is the starting clearance, not how far a runner lifted.
 - **A mesh with animated points carries an animated extent**, or every consumer of bounds --
   the camera included -- reads the authored box at every time.
-- **PhysX's starting pose is set through the view**, its collision offsets are sized from the
-  asset, its plate is driven through `RigidPrim`, and its floor has thickness.
+- **A vendor's recipe is read, or the run refuses.** The polybags' fold edge exclusions sat unread
+  for two days (2026-09-22..24) while the bag they hold together flew apart at its own stepping; they
+  are Newton's `add_cloth_mesh` edge ids, and now applied.
 
-`docs/newton_official_reference.md` in `simready-bench` has the measurements behind each.
+`rlwrld/asset_checks/docs/newton_official_reference.md` has the measurements behind each.

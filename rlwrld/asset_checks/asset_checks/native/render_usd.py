@@ -1,10 +1,10 @@
 """Inside Kit: turn an animated USD into frames, with one fixed camera that frames the whole run.
 
-    ./isaac-run isaac610 native/render_usd.py <recording.usda> <out_dir> [--fps 60] [--size 640] [--show visual|collision|both]
+    ./isaac-run isaac610 native/render_usd.py <recording.usda> <out_dir> --fps 60 --size 640 [--show visual|collision|both]
 
-Newton writes what it simulated with `newton.viewer.ViewerUSD`: the deformable's surface as an
-animated mesh and its particles as an animated point instancer. That file is the honest record of
-the physics -- but it is geometry, not pictures. This opens it in Kit and photographs it.
+`recording.py` writes what the solver simulated: the asset's own render meshes, carried by the
+simulated points, frame by frame. That file is the honest record of the physics -- but it is
+geometry, not pictures. This opens it in Kit and photographs it.
 
 Why this exists at all: Isaac's own Fabric sync writes rigid body transforms and nothing else, so
 a deformable simulated inside Isaac never reaches the renderer and every video of one came out
@@ -25,8 +25,8 @@ from isaacsim import SimulationApp
 ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 ap.add_argument("stage")
 ap.add_argument("out_dir")
-ap.add_argument("--fps", type=float, default=30.0)
-ap.add_argument("--size", type=int, default=1024)
+ap.add_argument("--fps", type=float, required=True, help="video.CAPTURE_FPS, which the caller passes")
+ap.add_argument("--size", type=int, required=True, help="video.SIZE, which the caller passes")
 ap.add_argument("--show", default="both", choices=("both", "collision", "visual"),
                 help="which of the two meshes a recording holds to photograph: the tetrahedral "
                      "surface the solver moved, the asset's textured render mesh carried along "
@@ -184,7 +184,6 @@ if bounds.IsEmpty():
     sys.exit(2)
 centre = bounds.GetMidpoint()
 size = bounds.GetSize()
-span = max(size[0], size[1], size[2])
 print(f"[render] bounds centre {tuple(round(c, 4) for c in centre)} size {tuple(round(s, 4) for s in size)}")
 
 # The framing, the room and the floor of the rigid runs, from the code that made them rather than
@@ -244,7 +243,6 @@ timeline.set_end_time(end / stage_fps)
 timeline.set_time_codes_per_second(stage_fps)
 timeline.stop()
 
-capture_iface = omni.kit.capture.viewport.acquire_capture_interface() if False else None
 for _ in range(30):                                    # let materials and the RTX scene resolve
     app.update()
 

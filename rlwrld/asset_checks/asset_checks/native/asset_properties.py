@@ -175,7 +175,7 @@ def consume(declared, *names):
 #   experiment  belongs to an experiment fixture (a gripper), not to the asset
 #   runtime     a solver buffer or the vendor's file bookkeeping; no physics
 #   authoring   the vendor's authoring intermediates, already baked into the authored mesh; not
-#               among the runtime items the vendor listed (the vendor reply, 2026-09-24)
+#               among the runtime items the vendor listed (vendor reply, 2026-09-24)
 #   visual      binds a display mesh; a recording concern, which binds by its own rule
 # Names, not patterns: a pattern that covers today's fold data would also cover tomorrow's fold
 # exclusions, which is exactly the attribute this list exists not to wave through.

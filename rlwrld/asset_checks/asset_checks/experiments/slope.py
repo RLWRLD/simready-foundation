@@ -9,7 +9,7 @@ SUMMARY = "drop the asset on a 45-degree slope: does it slide, and stay out of t
 KINDS = {"rigid"}
 SECONDS = None
 RIGID = ("simready_benchmark_kit_suite.fet003_physics.slope_drop", "slope_drop")
-DEFORMABLE = {}
+DEFORMABLE = None
 # PR #2's tunnel and explode checks apply; its rest criterion belongs to its own walled
 # 15-degree slope, and NVIDIA's is 45 degrees, where the asset is meant to keep sliding
 PR2_CRITERIA = "motion"

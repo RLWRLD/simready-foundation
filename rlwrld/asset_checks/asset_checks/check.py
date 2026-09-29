@@ -13,9 +13,12 @@ a Newton version *is* an Isaac build. `envs.py` says the same thing in its docst
 means nothing until the build, the engine and the solver are all named -- so `--engine newton1.5`
 names two of the three and `--solver` the last.
 
-A combination that cannot work is refused before anything is launched, with the reason: MuJoCo is
-a rigid-body engine and will not simulate a deformable, and not every experiment means something
-for both kinds.
+**Two paths.** A rigid asset runs through Kit (`asset_checks.run`) in any environment. A deformable
+runs through `native/` in one environment only, `envs.DEFORMABLE` (Newton 1.5 VBD), with a setup
+(native/setups.py; default setups.CANON). A combination that cannot work is refused before anything
+is launched, with the reason, and the refusal is written where the cell would have been.
+
+Exit status: 0 every cell passed, 1 a cell ran and failed its experiment, 2 refused or no verdict.
 """
 import argparse
 import json
@@ -58,15 +61,14 @@ stage = Usd.Stage.Open(sys.argv[1])
 kinds = sorted(asset_kinds(stage, stage.GetDefaultPrim().GetPath()))
 print('KINDS', ' '.join(kinds))
 if 'deformable' in kinds:
-    most = int(sys.argv[2]) if sys.argv[2] != 'any' else None
-    needs = set(sys.argv[3].split(',')) if sys.argv[3] != 'any' else None
-    reason = usd_deformable.why_not_runnable(stage, sys.argv[1], most=most, needs=needs)
+    needs = set(sys.argv[2].split(',')) if sys.argv[2] != 'any' else None
+    reason = usd_deformable.why_not_runnable(stage, sys.argv[1], needs=needs)
     if reason:
         print('REFUSE', reason)
 """
 
 
-def read_asset(bench, asset, drives, needs):
+def read_asset(bench, asset, needs):
     """What the asset is, and whether it is shaped like something this pipeline can run.
 
     Both answers come from the asset's own schemas, read once, in the venv that has USD. The
@@ -76,7 +78,7 @@ def read_asset(bench, asset, drives, needs):
     out = subprocess.run(
         [str(bench / ".venv-isaac610" / "bin" / "python"), "-c",
          READ_ASSET.format(root=str(PACKAGE_ROOT), native=str(HERE / "native")),
-         str(asset), str(drives), ",".join(sorted(needs)) if needs else "any"],
+         str(asset), ",".join(sorted(needs)) if needs else "any"],
         capture_output=True, text=True)
     kinds = None
     for line in out.stdout.splitlines():
@@ -105,33 +107,28 @@ def main():
                         sorted({s for by_solver in known.values() for s in by_solver})))
     ap.add_argument("--out", help="the run directory; the cell lands in "
                      "<out>/<asset>/<env>/<experiment>/ (default: ./results)")
-    ap.add_argument("--setup", default=setups.DEFAULT, choices=setups.NAMES, metavar="SETUP",
-                    help="deformable only: where the structure, the contact numbers and the "
-                         f"stepping come from, as structure-contact-stepping (default {setups.DEFAULT}; "
-                         "see native/setups.py). One run directory holds one setup.")
-    ap.add_argument("--bench", default="<simready-bench>",
-                    help="simready-bench: the venvs, isaac-run and the GPU pin")
+    ap.add_argument("--setup", default=None, choices=setups.NAMES, metavar="SETUP",
+                    help="deformable only: where the structure, the contact numbers, the stepping and "
+                         f"the surface reading come from, as {'-'.join(setups.FACTORS)} (default "
+                         f"{setups.CANON}; see native/setups.py). One run directory holds one setup.")
+    ap.add_argument("--bench", default=None,
+                    help=f"simready-bench: the venvs, isaac-run and the GPU pin (default ${envs.BENCH_VARIABLE})")
     ap.add_argument("--timeout", type=int, default=None,
-                    help="seconds a deformable cell may run before it is recorded as timed out "
-                         "(default: the runner's own)")
+                    help="seconds a cell may run before it is recorded as timed out (default: the runner's own)")
     args = ap.parse_args()
 
-    bench = pathlib.Path(args.bench).resolve()
+    bench = envs.bench(args.bench)
     asset = pathlib.Path(args.asset).resolve()
     if not asset.is_file():
         raise SystemExit(f"no such asset: {asset}")
-
-    if args.solver not in known[args.engine]:
-        raise SystemExit(f"{args.engine} does not offer the {args.solver} solver; it has "
-                         + ", ".join(sorted(known[args.engine])))
-    env = known[args.engine][args.solver]
     experiment = experiments.get(args.experiment)
+    env = known[args.engine].get(args.solver)
 
     # `--out` is the run directory. Both runners lay the same tree inside it --
     # <out>/<asset>/<env>/<experiment>/ -- and put the side-by-side strips in <out>/compare/, so a
     # second engine or a second experiment written to the same `--out` joins the same comparison.
     out = pathlib.Path(args.out).resolve() if args.out else pathlib.Path("results").resolve()
-    cell = out / asset.stem / env.name / experiment.NAME
+    cell = out / asset.stem / (env.name if env else f"{args.engine}_{args.solver}") / experiment.NAME
 
     def refuse(reason):
         # A refusal that leaves nothing behind is a refusal nobody reading the run can see. It is
@@ -140,43 +137,41 @@ def main():
         (cell / "refused.json").write_text(json.dumps(
             {"asset": str(asset), "experiment": args.experiment, "engine": args.engine,
              "solver": args.solver, "setup": args.setup, "reason": str(reason)}, indent=1))
-        raise SystemExit(reason)
+        print(f"[check] REFUSED: {reason}", flush=True)
+        return 2
 
-    # How many simulated bodies this engine's runner drives. Newton builds every declared body
-    # into one model; the PhysX runners drive one and say how many that is.
-    from asset_checks.native import physx_scene
-    drives = physx_scene.BODIES if env.engine == "physx" else "any"
+    if env is None:
+        return refuse(f"{args.engine} does not offer the {args.solver} solver; it has "
+                      + ", ".join(sorted(known[args.engine])))
     try:
-        kinds = read_asset(bench, asset, drives, getattr(experiment, "BODIES", None))
+        kinds = read_asset(bench, asset, getattr(experiment, "BODIES", None))
     except SystemExit as refusal:
-        refuse(str(refusal))
+        return refuse(str(refusal))
     if not kinds:
-        refuse(f"{asset.name} declares neither a rigid body nor a deformable; there is nothing "
-               f"here to simulate")
+        return refuse(f"{asset.name} declares neither a rigid body nor a deformable; there is nothing "
+                      f"here to simulate")
     kind = "deformable" if "deformable" in kinds else "rigid"
     print(f"[check] {asset.name} is {kind} ({', '.join(sorted(kinds))} declared)", flush=True)
-    if kind == "rigid" and args.setup != setups.DEFAULT:
-        refuse(f"a setup is for deformable assets -- it says where a soft body's structure, contact "
-               f"and stepping come from -- and {asset.name} is rigid")
 
     # Refusals, before anything is launched, each saying what it is that cannot be done.
-    from asset_checks.kit.scene import SOLVER_SIMULATES
-
-    if kind not in SOLVER_SIMULATES.get(env.solver, set()):
-        refuse(f"{env.solver} cannot simulate a {kind} asset: it does "
-                         + ", ".join(sorted(SOLVER_SIMULATES.get(env.solver, ()))) + " only. "
-                         f"For a {kind} asset on {args.engine}, the solvers are "
-                         + ", ".join(sorted(s for s, e in known[args.engine].items()
-                                            if kind in SOLVER_SIMULATES.get(e.solver, set()))))
+    if kind == "rigid" and args.setup is not None:
+        return refuse(f"a setup is for deformable assets -- it says where a soft body's structure, "
+                      f"contact and stepping come from -- and {asset.name} is rigid")
+    if kind == "deformable" and env.name != envs.DEFORMABLE:
+        deformable = envs.ENVIRONMENTS[envs.DEFORMABLE]
+        return refuse(f"deformable assets are checked in {envs.DEFORMABLE} only (--engine "
+                      f"{envs.engine_name(deformable)} --solver {deformable.solver}); {env.name} is out "
+                      f"of that scope")
+    setup = args.setup or setups.CANON
     if kind not in experiment.KINDS:
-        refuse(f"the {experiment.NAME} experiment is for "
-                         + " and ".join(sorted(experiment.KINDS)) + f" assets, and {asset.name} is "
-                         f"{kind}. For a {kind} asset the experiments are "
-                         + ", ".join(sorted(experiments.for_kind(kind))))
+        return refuse(f"the {experiment.NAME} experiment is for "
+                      + " and ".join(sorted(experiment.KINDS)) + f" assets, and {asset.name} is "
+                      f"{kind}. For a {kind} asset the experiments are "
+                      + ", ".join(sorted(experiments.for_kind(kind))))
 
     print(f"[check] {experiment.NAME} on {env.name} (Isaac {env.isaac}, {env.engine}"
           + (f" {env.newton.rstrip('.')}" if env.newton else "") + f", {env.solver})"
-          + (f", setup {args.setup}" if kind == "deformable" else "") + f" -> {cell}", flush=True)
+          + (f", setup {setup}" if kind == "deformable" else "") + f" -> {cell}", flush=True)
 
     # This cell is run again whatever is there; every other cell in the run directory is left
     # alone. The rigid runner refuses an existing directory outright, because a *matrix* must not
@@ -185,17 +180,16 @@ def main():
     if cell.exists():
         shutil.rmtree(cell)
     if kind == "deformable":
-        command = [sys.executable, str(HERE / "native" / "run.py"), str(asset),
-                   "--out", str(out), "--envs", env.name, "--experiments", experiment.NAME,
-                   "--setup", args.setup]
-        if args.timeout is not None:
-            command += ["--timeout", str(args.timeout)]
+        command = [sys.executable, str(HERE / "native" / "run.py"), str(asset), "--bench", str(bench),
+                   "--out", str(out), "--experiments", experiment.NAME, "--setup", setup]
     else:
         command = [sys.executable, "-m", "asset_checks.run", "--bench", str(bench),
                    "--out", str(out), "--envs", env.name,
                    "--experiments", experiment.NAME, str(asset)]
         if out.exists():
             command.insert(-1, "--resume")
+    if args.timeout is not None:   # both runners take it; given, it is used, never dropped
+        command += ["--timeout", str(args.timeout)]
     return subprocess.call(command, cwd=str(PACKAGE_ROOT),
                            env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT)})
 

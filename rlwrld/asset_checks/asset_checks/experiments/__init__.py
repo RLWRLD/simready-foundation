@@ -10,7 +10,7 @@ To add an experiment, add a file here. It declares what it is and who drives it:
                 themselves)
     RIGID       ("module", "function") of the NVIDIA test that is this experiment for a rigid
                 asset, or None if it has none
-    DEFORMABLE  {engine: "runner.py"} under `native/`, or {} if it has none
+    DEFORMABLE  "runner.py" under `native/` that runs it for a deformable (Newton 1.5 VBD), or None
     BODIES      optional: the deformable body kinds the experiment means anything for, as
                 `usd_deformable` names them ({"volume"}, {"surface"}). An asset that declares no
                 body of these kinds is refused before launch. Absent means any body.

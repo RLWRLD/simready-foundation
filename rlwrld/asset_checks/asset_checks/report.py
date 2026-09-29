@@ -18,6 +18,10 @@ import argparse
 import collections
 import json
 import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "native"))
+import setups  # noqa: E402  (plain Python: names only)
 
 # What a cell that never reported looks like from its log, most specific first. These are the ends
 # a run can come to outside its own verdict, and each is a different thing to do about it, so they
@@ -126,10 +130,10 @@ def numbers(found, experiment, assets, envs, keys):
 KEYS = ("fell_mm", "thickness_mm", "height_kept", "below_floor_mm", "first_frame_x",
         "p99_speed", "max_speed", "indented_mm", "compressed_mm", "compressed_frac",
         "recovered_frac", "pressed_nodes", "seal_median_mm", "seal_max_mm", "escaped_nodes",
-        "seconds")
+        "realtime_x", "seconds")
 # A run directory records one setup (where a soft body's structure, contact and stepping came
 # from; native/setups.py). Cells written before setups existed carry none and are the canon's.
-UNRECORDED_SETUP = ("none-derived-canon-modulus (unrecorded; before 2026-09-23 the PhysX copy "
+UNRECORDED_SETUP = (f"{setups.BEFORE_SETUPS} (unrecorded; before 2026-09-23 the PhysX copy "
                     "carried surface stiffness raw)")
 
 

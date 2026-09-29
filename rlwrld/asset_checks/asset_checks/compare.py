@@ -86,7 +86,7 @@ def main():
                     help="which of a cell's videos to put in its panel, by media role, e.g. visual or collision "
                          "(default: the first video the cell lists); the strip is named after it")
     ap.add_argument("--speed", default=None,
-                    help="and at which speed, e.g. realtime or 4xslower (default: any)")
+                    help="and at which speed, e.g. realtime (default: any)")
     args = ap.parse_args()
     ffmpeg, root, px = imageio_ffmpeg.get_ffmpeg_exe(), pathlib.Path(args.run_dir), args.panel_px
     wanted = [e.strip() for e in args.envs.split(",") if e.strip()]

@@ -34,9 +34,8 @@ GROUND = "/root/ground"
 # How far the floor reaches from the origin, for the rigid recordings, which pass nothing else.
 GROUND_HALF = 2.0
 # For a deformable run the floor is sized from the asset: this many times its largest
-# horizontal extent, from the origin. The simulated floor and the drawn one are the same floor
-# -- `physx_scene.floor` builds its collision box to the same number -- and it was an absolute
-# 4 m box before, which a large asset, or one that slides, would have left on one engine only.
+# horizontal extent, from the origin. It was an absolute 4 m box before, which a large asset, or
+# one that slides, would have left.
 GROUND_OF_EXTENT = 4.0
 
 
@@ -258,10 +257,10 @@ class Recording:
     def _solver_order(self, blocks, names):
         """Which body is which block of the one array the solver moves; -> (order, authored).
 
-        The asset declares its bodies in one order and the solver may build them in another:
-        Newton 1.5.0 imports a loaded polybag's film and then its filling, while 1.2.1 imports the
-        filling and `usd_deformable.add_missing` appends the film, which is the opposite. Reading
-        the declaration order as the solver's put every render mesh on the wrong body.
+        The asset declares its bodies in one order and the solver may build them in another
+        (Newton 1.5.0 imports a loaded polybag's film and then its filling; an older importer built
+        them the other way round). Reading the declaration order as the solver's put every render
+        mesh on the wrong body.
 
         So it is measured. The blocks are laid out in whichever order gives every body a span of
         its own size whose extent matches the one it was authored with -- the runner may have

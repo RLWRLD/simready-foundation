@@ -55,13 +55,6 @@ def validated_features(bench, asset, out_dir):
     return sorted(fid for fid, v in summary.items() if v.get("passed"))
 
 
-def code_version():
-    """Commit of the fork checkout this package runs from, and whether the tree has uncommitted changes."""
-    head = subprocess.run(["git", "-C", str(PACKAGE_ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-    dirty = bool(subprocess.run(["git", "-C", str(PACKAGE_ROOT), "status", "--porcelain", "--", "."], capture_output=True, text=True).stdout.strip())
-    return {"commit": head, "dirty": dirty}
-
-
 def frames_per_step(traj):
     """How many frames each recorded step advanced the timeline, per play (the timeline restarts at
     each play). A play's first step is reported apart: it also carries the time between play() and
@@ -111,14 +104,14 @@ def keep_valid(cell):
 
 
 def run_one(bench, gpu, env, experiment, asset, out_dir, timeout, capture_px, validated, contact_profile, dump_physics=False, trace_contacts=0, camera="fixed",
-            visual_cues=True, startup_retries=1, solver_settings=None, particle_radius=None):
+            visual_cues=True, startup_retries=1, solver_settings=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     expected = envs.gpu_settings(gpu)
     request = {"asset": str(asset), "experiment": experiment, "engine": env.engine, "env": env.name,
                "out_dir": str(out_dir), "expected_settings": expected, "capture_px": capture_px,
                "validated_features": validated, "contact_profile": contact_profile, "dump_physics": dump_physics,
-               "trace_contacts": trace_contacts, "camera": camera, "visual_cues": visual_cues, "solver": env.solver, "solver_settings": solver_settings, "particle_radius": particle_radius,
-               "code": code_version()}
+               "trace_contacts": trace_contacts, "camera": camera, "visual_cues": visual_cues, "solver": env.solver, "solver_settings": solver_settings,
+               "code": envs.code_version()}
     (out_dir / "request.json").write_text(json.dumps(request, indent=1))
     cmd = [str(bench / "isaac-run"), env.venv, str(bench / f".venv-{env.venv}" / "bin" / "isaacsim"), env.experience,
            "--exec", f"{ENTRY} {out_dir / 'request.json'}", *envs.kit_flags(gpu)]
@@ -239,8 +232,7 @@ def summarize(rows, out):
     lines, reasons = [], []
     strips = sorted(p.name for p in (out / "compare").glob("*.mp4")) if (out / "compare").is_dir() else []
     if strips:
-        lines += ["Each run is drawn twice from its recorded poses -- the asset's textured mesh (`visual`) and",
-                  "the collision shape (`collision`) -- and encoded at real time and four times slower.",
+        lines += [video.describe(),
                   f"`compare/` holds one strip per asset, experiment, view and speed, environments side",
                   f"by side: {len(strips)} strips.", ""]
     for experiment in experiments:
@@ -327,15 +319,18 @@ def draw(bench, cell, asset, result, experiment, timeout):
     if code != 0 or not usda.exists():
         print(f"[asset_checks]   no recording written (exit {code}, see recording.log)", flush=True)
         return
-    for view, speed, name, frames in video.draw(bench, cell, usda, experiment, timeout, ""):
+    made, failed = video.draw(bench, cell, usda, experiment, timeout, "")
+    for view, speed, name, frames in made:
         result.setdefault("media", []).append({"filename": name, "kind": "video", "role": view, "speed": speed})
         print(f"[asset_checks]   {view} {speed}: {frames} frames -> {name}", flush=True)
+    if failed:
+        result["render_error"] = failed
     (cell / "result.json").write_text(json.dumps(result, indent=1))
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--bench", default=os.environ.get("SIMREADY_BENCH"), help="simready-bench directory (isaac-run, venvs, GPU)")
+    ap.add_argument("--bench", default=None, help=f"simready-bench directory (isaac-run, venvs, GPU); default ${envs.BENCH_VARIABLE}")
     ap.add_argument("--out", required=True, help="new directory for results (with --resume, an existing one)")
     ap.add_argument("--resume", action="store_true",
                     help="reuse an existing --out: keep every cell that already holds a valid result, run the rest")
@@ -355,9 +350,6 @@ def main():
                     help="render NVIDIA's test room as is, without the floor grid and key light")
     ap.add_argument("--camera", default="fixed", choices=("fixed", "follow"),
                     help="fixed: one camera framing the test's whole motion (slope keeps follow); follow: engine-kit's follow camera")
-    ap.add_argument("--particle-radius", type=float, default=None, metavar="M",
-                    help="radius for a deformable's particles (default: half the median distance to a neighbour; "
-                         "Newton's own default of 0.1 m explodes any centimetre-scale asset)")
     ap.add_argument("--solver-setting", action="append", default=[], metavar="NAME=VALUE",
                     help="a setting for the environment's Newton solver, e.g. iterations=30 (repeatable)")
     ap.add_argument("--keep-going", action="store_true",
@@ -366,9 +358,7 @@ def main():
                     help="skip drawing each run again from its recorded poses (the visual and collision videos and their side-by-side strips)")
     ap.add_argument("assets", nargs="+")
     args = ap.parse_args()
-    if not args.bench:
-        sys.exit("[asset_checks] --bench or SIMREADY_BENCH is required")
-    bench, out = pathlib.Path(args.bench).resolve(), pathlib.Path(args.out).resolve()
+    bench, out = envs.bench(args.bench), pathlib.Path(args.out).resolve()
     if out.exists() and not args.resume:
         sys.exit(f"[asset_checks] {out} exists; results never mix with an earlier run (use --resume to fill in its missing cells)")
     unknown = set(args.envs.split(",")) - set(envs.ENVIRONMENTS)
@@ -407,7 +397,7 @@ def main():
                         shutil.rmtree(cell)
                 print(f"[asset_checks] {asset.name} / {env.name} / {experiment} ...", flush=True)
                 result = run_one(bench, gpu, env, experiment, asset, cell, args.timeout, args.capture_px, validated, args.newton_contact, args.dump_physics, args.trace_contacts, args.camera, not args.plain_scene,
-                                 solver_settings=solver_settings, particle_radius=args.particle_radius)
+                                 solver_settings=solver_settings)
                 rows.append((asset.stem, env.name, result))
                 if not args.no_video and (result.get("trajectory") or {}).get("pose"):
                     draw(bench, cell, asset, result, experiment, args.timeout)

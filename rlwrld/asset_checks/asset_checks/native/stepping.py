@@ -33,3 +33,5 @@ SUBSTEPS = 32
 # The recorded frame rate, for every runner: a frame is 1/FPS of simulated time and one video
 # frame. It was the default of four separate `--fps` arguments.
 FPS = 60.0
+# Solver iterations per substep under the canon stepping. Every official soft-body example is 5-10.
+ITERATIONS = 10

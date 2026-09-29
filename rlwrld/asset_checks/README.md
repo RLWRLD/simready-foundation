@@ -3,18 +3,27 @@
 One experiment, on one asset, in one engine. You name four things and nothing else has to be:
 
 ```bash
+export SIMREADY_BENCH=<simready-bench>      # or pass --bench; there is no default
 PYTHONPATH=rlwrld/asset_checks python3 -m asset_checks.check <asset.usd> \
     --experiment drop --engine newton1.5 --solver vbd
 ```
 
 Everything else is read. Whether the asset is rigid or deformable comes from its own schemas;
 which runner drives it follows from that; what it is made of comes from the USD. A combination
-that cannot work is refused before anything launches, and says what can:
+that cannot work is refused before anything launches -- the reason is printed and written as
+`refused.json` where the cell would have been -- and says what can:
 
 ```
-mujoco cannot simulate a deformable asset: it does rigid only.
-For a deformable asset on newton1.5, the solvers are vbd, xpbd
+deformable assets are checked in newton15_vbd only (--engine newton1.5 --solver vbd); newton12_vbd is out of that scope
 ```
+
+Exit status: 0 every cell passed, 1 a cell ran and failed its experiment, 2 refused or no verdict.
+
+**Two paths.** A rigid asset runs through Kit and NVIDIA's registered tests (`asset_checks.run`),
+in any environment below. A deformable runs through `asset_checks/native/`, in one environment only
+-- Newton 1.5 VBD (`envs.DEFORMABLE`) -- because Isaac's Newton extension neither sizes particles
+nor syncs them to the stage, so a deformable run through Kit is neither measured nor seen. See
+`asset_checks/native/README.md`.
 
 **The engine carries its version**, because a Newton version is an Isaac build -- `isaacsim-core`
 pins `newton[sim]==1.2.1` to Isaac 6.0.1 and `==1.5.0` to 6.1.0:
@@ -23,8 +32,8 @@ pins `newton[sim]==1.2.1` to Isaac 6.0.1 and `==1.5.0` to 6.1.0:
 |---|---|---|---|
 | `physx` | 6.1.0 | PhysX | `physx` |
 | `physx6.0.1` | 6.0.1 | PhysX | `physx` |
-| `newton1.2` | 6.0.1 | Newton 1.2.1 | `mujoco`, `xpbd`, `vbd` |
-| `newton1.5` | 6.1.0 | Newton 1.5.0 | `mujoco`, `xpbd`, `vbd` |
+| `newton1.2` | 6.0.1 | Newton 1.2.1 | `mujoco`, `xpbd`, `vbd` (rigid only) |
+| `newton1.5` | 6.1.0 | Newton 1.5.0 | `mujoco`, `xpbd`, `vbd` (`vbd`: rigid and deformable) |
 
 | `--experiment` | asset kinds | what it does |
 |---|---|---|
@@ -34,9 +43,14 @@ pins `newton[sim]==1.2.1` to Isaac 6.0.1 and `==1.5.0` to 6.1.0:
 | `press` | deformable | press a plate into it: how far does it give, and does it come back? |
 
 **To add an experiment, add a file to `asset_checks/experiments/`.** That module is the only place
-an experiment is declared -- its name, the asset kinds it means anything for, how long it runs and
-which runner drives it under each engine -- and everything else reads it. A module that claims a
-kind it has no driver for is refused when the package loads.
+an experiment is declared -- its name, the asset kinds it means anything for, how long it runs, the
+NVIDIA test that is it for a rigid asset and the `native/` runner that is it for a deformable -- and
+everything else reads it (`kit/nvidia_test.TESTS` is built from it). A module that claims a kind it
+has no driver for is refused when the package loads.
+
+**A deformable run has a setup** (`--setup`, `native/setups.py`): where the structure, the contact
+numbers, the stepping and the surface stiffness reading come from. The canon, and every default,
+is `setups.CANON = auto-auto-auto-auto`: everything the USD states, and only the rest ours.
 
 A run writes `<out>/<asset>/<env>/<experiment>/`: the recording, the logs, the verdict, and two
 videos -- the asset's own textured mesh and the geometry the engine collides with. The
@@ -60,7 +74,7 @@ verdict) from a finished run directory, with the bench venv's ffmpeg and PIL:
 PYTHONPATH=rlwrld/asset_checks <bench>/.venv-isaac610/bin/python -m asset_checks.compare <out dir>
 ```
 
-`--bench` is the directory with the two Isaac Sim venvs, `isaac-run` and the `GPU` file. Every
+`--bench` (or `$SIMREADY_BENCH`) is the directory with the two Isaac Sim venvs, `isaac-run` and the `GPU` file. Every
 asset x environment x experiment runs in its own Kit process; `<out>/summary.md` is the table and
 each run keeps `request.json`, `result.json` (verdict, NVIDIA's metrics and logs, trajectory, what
 Kit and the solver actually ran with), `kit.log`, the video and its captured frames.
@@ -96,6 +110,8 @@ Added here, because those pieces assume PhysX:
   `/renderer/activeGpu`), a torch CUDA check before any Kit starts, `SIMREADY_PHYSICS_RUNTIME` for
   the grasp test's feature gate, and a run counts only if Kit reports the engine, settings, Newton
   version and pose source that were asked for.
+- **Newton substeps** (`kit/scene.RIGID_NEWTON_SUBSTEPS`): every rigid Newton run takes 5 solver
+  steps per frame (Isaac's default is 1); every rigid Newton cell has run that way.
 - **Stepping** (`nvidia_test.Proxy.physics_step`): engine-kit 2026.6.5 pauses the timeline after
   the first update of a play so each step is one frame, but never clears its `_physics_paused` flag;
   in a test that plays twice (the grasp) the second play ran at 2 frames per step, more on capture
@@ -116,23 +132,14 @@ Added here, because those pieces assume PhysX:
 
 ## Adding an experiment
 
-An experiment is one of NVIDIA's registered tests. `kit/nvidia_test.py` names the ones this runs:
-
-```python
-TESTS = {
-    "drop":  ("simready_benchmark_kit_suite.fet003_physics.ground_drop", "ground_drop"),
-    "slope": ("simready_benchmark_kit_suite.fet003_physics.slope_drop",  "slope_drop"),
-    "grasp": ("simready_benchmark_kit_suite.fet005_grasp.grasp_and_lift", "grasp_and_lift"),
-}
-```
-
-To add one, put `"<your name>": ("<module that registers it>", "<its registered name>")` in that
-table and pass `--experiments <your name>`. `registered()` imports the module and takes the test the
-registry holds under that name, failing if it is not registered exactly once; the test's own
-`config_defaults` are its parameters, and anything passed in the request must be a key it declares.
-The installed suite registers more than these three -- `fet001_visual`, `fet004_multibody`,
-`fet011_semantics`, `fet022_driven_joints`, `fet028_gripper` -- and a test of your own registered
-with NVIDIA's `@test` decorator works the same way.
+A rigid experiment is one of NVIDIA's registered tests; its module in `experiments/` names it as
+`RIGID = ("<module that registers it>", "<its registered name>")`, and `kit/nvidia_test.TESTS` is
+built from those modules. `registered()` imports the module and takes the test the registry holds
+under that name, failing if it is not registered exactly once; the test's own `config_defaults` are
+its parameters, and anything passed in the request must be a key it declares. The installed suite
+registers more than the three used here -- `fet001_visual`, `fet004_multibody`, `fet011_semantics`,
+`fet022_driven_joints`, `fet028_gripper` -- and a test of your own registered with NVIDIA's `@test`
+decorator works the same way.
 
 What the runner gives every experiment, whatever it is: the asset with its runtime physics variant
 selected, the solver asked for, one frame per physics step, live poses under Newton, the fixed

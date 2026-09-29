@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The three environments and the Kit launch settings. The single source for both."""
+"""The environments, where simready-bench is, and the Kit launch settings. The single source for all three."""
 
+import os
+import pathlib
+import subprocess
 from dataclasses import dataclass
 
 
@@ -53,12 +56,44 @@ def engine_name(env):
     literal that was written in two files.
     """
     if env.engine == "physx":
-        newest = max(e.isaac for e in ENVIRONMENTS.values() if e.engine == "physx")
+        newest = max((e.isaac for e in ENVIRONMENTS.values() if e.engine == "physx"),
+                     key=lambda v: tuple(int(x) for x in v.split(".")))
         return "physx" if env.isaac == newest else f"physx{env.isaac}"
     return "newton" + env.newton.rstrip(".")
 
 
 DEFAULT_ENVIRONMENTS = ("physx", "newton12", "newton15")  # the rigid comparison; the rest are opt-in
+
+# The one environment deformable assets are checked in (by `native/`, never through Kit). Newton 1.5
+# VBD only, by the user's scope decision of 2026-09-29: Newton 1.2, XPBD and PhysX deformables were
+# removed. `check.py` refuses a deformable anywhere else.
+DEFORMABLE = "newton15_vbd"
+
+BENCH_VARIABLE = "SIMREADY_BENCH"
+
+
+def bench(given=None):
+    """simready-bench -- the venvs, isaac-run and the GPU pin: `given`, else $SIMREADY_BENCH. There
+    is no default: a path written into the code is somebody else's machine."""
+    where = given or os.environ.get(BENCH_VARIABLE)
+    if not where:
+        raise SystemExit(f"where is simready-bench? pass --bench or set {BENCH_VARIABLE}")
+    path = pathlib.Path(where).resolve()
+    if not (path / "isaac-run").exists():
+        raise SystemExit(f"{path} is not simready-bench: it has no isaac-run")
+    return path
+
+
+PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def code_version():
+    """The commit this package runs from, its branch, and whether its tree has uncommitted changes --
+    written into every result, so a number can always be traced to the code that made it."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(PACKAGE_ROOT), *args], capture_output=True, text=True).stdout.strip()
+    return {"commit": git("rev-parse", "--short", "HEAD"), "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+            "dirty": bool(git("status", "--porcelain", "--", "."))}
 
 
 # SIMREADY_PHYSICS_RUNTIME per engine: NVIDIA's grasp_and_lift reads it (default "PhysX") to pick the

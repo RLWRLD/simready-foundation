@@ -1,19 +1,20 @@
-"""Run a deformable asset through the named environments and experiments, and make the videos.
+"""Run a deformable asset through its experiments in Newton 1.5 VBD, and make the videos.
 
-    python asset_checks/native/run.py <asset.usda> --out <dir>
-        [--envs newton12_vbd,newton15_vbd,newton12_xpbd,newton15_xpbd,physx]
-        [--experiments drop,press] [--size 768] [--no-render]
+    python asset_checks/native/run.py <asset.usda> --bench <simready-bench> --out <dir>
+        [--experiments drop,press] [--setup <setup>] [--timeout 1200] [--no-render]
 
 One asset, one experiment, one engine, one solver -- the four things the user names -- and this
 turns them into a measured run and a video. It is the deformable counterpart of the Kit runner:
 NVIDIA's three tests read rigid-body transforms and refuse an asset without RigidBodyAPI, and
 Isaac's Fabric sync carries rigid-body transforms only, so a deformable simulated through that
-path is both unmeasurable and invisible. Here each engine is driven directly, the solver's own
-state is what gets measured, and the animated USD each run writes is what gets photographed.
+path is both unmeasurable and invisible. Here Newton is driven directly, the solver's own state is
+what gets measured, and the animated USD each run writes is what gets photographed.
 
-Every cell is a separate process in its own virtual environment, because the two Newton versions
-cannot share one: isaacsim-core pins `newton[sim]==1.2.1` against Isaac 6.0.1 and `==1.5.0`
-against 6.1.0. That is also why a result is only meaningful with all four names attached.
+Deformables are checked in one environment, `envs.DEFORMABLE` (Newton 1.5 VBD; the scope decision
+of 2026-09-29). Each cell is a separate process in that environment's virtual environment.
+
+Exit status: 0 every cell passed, 1 a cell ran and failed its experiment, 2 a cell has no verdict
+(refused, errored, timed out).
 """
 import argparse
 import json
@@ -23,99 +24,26 @@ import subprocess
 import sys
 import time
 
-import agreement
-
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from asset_checks import envs as rigid_envs, experiments as rigid_experiments, video  # noqa: E402
-from asset_checks.kit.scene import SOLVER_SIMULATES  # noqa: E402
+from asset_checks import envs, experiments as rigid_experiments, video  # noqa: E402
 import setups  # noqa: E402
-import usd_deformable  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-BENCH = pathlib.Path("<simready-bench>")
 
-# The environments are `asset_checks.envs`' -- the same table the rigid runs use, down to the
-# header text a comparison video prints. Only the solvers that can move particles are here:
-# `kit/scene.py::SOLVER_SIMULATES` records that MuJoCo refuses a stage whose bodies are particles,
-# measured rather than assumed, so the two `mujoco` environments are not offered for a deformable.
-PARTICLE_SOLVERS = tuple(sorted(s for s, kinds in SOLVER_SIMULATES.items() if "deformable" in kinds))
-ENVIRONMENTS = {name: (e.venv, e.engine, e.solver) for name, e in rigid_envs.ENVIRONMENTS.items()
-                if e.solver in PARTICLE_SOLVERS}
-# Which experiments a deformable asset has, and what drives each under each engine, from the one
-# place experiments are declared. PhysX is driven from inside Kit, so it needs the isaac-run
-# launcher; Newton is a plain import.
+ENV = envs.ENVIRONMENTS[envs.DEFORMABLE]
+# Which experiments a deformable asset has, and which script drives each, from the one place
+# experiments are declared.
 EXPERIMENTS = tuple(sorted(rigid_experiments.for_kind("deformable")))
-SCRIPTS = {(engine, name): script
-           for name, module in rigid_experiments.for_kind("deformable").items()
-           for engine, script in module.DEFORMABLE.items()}
+SCRIPTS = {name: module.DEFORMABLE for name, module in rigid_experiments.for_kind("deformable").items()}
 
 
-# PhysX and Newton do not read the same schemas -- Newton reads the AOUSD public `Physics*`
-# names, PhysX reads the same physics under an `OmniPhysics` prefix and translates neither -- so
-# a PhysX cell runs a converted copy of the asset. `to_physx.py` makes it from the same
-# tetrahedra and the same declared material; anything else would compare the conversion.
-class ParityFailure(RuntimeError):
-    """The PhysX copy differs from the asset, so its results would not be about the asset."""
-
-
-def physx_asset(asset):
-    """The PhysX copy of the asset, but only once it has been shown to still be the asset.
-
-    Every error in the conversion arrives disguised as an engine difference -- a wrong modulus or
-    a dropped tetrahedron would read as "PhysX behaves differently" and nothing downstream could
-    tell. `physx_parity` re-derives from both USDs what the conversion claims to have carried, and
-    it shares no code with the conversion, so it is a measurement against a statement rather than
-    a second copy of the same statement. A cell whose asset failed it must not run at all: a
-    number from it would look exactly like a number from a good one.
-    """
-    converted = pathlib.Path(asset).with_name(pathlib.Path(asset).stem + usd_deformable.PHYSX_COPY_SUFFIX + ".usda")
-    if not converted.exists():
-        # Made here rather than demanded of the caller: it is a mechanical re-authoring of the
-        # asset, the parity check below is what makes it trustworthy, and a run should need
-        # nothing but the USD. Kept beside the asset, so a second run reuses it.
-        print(f"[run] no PhysX copy of {pathlib.Path(asset).name} yet; writing {converted.name}", flush=True)
-        made = subprocess.run([str(BENCH / "isaac-run"), "isaac610", str(HERE / "to_physx.py"),
-                               str(asset), str(converted)], capture_output=True, text=True)
-        for line in made.stdout.splitlines():
-            if line.startswith("[to-physx]"):
-                print(f"[run] {line}", flush=True)
-        if made.returncode != 0 or not converted.exists():
-            raise ParityFailure(f"the PhysX copy could not be written (exit {made.returncode}): "
-                                + (made.stdout + made.stderr).strip()[-400:])
-    # Run in a venv rather than imported: this runner is plain Python and `pxr` lives in the
-    # Isaac environments, the same reason every cell is a subprocess.
-    check = subprocess.run([str(BENCH / ".venv-isaac610" / "bin" / "python"),
-                            str(HERE / "physx_parity.py"), str(asset), str(converted)],
-                           capture_output=True, text=True, env=dict(os.environ, PYTHONNOUSERSITE="1"))
-    for line in check.stdout.splitlines():
-        if line.startswith("[parity]"):
-            print(f"[run] {line}", flush=True)
-    if check.returncode != 0:
-        said = [l for l in check.stdout.splitlines() if "MISMATCH" in l] or [check.stderr.strip()[-400:]]
-        raise ParityFailure("the PhysX copy is not the same asset as the one being evaluated: "
-                            + "; ".join(s.partition("MISMATCH: ")[2] or s for s in said))
-    return str(converted)
-
-
-def cell_command(env, experiment, asset, usd, seconds, setup=setups.DEFAULT):
-    venv, engine, solver = ENVIRONMENTS[env]
-    script = SCRIPTS.get((engine, experiment))
+def cell_command(bench, experiment, asset, usd, seconds, setup):
+    script = SCRIPTS.get(experiment)
     if script is None:
-        return None, f"{engine} has no {experiment} experiment yet"
-    if engine == "physx":
-        if setup != setups.DEFAULT:
-            # Said rather than ignored: a PhysX cell in a sweep would otherwise look like it ran
-            # the setup it was filed under.
-            return None, (f"the PhysX runners read no setup; only {setups.DEFAULT} runs there, "
-                          f"not {setup}")
-        # The PhysX copy is what is simulated; the original is where the textures live, and the
-        # conversion deactivates the subtree they are on.
-        return [str(BENCH / "isaac-run"), venv, str(HERE / script), physx_asset(asset),
-                "--seconds", str(seconds), "--usd", str(usd), "--visual-asset", asset], None
-    return [str(BENCH / f".venv-{venv}" / "bin" / "python"), str(HERE / script), asset,
-            "--solver", solver, "--seconds", str(seconds), "--usd", str(usd),
-            "--setup", setup], None
+        return None, f"there is no deformable {experiment} experiment"
+    return [str(bench / f".venv-{ENV.venv}" / "bin" / "python"), str(HERE / script), asset,
+            "--seconds", str(seconds), "--usd", str(usd), "--setup", setup], None
 
 
 def read_result(log):
@@ -154,27 +82,22 @@ def run(command, log_path, timeout):
 # What each experiment is worth reading, and in what order. The runner does not know what these
 # mean -- the experiment prints them and this only lays them out -- but a table nobody can read
 # is a table nobody checks.
-# A 5 cm drop takes 0.101 s. At real speed that is three frames and nobody sees it happen, which
-# is why the videos looked fast-forwarded: they were not, the event is simply that short. Every
-# simulated frame is captured and played back this many times slower, and the factor is burned
-# into the file name so no one has to remember it.
 COLUMNS = {
     "drop": [("verdict", "verdict"), ("fell_mm", "fell (mm)"), ("thickness_mm", "settled (mm)"),
              ("height_kept", "height kept"),
-             ("below_floor_mm", "below floor (mm)"), ("p99_speed", "p99 speed")],
+             ("below_floor_mm", "below floor (mm)"), ("p99_speed", "p99 speed"),
+             ("realtime_x", "x real time")],
     "press": [("verdict", "verdict"), ("indented_mm", "plate went in (mm)"),
               ("compressed_mm", "asset gave (mm)"),
               ("compressed_frac", "of height"), ("recovered_frac", "recovered"),
-              ("below_floor_mm", "below floor (mm)"), ("pressed_nodes", "nodes pressed")],
+              ("below_floor_mm", "below floor (mm)"), ("pressed_nodes", "nodes pressed"),
+              ("realtime_x", "x real time")],
 }
 
 
 def summary(asset, results):
     """One table per experiment, plus where each video is."""
-    lines = [f"# {pathlib.Path(asset).name}", "",
-             "Four videos per cell, from one run: `__collision` is the geometry the solver moved and",
-             "collided with, `__visual` is the asset's own textured mesh carried along by it, each",
-             "at `__realtime` and at `__4xslower`. The side-by-side strips are in `compare/`.", ""]
+    lines = [f"# {pathlib.Path(asset).name}", "", video.describe(), ""]
     for experiment, columns in COLUMNS.items():
         rows = {c: r for c, r in results.items() if r.get("experiment") == experiment}
         if not rows:
@@ -191,38 +114,32 @@ def summary(asset, results):
             videos = ", ".join(f"`{name}`" for name in (row.get("videos") or {}).values()) or "-"
             lines.append(f"| {row['env']} | {values} | {videos} |")
         lines.append("")
-    table = agreement.section(results)
-    if table:
-        lines.append(table)
     return "\n".join(lines)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("asset")
+    ap.add_argument("--bench", default=None, help=f"simready-bench (default ${envs.BENCH_VARIABLE})")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--envs", default="newton12_vbd,newton12_xpbd,newton15_vbd,newton15_xpbd,physx")
     ap.add_argument("--experiments", default=",".join(EXPERIMENTS))
     ap.add_argument("--timeout", type=int, default=1200)
-    ap.add_argument("--setup", default=setups.DEFAULT, choices=setups.NAMES,
-                    help="where the structure, contact and stepping come from (setups.py)")
+    ap.add_argument("--setup", default=setups.CANON, choices=setups.NAMES,
+                    help=f"where the {', '.join(setups.FACTORS)} come from (setups.py)")
     ap.add_argument("--no-render", action="store_true")
     args = ap.parse_args()
 
+    bench = envs.bench(args.bench)
     asset = str(pathlib.Path(args.asset).resolve())
     out = pathlib.Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    envs = [e.strip() for e in args.envs.split(",") if e.strip()]
-    unknown = [e for e in envs if e not in ENVIRONMENTS]
-    if unknown:
-        raise SystemExit(f"unknown environment(s): {', '.join(unknown)}. "
-                         f"Known: {', '.join(ENVIRONMENTS)}")
     experiments = [e.strip() for e in args.experiments.split(",") if e.strip()]
+    code = envs.code_version()
 
     results = {}
     stem = pathlib.Path(asset).stem
     (out / stem).mkdir(parents=True, exist_ok=True)
-    for env in envs:
+    for env in (ENV.name,):
         for experiment in experiments:
             cell = f"{stem}__{env}__{experiment}"
             # One directory per cell -- <out>/<asset>/<env>/<experiment>/ -- the shape the rigid
@@ -232,35 +149,30 @@ def main():
             cell_dir.mkdir(parents=True, exist_ok=True)
             usd = cell_dir / "recording.usda"
             seconds = rigid_experiments.get(experiment).SECONDS   # the experiment's, nobody else's
-            row = {"env": env, "experiment": experiment, "setup": args.setup}
-            try:
-                command, refusal = cell_command(env, experiment, asset, usd, seconds, args.setup)
-            except ParityFailure as failure:
-                print(f"[run] {cell}: REFUSED -- {failure}", flush=True)
-                row["error"] = str(failure)
+            row = {"env": env, "experiment": experiment, "setup": args.setup, "code": code}
+            command, refusal = cell_command(bench, experiment, asset, usd, seconds, args.setup)
+            if refusal:
+                print(f"[run] {cell}: skipped -- {refusal}", flush=True)
+                row["skipped"] = refusal
             else:
-                if refusal:
-                    print(f"[run] {cell}: skipped -- {refusal}", flush=True)
-                    row["skipped"] = refusal
+                print(f"[run] {cell}", flush=True)
+                log_path = cell_dir / "run.log"
+                try:
+                    code, seconds_taken = run(command, log_path, args.timeout)
+                except subprocess.TimeoutExpired:
+                    row["error"] = "timed out"
+                    print(f"[run] {cell}: TIMED OUT", flush=True)
                 else:
-                    print(f"[run] {cell}", flush=True)
-                    log_path = cell_dir / "run.log"
-                    try:
-                        code, seconds_taken = run(command, log_path, args.timeout)
-                    except subprocess.TimeoutExpired:
-                        row["error"] = "timed out"
-                        print(f"[run] {cell}: TIMED OUT", flush=True)
-                    else:
-                        found = read_result(log_path.read_text(errors="replace"))
-                        row.update({"exit": code, "seconds": seconds_taken,
-                                    "usd": usd.name if usd.exists() else None, **found})
-                        if "verdict" not in found:
-                            # No RESULT line: the run ended some other way, and how is in its
-                            # last lines -- a refusal's sentence, a traceback's last line, a
-                            # kernel fault. Kept with the record so the report need not guess.
-                            row["error"] = ending(log_path)
-                        print(f"[run] {cell}: exit {code} in {seconds_taken}s -- "
-                              f"{found or 'nothing reported'}", flush=True)
+                    found = read_result(log_path.read_text(errors="replace"))
+                    row.update({"exit": code, "seconds": seconds_taken,
+                                "usd": usd.name if usd.exists() else None, **found})
+                    if "verdict" not in found:
+                        # No RESULT line: the run ended some other way, and how is in its
+                        # last lines -- a refusal's sentence, a traceback's last line, a
+                        # kernel fault. Kept with the record so the report need not guess.
+                        row["error"] = ending(log_path)
+                    print(f"[run] {cell}: exit {code} in {seconds_taken}s -- "
+                          f"{found or 'nothing reported'}", flush=True)
             results[cell] = row
             row["videos"], media = {}, []
             if not args.no_render and usd.exists():
@@ -268,10 +180,13 @@ def main():
                 # asset's own textured mesh carried along by it, each at both speeds. Frame for
                 # frame the same numbers. The role and the speed stay separate fields, because
                 # that is what the compositor selects on.
-                for view, speed, name, frames in video.draw(BENCH, cell_dir, usd, experiment, args.timeout, ""):
+                made, failed = video.draw(bench, cell_dir, usd, experiment, args.timeout, "")
+                for view, speed, name, frames in made:
                     row["videos"][f"{view}__{speed}"] = name
                     media.append({"filename": name, "kind": "video", "role": view, "speed": speed})
                     print(f"[run] {cell}: {frames} {view} frames -> {name}", flush=True)
+                if failed:
+                    row["render_error"] = failed
             # What `asset_checks.compare` reads: a verdict it can colour, the experiment's own word
             # for what happened after FAIL, and the videos by role.
             said = row.get("verdict") or row.get("skipped") or row.get("error") or row.get("diverged")
@@ -285,8 +200,8 @@ def main():
     if not args.no_render:
         for view in video.VIEWS:
             for speed in video.SPEEDS:
-                subprocess.call([str(BENCH / ".venv-isaac610" / "bin" / "python"), "-m", "asset_checks.compare",
-                                 str(out), "--role", view, "--speed", speed, "--envs", ",".join(envs)],
+                subprocess.call([str(bench / f".venv-{ENV.venv}" / "bin" / "python"), "-m", "asset_checks.compare",
+                                 str(out), "--role", view, "--speed", speed, "--envs", ENV.name],
                                 env={**os.environ, "PYTHONPATH": str(HERE.parents[1])})
     # Per asset, under its own directory: several assets share one <out>, as they do in a rigid run.
     (out / stem / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
@@ -296,6 +211,9 @@ def main():
         state = row.get("skipped") or row.get("error") or row.get("diverged") or "ok"
         made = ", ".join((row.get("videos") or {}).values()) or "-"
         print(f"[run] {cell:<46} {state:<24} {made}")
+    if any(r.get("verdict") is None or r.get("error") or r.get("skipped") for r in results.values()):
+        return 2
+    return 0 if all(r.get("verdict") == "pass" for r in results.values()) else 1
 
 
 if __name__ == "__main__":

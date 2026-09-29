@@ -254,7 +254,7 @@ instead -- it logs that as an error on every load, and engine-kit's
 151 cm3 hull, not the 124 cm3 shape it looks like; the toaster collides with its bread slots
 filled in.
 
-`reading.collider_approximation` applies PhysX's rule -- a bare `physics:approximation` without
+`reading.collider_shape` applies PhysX's rule -- a bare `physics:approximation` without
 the schema applied is ignored, a static collider keeps what it declares, a dynamic one that
 declares nothing usable gets a hull -- and `reading.collider_shape` builds it. A decomposition or
 an SDF is more than a copy of geometry can say, so there the mesh is kept and the run prints which

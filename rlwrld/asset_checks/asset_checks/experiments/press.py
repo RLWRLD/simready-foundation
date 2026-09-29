@@ -10,7 +10,7 @@ SUMMARY = "press a plate into the asset: how far does it give, and does it come 
 KINDS = {"deformable"}
 SECONDS = 4.0
 RIGID = None
-DEFORMABLE = {"newton": "newton_press.py", "physx": "physx_press.py"}
+DEFORMABLE = "newton_press.py"
 # Pressing measures how much a body gives and how much of that it gets back. A surface has no
 # thickness to give, so for a cloth the experiment has no answer, and the pipeline refuses it
 # rather than reporting a verdict about nothing.

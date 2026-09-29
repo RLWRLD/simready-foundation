@@ -27,7 +27,9 @@ ASSETS = ("banana", "sm_obs_orange_a01_01", "sm_obs_orange_a02_01", "sm_apple_a0
           "sm_alcohol_a01_01", "sm_coffee_cup_grasp_a01_01", "sm_gen_appliance_toaster_v01_01",
           "sm_gen_cleaning_dishwand_v01_01", "sm_obs_electricians_large_tool_box_a01_01",
           "sm_obs_joystick_a01_01", "sm_obs_lamp_revolute_a01_01", "sm_obs_light_bulb_01",
-          "sm_obs_small_sledge_hammer_a01_01", "sm_obs_workbench_tool_a01_01")
+          "sm_obs_small_sledge_hammer_a01_01", "sm_obs_workbench_tool_a01_01",
+          "apple", "plum", "strawberry", "polybag_green_bubble_empty",
+          "polybag_green_bubble_cotton_loaded")
 # The files that state an experiment's rules, and must know nothing of engines.
 EXPERIMENT_RULES = ("drop_shape.py", "press_shape.py")
 ENGINES = ("newton", "physx", "warp", "omni", "isaacsim", "mujoco")

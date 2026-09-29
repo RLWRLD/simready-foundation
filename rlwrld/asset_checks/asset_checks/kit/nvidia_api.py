@@ -72,7 +72,7 @@ WITHHELD_COOK_SKIPS = []  # what the PhysX cooking guard would have skipped unde
 
 def _engine_aware_prechecks(physics_utils) -> dict:
     """Replace the PhysX cooking guard with one that does nothing under a non-PhysX engine."""
-    cookable, ready = physics_utils.check_physics_cookable, physics_utils.check_physics_ready
+    cookable = physics_utils.check_physics_cookable
 
     def check_physics_cookable(stage, asset_root_path):
         message = cookable(stage, asset_root_path)

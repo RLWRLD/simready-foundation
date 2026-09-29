@@ -1,18 +1,9 @@
-"""Build a declared deformable when this Newton's USD importer will not.
+"""What a deformable USD declares, read the way Newton 1.5.0's importer reads it -- and the parts
+its importer leaves out, read by rule: per-body particle radii, surface stiffness in the unit the
+asset states it, material damping in the unit the solver's kernel reads, the seal springs and
+contact exclusions a vendor authors for its own runtime, and the render meshes a recording binds.
 
-Newton 1.2.1 simulates cloth perfectly well -- it ships eight cloth examples, and they open a USD
-stage and hand the mesh's points and indices to `ModelBuilder.add_cloth_mesh`. What it has no path
-for is the *schema*: `PhysicsSurfaceDeformableSimAPI` is unknown to its importer, so a garment
-authored the proposal's way imports as nothing at all. That is a gap in one importer, not a limit
-of the engine, and the fix is the one the engine's own examples use.
-
-So: read what the asset declares, convert it exactly the way Newton 1.5.0's importer converts it
-(`import_usd_deformable_cloth.py`, quoted below), and call the same constructor. Both versions
-then receive the same numbers from the same USD, which is the only way a comparison between them
-means anything.
-
-This runs only when the importer produced nothing. Where an importer works, it wins -- it also
-resolves transforms, mass models and collision gating that are not re-derived here.
+`loader.py` is the one caller that builds; `check.py` asks `why_not_runnable` before launching.
 """
 import numpy as np
 try:
@@ -38,17 +29,6 @@ VOLUME_MATERIAL = "PhysicsVolumeDeformableMaterialAPI"
 SIM = {"surface": SURFACE_SIM, "volume": VOLUME_SIM}
 MATERIAL = {"surface": SURFACE_MATERIAL, "volume": VOLUME_MATERIAL}
 
-
-def physx_name(name):
-    """What omni.physx calls the same schema: the AOUSD name under an `Omni` prefix. Verified
-    against `omni.physx` 110.3's deformableUtils, which spells all six that way -- except that it
-    has one material schema for a volume, `OmniPhysicsDeformableMaterialAPI`, where AOUSD has
-    `PhysicsVolumeDeformableMaterialAPI`. That one exception is the only table here."""
-    if name == VOLUME_MATERIAL:
-        return "OmniPhysicsDeformableMaterialAPI"
-    return "Omni" + name
-# How a PhysX copy of an asset is named beside it: <stem>_physx.usda. One spelling.
-PHYSX_COPY_SUFFIX = "_physx"
 
 
 def _schemas(prim):
@@ -76,9 +56,9 @@ def _bound_material(stage, prim, wanted):
 
 
 # What a body's material has to state for the experiments to mean anything, per kind, by the
-# AOUSD names. Missing, the asset is refused: Newton's builder, PhysX's helper and this package
-# each had a different silent default for these, and a cloth's bend stiffness was 100 on one
-# engine and 0 on the other, with nothing in either log.
+# AOUSD names. Missing, the asset is refused: Newton's builder and this package each had a
+# different silent default for these, and a cloth's bend stiffness was 100 on one engine and 0 on
+# another, with nothing in either log.
 REQUIRED = {
     "surface": (("thickness", asset_properties.THICKNESS), ("stretch stiffness", asset_properties.STRETCH),
                 ("bend stiffness", asset_properties.BEND), ("density", asset_properties.DENSITY)),
@@ -134,8 +114,7 @@ def _authored(prim, names):
 
 
 # The power of the shell thickness each authored surface stiffness is multiplied by when it is
-# read as a modulus (membrane ~ E*t, bending ~ E*t^3). One table, read by the Newton runners, the
-# PhysX conversion and the parity check that audits it.
+# read as a modulus (membrane ~ E*t, bending ~ E*t^3). One table.
 SURFACE_THICKNESS_POWER = {"stretchStiffness": 1, "shearStiffness": 1, "bendStiffness": 3}
 
 
@@ -155,7 +134,7 @@ def read_surface_stiffness(builder, stage, reading, declared=None, report=None):
     """Put each surface body's stretch and bend stiffness on its own elements, read as `reading`.
 
     `modulus`: the authored numbers are moduli, times the thickness (tri_ke = s*t, edge_ke = b*t^3),
-    which is what Newton 1.5.0's importer and `add_surface` already built -- checked, not assumed.
+    which is what Newton 1.5.0's importer already built -- checked, not assumed.
     `stiffness`: the authored numbers are the stiffnesses themselves, OmniPhysics' definition.
     Every run prints both, and which of them the asset's own `newton:triKe` / `newton:edgeKe` (its
     engine-native statement of the same thing, where it makes one) agrees with -- a quantity stated
@@ -422,14 +401,8 @@ def bodies(stage):
     return out
 
 
-def why_not_runnable(stage, asset_name="", most=None, needs=None):
+def why_not_runnable(stage, asset_name="", needs=None):
     """-> the reason this asset cannot be run as it is, or None.
-
-    `most` is how many simulated meshes the caller can drive. Newton builds them all into one
-    model off one particle array, so its runners pass nothing and take whatever the asset has; the
-    PhysX runners drive one body and say so. An asset with more meshes than the caller can drive
-    is refused rather than run, because running it would simulate the first and report it under
-    the whole asset's name -- an empty bag reported as a loaded one.
 
     `needs` is the set of body kinds the experiment means anything for (an experiment's `BODIES`).
     An asset with none of them is refused: pressing a surface, which has no thickness to give,
@@ -442,12 +415,6 @@ def why_not_runnable(stage, asset_name="", most=None, needs=None):
     found = find(stage)
     if not found:
         return f"{name} declares no simulated mesh; there is nothing here to deform"
-    if most is not None and len(found) > most:
-        listed = "; ".join(f"{prim.GetPath()} ({kind}, {_points(prim)} points)"
-                           for kind, prim in found)
-        return (f"{name} declares {len(found)} simulated meshes and this runner drives "
-                f"{most}: {listed}. They are one object, so running it would simulate the first "
-                f"and report it under the whole asset's name")
     if needs is not None and not any(kind in needs for kind, _ in found):
         declared = ", ".join(sorted({kind for kind, _ in found}))
         return (f"{name} declares a {declared} body only, and this experiment means something for "
@@ -459,111 +426,14 @@ def why_not_runnable(stage, asset_name="", most=None, needs=None):
     return None
 
 
-def one_body(stage, asset_name=""):
-    """The single mesh this asset asks to be simulated; -> (kind, prim), or SystemExit saying why
-    not. For a caller that drives one body."""
-    reason = why_not_runnable(stage, asset_name, most=1)
-    if reason:
-        raise SystemExit(reason)
-    return find(stage)[0]
 
+def check_imported(builder, stage):
+    """Refuse unless every simulated body the asset declares is in the builder, point for point.
 
-def add_surface(builder, stage, prim, report=None):
-    """Add a declared surface deformable to `builder`, the way Newton 1.5.0 would.
-
-    The conversion is quoted from `newton/_src/utils/import_usd_deformable_cloth.py`:
-
-        tri_ke  = stretchStiffness * thickness     (membrane stiffness ~ E*h)
-        edge_ke = bendStiffness * thickness**3     (bending ~ E*h^3)
-        tri_ka  = 0                                (the proposal authors no Poisson term)
-        density = volumetric density * thickness   (Newton's cloth density is areal)
-        particle_radius = 0.5 * thickness          (the shell's physical half-thickness)
-
-    `shearStiffness` is deliberately dropped: Newton's isotropic membrane makes stretch and shear
-    share one modulus, and 1.5.0 warns rather than folding it in. Dropping it here too is what
-    keeps the two versions comparable.
-    """
-    mesh = UsdGeom.Mesh(prim)
-    points = np.asarray(mesh.GetPointsAttr().Get(), dtype=np.float64)
-    counts = np.asarray(mesh.GetFaceVertexCountsAttr().Get(), dtype=np.int64)
-    indices = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int64)
-    if points.size == 0 or counts.size == 0:
-        raise SystemExit(f"{prim.GetPath()}: declares {SURFACE_SIM} but carries no mesh")
-
-    # Fan-triangulate whatever polygons the asset authored; add_cloth_mesh takes triangles.
-    triangles, at = [], 0
-    for count in counts:
-        face = indices[at:at + count]
-        triangles.extend([face[0], face[i], face[i + 1]] for i in range(1, count - 1))
-        at += count
-    triangles = np.asarray(triangles, dtype=np.int64).reshape(-1)
-
-    material = _bound_material(stage, prim, SURFACE_MATERIAL)
-    if material is None:
-        raise SystemExit(f"{prim.GetPath()}: declares {SURFACE_SIM} but binds no {SURFACE_MATERIAL}; "
-                         f"refusing to invent the stiffness of a cloth")
-    thickness = _value(material, "physics:thickness")
-    stretch = _value(material, "physics:stretchStiffness")
-    bend = _value(material, "physics:bendStiffness")
-    shear = _value(material, "physics:shearStiffness")
-    density = _value(material, "physics:density")
-    if thickness is None:
-        raise SystemExit(f"{material.GetPath()} states no physics:thickness; a surface body is "
-                         f"refused before this, so a caller reached here without asking")
-    tri_ke = stretch * thickness if stretch is not None else None
-    edge_ke = bend * thickness ** 3 if bend is not None else None
-    areal_density = density * thickness if density is not None else None
-    radius = 0.5 * thickness
-    if shear is not None and report is not None:
-        report["shearStiffness"] = (shear, "dropped: Newton's isotropic membrane shares one "
-                                           "modulus between stretch and shear, as 1.5.0 warns")
-
-    import warp as wp
-    builder.add_cloth_mesh(pos=wp.vec3(0.0, 0.0, 0.0), rot=wp.quat_identity(), scale=1.0,
-                           vel=wp.vec3(0.0, 0.0, 0.0), vertices=points.tolist(),
-                           indices=triangles.tolist(), density=areal_density,
-                           tri_ke=tri_ke, tri_ka=0.0, edge_ke=edge_ke, particle_radius=radius)
-    return {"kind": "surface", "prim": str(prim.GetPath()), "thickness": thickness,
-            "tri_ke": tri_ke, "edge_ke": edge_ke, "density": areal_density, "particle_radius": radius}
-
-
-def _already_built(builder, points):
-    """Is this body's geometry already in the builder? Asked of its own first vertex.
-
-    At build time the importer has not moved anything, so a body it imported is in the particle
-    array at the coordinates the asset authored. Matching one authored point is enough to tell
-    "this body is in there" from "this body is missing", and it does not care what order the
-    importer used or how many other bodies there are.
-    """
-    if not builder.particle_count or points is None or not len(points):
-        return False
-    q = np.asarray(builder.particle_q, dtype=np.float64)
-    first = np.asarray(points[0], dtype=np.float64)
-    return bool((np.abs(q - first).max(axis=1) < 1e-9).any())
-
-
-def add_missing(builder, asset, report=None):
-    """Whatever the importer left out, built the way the engine's own examples build it.
-
-    Returns a list of what was added; empty means the importer had already covered everything.
-
-    Asked per body, not once for the whole asset. "The importer produced nothing" was the test,
-    and it is wrong for an asset that is more than one body: Newton 1.2.1 imports the *volume* of
-    a loaded polybag and knows nothing of `PhysicsSurfaceDeformableSimAPI`, so the film was
-    skipped because the filling was there, and the model was a bag of cotton with no bag. That is
-    the silent kind of wrong -- 10932 particles where the asset declares 18704 -- and it was
-    caught downstream by a count, which is a worse place to catch it than here.
-    """
-    stage = Usd.Stage.Open(str(asset))
-    added = []
-    for kind, prim in find(stage):
-        if kind != "surface":
-            continue                       # both versions' importers build volumes
-        points = UsdGeom.PointBased(prim).GetPointsAttr().Get()
-        if _already_built(builder, points):
-            continue
-        added.append(add_surface(builder, stage, prim, report))
-    return added
+    The importer is asked per body, because a count hides it: Newton 1.2.1's imported the cotton of
+    a loaded polybag and skipped its film, and the model was a bag of cotton with no bag."""
+    for _kind, sim, _render in bodies(stage):
+        builder_index(builder, sim)          # raises, naming the body, if any point is missing
 
 
 # ---------------------------------------------------------------- the structure an asset authors
